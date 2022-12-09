@@ -14,9 +14,9 @@ boolean-py==3.8 \
     # via
     #   license-expression
     #   reuse
-certifi==2022.6.15 \
-    --hash=sha256:84c85a9078b11105f04f3036a9482ae10e4621616db313fe045dd24743a0820d \
-    --hash=sha256:fe86415d55e84719d75f8b69414f6438ac3547d2078ab91b67e779ef69378412
+certifi==2022.12.7 \
+    --hash=sha256:35824b4c3a97115964b408844d64aa14db1cc518f6562e8d7261699d1350a9e3 \
+    --hash=sha256:4ad3232f5e926d6718ec31cfc1fcadfde020920e278684144551c91769c7bc18
     # via requests
 chardet==5.0.0 \
     --hash=sha256:0368df2bfd78b5fc20572bb4e9bb7fb53e2c094f60ae9993339e8671d0afb8aa \
@@ -41,9 +41,7 @@ jinja2==3.0.3 \
 license-expression==21.6.14 \
     --hash=sha256:324246eed8e138b4139fefdc0e9dc4161d5075e3929e56983966d37298dca30e \
     --hash=sha256:9de87a427c9a449eee7913472fb9ed03b63036295547369fdbf95f76a8b924b2
-    # via
-    #   -r reuse-requirements.in
-    #   reuse
+    # via reuse
 markupsafe==2.0.1 \
     --hash=sha256:01a9b8ea66f1658938f65b93a85ebe8bc016e6769611be228d797c9d998dd298 \
     --hash=sha256:023cb26ec21ece8dc3907c0e8320058b2e0cb3c55cf9564da612bc325bed5e64 \
