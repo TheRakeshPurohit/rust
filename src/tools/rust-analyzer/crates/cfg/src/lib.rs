@@ -1,7 +1,5 @@
 //! cfg defines conditional compiling options, `cfg` attribute parser and evaluator
 
-#![warn(rust_2018_idioms, unused_lifetimes, semicolon_in_expressions_from_macros)]
-
 mod cfg_expr;
 mod dnf;
 #[cfg(test)]
@@ -10,7 +8,8 @@ mod tests;
 use std::fmt;
 
 use rustc_hash::FxHashSet;
-use tt::SmolStr;
+
+use intern::{sym, Symbol};
 
 pub use cfg_expr::{CfgAtom, CfgExpr};
 pub use dnf::DnfExpr;
@@ -25,9 +24,15 @@ pub use dnf::DnfExpr;
 /// of key and value in `key_values`.
 ///
 /// See: <https://doc.rust-lang.org/reference/conditional-compilation.html#set-configuration-options>
-#[derive(Clone, PartialEq, Eq, Default)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CfgOptions {
     enabled: FxHashSet<CfgAtom>,
+}
+
+impl Default for CfgOptions {
+    fn default() -> Self {
+        Self { enabled: FxHashSet::from_iter([CfgAtom::Flag(sym::true_.clone())]) }
+    }
 }
 
 impl fmt::Debug for CfgOptions {
@@ -50,39 +55,88 @@ impl CfgOptions {
         cfg.fold(&|atom| self.enabled.contains(atom))
     }
 
-    pub fn insert_atom(&mut self, key: SmolStr) {
-        self.enabled.insert(CfgAtom::Flag(key));
+    pub fn check_atom(&self, cfg: &CfgAtom) -> bool {
+        self.enabled.contains(cfg)
     }
 
-    pub fn insert_key_value(&mut self, key: SmolStr, value: SmolStr) {
-        self.enabled.insert(CfgAtom::KeyValue { key, value });
+    pub fn insert_atom(&mut self, key: Symbol) {
+        self.insert_any_atom(CfgAtom::Flag(key));
+    }
+
+    pub fn insert_key_value(&mut self, key: Symbol, value: Symbol) {
+        self.insert_any_atom(CfgAtom::KeyValue { key, value });
     }
 
     pub fn apply_diff(&mut self, diff: CfgDiff) {
         for atom in diff.enable {
-            self.enabled.insert(atom);
+            self.insert_any_atom(atom);
         }
 
         for atom in diff.disable {
+            let (CfgAtom::Flag(sym) | CfgAtom::KeyValue { key: sym, .. }) = &atom;
+            if *sym == sym::true_ || *sym == sym::false_ {
+                tracing::error!("cannot remove `true` or `false` from cfg");
+                continue;
+            }
             self.enabled.remove(&atom);
         }
     }
 
-    pub fn get_cfg_keys(&self) -> impl Iterator<Item = &SmolStr> {
-        self.enabled.iter().map(|x| match x {
+    fn insert_any_atom(&mut self, atom: CfgAtom) {
+        let (CfgAtom::Flag(sym) | CfgAtom::KeyValue { key: sym, .. }) = &atom;
+        if *sym == sym::true_ || *sym == sym::false_ {
+            tracing::error!("cannot insert `true` or `false` to cfg");
+            return;
+        }
+        self.enabled.insert(atom);
+    }
+
+    pub fn get_cfg_keys(&self) -> impl Iterator<Item = &Symbol> {
+        self.enabled.iter().map(|it| match it {
             CfgAtom::Flag(key) => key,
             CfgAtom::KeyValue { key, .. } => key,
         })
     }
 
-    pub fn get_cfg_values<'a>(
-        &'a self,
-        cfg_key: &'a str,
-    ) -> impl Iterator<Item = &'a SmolStr> + 'a {
-        self.enabled.iter().filter_map(move |x| match x {
-            CfgAtom::KeyValue { key, value } if cfg_key == key => Some(value),
+    pub fn get_cfg_values<'a>(&'a self, cfg_key: &'a str) -> impl Iterator<Item = &'a Symbol> + 'a {
+        self.enabled.iter().filter_map(move |it| match it {
+            CfgAtom::KeyValue { key, value } if cfg_key == key.as_str() => Some(value),
             _ => None,
         })
+    }
+}
+
+impl Extend<CfgAtom> for CfgOptions {
+    fn extend<T: IntoIterator<Item = CfgAtom>>(&mut self, iter: T) {
+        iter.into_iter().for_each(|cfg_flag| self.insert_any_atom(cfg_flag));
+    }
+}
+
+impl IntoIterator for CfgOptions {
+    type Item = <FxHashSet<CfgAtom> as IntoIterator>::Item;
+
+    type IntoIter = <FxHashSet<CfgAtom> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        <FxHashSet<CfgAtom> as IntoIterator>::into_iter(self.enabled)
+    }
+}
+
+impl<'a> IntoIterator for &'a CfgOptions {
+    type Item = <&'a FxHashSet<CfgAtom> as IntoIterator>::Item;
+
+    type IntoIter = <&'a FxHashSet<CfgAtom> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        <&FxHashSet<CfgAtom> as IntoIterator>::into_iter(&self.enabled)
+    }
+}
+
+impl FromIterator<CfgAtom> for CfgOptions {
+    fn from_iter<T: IntoIterator<Item = CfgAtom>>(iter: T) -> Self {
+        let mut options = CfgOptions::default();
+        options.extend(iter);
+        options
     }
 }
 
@@ -98,11 +152,9 @@ impl CfgDiff {
     /// of both.
     pub fn new(enable: Vec<CfgAtom>, disable: Vec<CfgAtom>) -> Option<CfgDiff> {
         let mut occupied = FxHashSet::default();
-        for item in enable.iter().chain(disable.iter()) {
-            if !occupied.insert(item) {
-                // was present
-                return None;
-            }
+        if enable.iter().chain(disable.iter()).any(|item| !occupied.insert(item)) {
+            // was present
+            return None;
         }
 
         Some(CfgDiff { enable, disable })

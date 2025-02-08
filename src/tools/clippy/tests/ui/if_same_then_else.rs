@@ -29,7 +29,6 @@ fn if_same_then_else() {
         0..=10;
         foo();
     } else {
-        //~ ERROR same body as `if` block
         Foo { bar: 42 };
         0..10;
         ..;
@@ -38,6 +37,7 @@ fn if_same_then_else() {
         0..=10;
         foo();
     }
+    //~^^^^^^^^^^^^^^^^^ ERROR: this `if` has identical blocks
 
     if true {
         Foo { bar: 42 };
@@ -64,19 +64,11 @@ fn if_same_then_else() {
         foo();
     }
 
-    let _ = if true {
-        0.0
-    } else {
-        //~ ERROR same body as `if` block
-        0.0
-    };
+    let _ = if true { 0.0 } else { 0.0 };
+    //~^ ERROR: this `if` has identical blocks
 
-    let _ = if true {
-        -0.0
-    } else {
-        //~ ERROR same body as `if` block
-        -0.0
-    };
+    let _ = if true { -0.0 } else { -0.0 };
+    //~^ ERROR: this `if` has identical blocks
 
     let _ = if true { 0.0 } else { -0.0 };
 
@@ -87,12 +79,8 @@ fn if_same_then_else() {
         foo();
     }
 
-    let _ = if true {
-        42
-    } else {
-        //~ ERROR same body as `if` block
-        42
-    };
+    let _ = if true { 42 } else { 42 };
+    //~^ ERROR: this `if` has identical blocks
 
     if true {
         let bar = if true { 42 } else { 43 };
@@ -102,7 +90,6 @@ fn if_same_then_else() {
         }
         bar + 1;
     } else {
-        //~ ERROR same body as `if` block
         let bar = if true { 42 } else { 43 };
 
         while foo() {
@@ -110,6 +97,7 @@ fn if_same_then_else() {
         }
         bar + 1;
     }
+    //~^^^^^^^^^^^^^^^ ERROR: this `if` has identical blocks
 
     if true {
         let _ = match 42 {
@@ -210,6 +198,47 @@ mod issue_8836 {
         } else {
             println!("FOO");
             unimplemented!()
+        }
+    }
+}
+
+mod issue_11213 {
+    fn reproducer(x: bool) -> bool {
+        if x {
+            0_u8.is_power_of_two()
+        } else {
+            0_u16.is_power_of_two()
+        }
+    }
+
+    // a more obvious reproducer that shows
+    // why the code above is problematic:
+    fn v2(x: bool) -> bool {
+        trait Helper {
+            fn is_u8(&self) -> bool;
+        }
+        impl Helper for u8 {
+            fn is_u8(&self) -> bool {
+                true
+            }
+        }
+        impl Helper for u16 {
+            fn is_u8(&self) -> bool {
+                false
+            }
+        }
+
+        // this is certainly not the same code in both branches
+        // it returns a different bool depending on the branch.
+        if x { 0_u8.is_u8() } else { 0_u16.is_u8() }
+    }
+
+    fn do_lint(x: bool) -> bool {
+        // but do lint if the type of the literal is the same
+        if x {
+            0_u8.is_power_of_two()
+        } else {
+            0_u8.is_power_of_two()
         }
     }
 }

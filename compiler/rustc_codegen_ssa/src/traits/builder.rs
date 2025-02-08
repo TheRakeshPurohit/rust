@@ -1,28 +1,31 @@
+use std::assert_matches::assert_matches;
+use std::ops::Deref;
+
+use rustc_abi::{Align, BackendRepr, Scalar, Size, WrappingRange};
+use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs;
+use rustc_middle::ty::layout::{FnAbiOf, LayoutOf, TyAndLayout};
+use rustc_middle::ty::{Instance, Ty};
+use rustc_session::config::OptLevel;
+use rustc_span::Span;
+use rustc_target::callconv::FnAbi;
+
 use super::abi::AbiBuilderMethods;
 use super::asm::AsmBuilderMethods;
+use super::consts::ConstCodegenMethods;
 use super::coverageinfo::CoverageInfoBuilderMethods;
 use super::debuginfo::DebugInfoBuilderMethods;
-use super::intrinsic::IntrinsicCallMethods;
-use super::misc::MiscMethods;
-use super::type_::{ArgAbiMethods, BaseTypeMethods};
-use super::{HasCodegen, StaticBuilderMethods};
-
+use super::intrinsic::IntrinsicCallBuilderMethods;
+use super::misc::MiscCodegenMethods;
+use super::type_::{ArgAbiBuilderMethods, BaseTypeCodegenMethods, LayoutTypeCodegenMethods};
+use super::{CodegenMethods, StaticBuilderMethods};
+use crate::MemFlags;
 use crate::common::{
     AtomicOrdering, AtomicRmwBinOp, IntPredicate, RealPredicate, SynchronizationScope, TypeKind,
 };
-use crate::mir::operand::OperandRef;
-use crate::mir::place::PlaceRef;
-use crate::MemFlags;
+use crate::mir::operand::{OperandRef, OperandValue};
+use crate::mir::place::{PlaceRef, PlaceValue};
 
-use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs;
-use rustc_middle::ty::layout::{HasParamEnv, TyAndLayout};
-use rustc_middle::ty::Ty;
-use rustc_span::Span;
-use rustc_target::abi::call::FnAbi;
-use rustc_target::abi::{Abi, Align, Scalar, Size, WrappingRange};
-use rustc_target::spec::HasTargetSpec;
-
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum OverflowOp {
     Add,
     Sub,
@@ -30,17 +33,34 @@ pub enum OverflowOp {
 }
 
 pub trait BuilderMethods<'a, 'tcx>:
-    HasCodegen<'tcx>
+    Sized
+    + LayoutOf<'tcx, LayoutOfResult = TyAndLayout<'tcx>>
+    + FnAbiOf<'tcx, FnAbiOfResult = &'tcx FnAbi<'tcx, Ty<'tcx>>>
+    + Deref<Target = Self::CodegenCx>
     + CoverageInfoBuilderMethods<'tcx>
     + DebugInfoBuilderMethods
-    + ArgAbiMethods<'tcx>
+    + ArgAbiBuilderMethods<'tcx>
     + AbiBuilderMethods<'tcx>
-    + IntrinsicCallMethods<'tcx>
+    + IntrinsicCallBuilderMethods<'tcx>
     + AsmBuilderMethods<'tcx>
     + StaticBuilderMethods
-    + HasParamEnv<'tcx>
-    + HasTargetSpec
 {
+    // `BackendTypes` is a supertrait of both `CodegenMethods` and
+    // `BuilderMethods`. This bound ensures all impls agree on the associated
+    // types within.
+    type CodegenCx: CodegenMethods<
+            'tcx,
+            Value = Self::Value,
+            Metadata = Self::Metadata,
+            Function = Self::Function,
+            BasicBlock = Self::BasicBlock,
+            Type = Self::Type,
+            Funclet = Self::Funclet,
+            DIScope = Self::DIScope,
+            DILocation = Self::DILocation,
+            DIVariable = Self::DIVariable,
+        >;
+
     fn build(cx: &'a Self::CodegenCx, llbb: Self::BasicBlock) -> Self;
 
     fn cx(&self) -> &Self::CodegenCx;
@@ -64,6 +84,26 @@ pub trait BuilderMethods<'a, 'tcx>:
         then_llbb: Self::BasicBlock,
         else_llbb: Self::BasicBlock,
     );
+
+    // Conditional with expectation.
+    //
+    // This function is opt-in for back ends.
+    //
+    // The default implementation calls `self.expect()` before emiting the branch
+    // by calling `self.cond_br()`
+    fn cond_br_with_expect(
+        &mut self,
+        mut cond: Self::Value,
+        then_llbb: Self::BasicBlock,
+        else_llbb: Self::BasicBlock,
+        expect: Option<bool>,
+    ) {
+        if let Some(expect) = expect {
+            cond = self.expect(cond, expect);
+        }
+        self.cond_br(cond, then_llbb, else_llbb)
+    }
+
     fn switch(
         &mut self,
         v: Self::Value,
@@ -80,30 +120,44 @@ pub trait BuilderMethods<'a, 'tcx>:
         then: Self::BasicBlock,
         catch: Self::BasicBlock,
         funclet: Option<&Self::Funclet>,
+        instance: Option<Instance<'tcx>>,
     ) -> Self::Value;
     fn unreachable(&mut self);
 
     fn add(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn fadd(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn fadd_fast(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+    fn fadd_algebraic(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn sub(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn fsub(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn fsub_fast(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+    fn fsub_algebraic(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn mul(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn fmul(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn fmul_fast(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+    fn fmul_algebraic(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn udiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn exactudiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn sdiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn exactsdiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn fdiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn fdiv_fast(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+    fn fdiv_algebraic(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn urem(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn srem(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn frem(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn frem_fast(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+    fn frem_algebraic(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+    /// Generate a left-shift. Both operands must have the same size. The right operand must be
+    /// interpreted as unsigned and can be assumed to be less than the size of the left operand.
     fn shl(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+    /// Generate a logical right-shift. Both operands must have the same size. The right operand
+    /// must be interpreted as unsigned and can be assumed to be less than the size of the left
+    /// operand.
     fn lshr(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+    /// Generate an arithmetic right-shift. Both operands must have the same size. The right operand
+    /// must be interpreted as unsigned and can be assumed to be less than the size of the left
+    /// operand.
     fn ashr(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn unchecked_sadd(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn unchecked_uadd(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
@@ -113,6 +167,11 @@ pub trait BuilderMethods<'a, 'tcx>:
     fn unchecked_umul(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn and(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn or(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+    /// Defaults to [`Self::or`], but guarantees `(lhs & rhs) == 0` so some backends
+    /// can emit something more helpful for optimizations.
+    fn or_disjoint(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        self.or(lhs, rhs)
+    }
     fn xor(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn neg(&mut self, v: Self::Value) -> Self::Value;
     fn fneg(&mut self, v: Self::Value) -> Self::Value;
@@ -128,7 +187,7 @@ pub trait BuilderMethods<'a, 'tcx>:
 
     fn from_immediate(&mut self, val: Self::Value) -> Self::Value;
     fn to_immediate(&mut self, val: Self::Value, layout: TyAndLayout<'_>) -> Self::Value {
-        if let Abi::Scalar(scalar) = layout.abi {
+        if let BackendRepr::Scalar(scalar) = layout.backend_repr {
             self.to_immediate_scalar(val, scalar)
         } else {
             val
@@ -136,8 +195,8 @@ pub trait BuilderMethods<'a, 'tcx>:
     }
     fn to_immediate_scalar(&mut self, val: Self::Value, scalar: Scalar) -> Self::Value;
 
-    fn alloca(&mut self, ty: Self::Type, align: Align) -> Self::Value;
-    fn byte_array_alloca(&mut self, len: Self::Value, align: Align) -> Self::Value;
+    fn alloca(&mut self, size: Size, align: Align) -> Self::Value;
+    fn dynamic_alloca(&mut self, size: Self::Value, align: Align) -> Self::Value;
 
     fn load(&mut self, ty: Self::Type, ptr: Self::Value, align: Align) -> Self::Value;
     fn volatile_load(&mut self, ty: Self::Type, ptr: Self::Value) -> Self::Value;
@@ -148,6 +207,10 @@ pub trait BuilderMethods<'a, 'tcx>:
         order: AtomicOrdering,
         size: Size,
     ) -> Self::Value;
+    fn load_from_place(&mut self, ty: Self::Type, place: PlaceValue<Self::Value>) -> Self::Value {
+        assert_eq!(place.llextra, None);
+        self.load(ty, place.llval, place.align)
+    }
     fn load_operand(&mut self, place: PlaceRef<'tcx, Self::Value>)
     -> OperandRef<'tcx, Self::Value>;
 
@@ -159,10 +222,35 @@ pub trait BuilderMethods<'a, 'tcx>:
         dest: PlaceRef<'tcx, Self::Value>,
     );
 
+    /// Emits an `assume` that the integer value `imm` of type `ty` is contained in `range`.
+    ///
+    /// This *always* emits the assumption, so you probably want to check the
+    /// optimization level and `Scalar::is_always_valid` before calling it.
+    fn assume_integer_range(&mut self, imm: Self::Value, ty: Self::Type, range: WrappingRange) {
+        let WrappingRange { start, end } = range;
+
+        // Perhaps one day we'll be able to use assume operand bundles for this,
+        // but for now this encoding with a single icmp+assume is best per
+        // <https://github.com/llvm/llvm-project/issues/123278#issuecomment-2597440158>
+        let shifted = if start == 0 {
+            imm
+        } else {
+            let low = self.const_uint_big(ty, start);
+            self.sub(imm, low)
+        };
+        let width = self.const_uint_big(ty, u128::wrapping_sub(end, start));
+        let cmp = self.icmp(IntPredicate::IntULE, shifted, width);
+        self.assume(cmp);
+    }
+
     fn range_metadata(&mut self, load: Self::Value, range: WrappingRange);
     fn nonnull_metadata(&mut self, load: Self::Value);
 
     fn store(&mut self, val: Self::Value, ptr: Self::Value, align: Align) -> Self::Value;
+    fn store_to_place(&mut self, val: Self::Value, place: PlaceValue<Self::Value>) -> Self::Value {
+        assert_eq!(place.llextra, None);
+        self.store(val, place.llval, place.align)
+    }
     fn store_with_flags(
         &mut self,
         val: Self::Value,
@@ -170,6 +258,15 @@ pub trait BuilderMethods<'a, 'tcx>:
         align: Align,
         flags: MemFlags,
     ) -> Self::Value;
+    fn store_to_place_with_flags(
+        &mut self,
+        val: Self::Value,
+        place: PlaceValue<Self::Value>,
+        flags: MemFlags,
+    ) -> Self::Value {
+        assert_eq!(place.llextra, None);
+        self.store_with_flags(val, place.llval, place.align, flags)
+    }
     fn atomic_store(
         &mut self,
         val: Self::Value,
@@ -185,7 +282,12 @@ pub trait BuilderMethods<'a, 'tcx>:
         ptr: Self::Value,
         indices: &[Self::Value],
     ) -> Self::Value;
-    fn struct_gep(&mut self, ty: Self::Type, ptr: Self::Value, idx: u64) -> Self::Value;
+    fn ptradd(&mut self, ptr: Self::Value, offset: Self::Value) -> Self::Value {
+        self.gep(self.cx().type_i8(), ptr, &[offset])
+    }
+    fn inbounds_ptradd(&mut self, ptr: Self::Value, offset: Self::Value) -> Self::Value {
+        self.inbounds_gep(self.cx().type_i8(), ptr, &[offset])
+    }
 
     fn trunc(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value;
     fn sext(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value;
@@ -217,7 +319,10 @@ pub trait BuilderMethods<'a, 'tcx>:
         } else {
             (in_ty, dest_ty)
         };
-        assert!(matches!(self.cx().type_kind(float_ty), TypeKind::Float | TypeKind::Double));
+        assert_matches!(
+            self.cx().type_kind(float_ty),
+            TypeKind::Half | TypeKind::Float | TypeKind::Double | TypeKind::FP128
+        );
         assert_eq!(self.cx().type_kind(int_ty), TypeKind::Integer);
 
         if let Some(false) = self.cx().sess().opts.unstable_opts.saturating_float_casts {
@@ -256,6 +361,71 @@ pub trait BuilderMethods<'a, 'tcx>:
         align: Align,
         flags: MemFlags,
     );
+
+    /// *Typed* copy for non-overlapping places.
+    ///
+    /// Has a default implementation in terms of `memcpy`, but specific backends
+    /// can override to do something smarter if possible.
+    ///
+    /// (For example, typed load-stores with alias metadata.)
+    fn typed_place_copy(
+        &mut self,
+        dst: PlaceValue<Self::Value>,
+        src: PlaceValue<Self::Value>,
+        layout: TyAndLayout<'tcx>,
+    ) {
+        self.typed_place_copy_with_flags(dst, src, layout, MemFlags::empty());
+    }
+
+    fn typed_place_copy_with_flags(
+        &mut self,
+        dst: PlaceValue<Self::Value>,
+        src: PlaceValue<Self::Value>,
+        layout: TyAndLayout<'tcx>,
+        flags: MemFlags,
+    ) {
+        assert!(layout.is_sized(), "cannot typed-copy an unsigned type");
+        assert!(src.llextra.is_none(), "cannot directly copy from unsized values");
+        assert!(dst.llextra.is_none(), "cannot directly copy into unsized values");
+        if flags.contains(MemFlags::NONTEMPORAL) {
+            // HACK(nox): This is inefficient but there is no nontemporal memcpy.
+            let ty = self.backend_type(layout);
+            let val = self.load_from_place(ty, src);
+            self.store_to_place_with_flags(val, dst, flags);
+        } else if self.sess().opts.optimize == OptLevel::No && self.is_backend_immediate(layout) {
+            // If we're not optimizing, the aliasing information from `memcpy`
+            // isn't useful, so just load-store the value for smaller code.
+            let temp = self.load_operand(src.with_type(layout));
+            temp.val.store_with_flags(self, dst.with_type(layout), flags);
+        } else if !layout.is_zst() {
+            let bytes = self.const_usize(layout.size.bytes());
+            self.memcpy(dst.llval, dst.align, src.llval, src.align, bytes, flags);
+        }
+    }
+
+    /// *Typed* swap for non-overlapping places.
+    ///
+    /// Avoids `alloca`s for Immediates and ScalarPairs.
+    ///
+    /// FIXME: Maybe do something smarter for Ref types too?
+    /// For now, the `typed_swap_nonoverlapping` intrinsic just doesn't call this for those
+    /// cases (in non-debug), preferring the fallback body instead.
+    fn typed_place_swap(
+        &mut self,
+        left: PlaceValue<Self::Value>,
+        right: PlaceValue<Self::Value>,
+        layout: TyAndLayout<'tcx>,
+    ) {
+        let mut temp = self.load_operand(left.with_type(layout));
+        if let OperandValue::Ref(..) = temp.val {
+            // The SSA value isn't stand-alone, so we need to copy it elsewhere
+            let alloca = PlaceRef::alloca(self, layout);
+            self.typed_place_copy(alloca.val, left, layout);
+            temp = self.load_operand(alloca);
+        }
+        self.typed_place_copy(left, right, layout);
+        temp.val.store(self, right.with_type(layout));
+    }
 
     fn select(
         &mut self,
@@ -296,7 +466,7 @@ pub trait BuilderMethods<'a, 'tcx>:
         order: AtomicOrdering,
         failure_order: AtomicOrdering,
         weak: bool,
-    ) -> Self::Value;
+    ) -> (Self::Value, Self::Value);
     fn atomic_rmw(
         &mut self,
         op: AtomicRmwBinOp,
@@ -313,14 +483,6 @@ pub trait BuilderMethods<'a, 'tcx>:
     /// Called for `StorageDead`
     fn lifetime_end(&mut self, ptr: Self::Value, size: Size);
 
-    fn instrprof_increment(
-        &mut self,
-        fn_name: Self::Value,
-        hash: Self::Value,
-        num_counters: Self::Value,
-        index: Self::Value,
-    );
-
     fn call(
         &mut self,
         llty: Self::Type,
@@ -329,8 +491,9 @@ pub trait BuilderMethods<'a, 'tcx>:
         llfn: Self::Value,
         args: &[Self::Value],
         funclet: Option<&Self::Funclet>,
+        instance: Option<Instance<'tcx>>,
     ) -> Self::Value;
     fn zext(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value;
 
-    fn do_not_inline(&mut self, llret: Self::Value);
+    fn apply_attrs_to_cleanup_callsite(&mut self, llret: Self::Value);
 }

@@ -8,7 +8,7 @@ fi
 
 if [ "$NO_CHANGE_USER" = "" ]; then
   if [ "$LOCAL_USER_ID" != "" ]; then
-    useradd --shell /bin/bash -u $LOCAL_USER_ID -o -c "" -m user
+    id -u user &>/dev/null || useradd --shell /bin/bash -u $LOCAL_USER_ID -o -c "" -m user
     export HOME=/home/user
     unset LOCAL_USER_ID
 
@@ -19,7 +19,7 @@ if [ "$NO_CHANGE_USER" = "" ]; then
     # already be running with the right user.
     #
     # For NO_CHANGE_USER done in the small number of Dockerfiles affected.
-    echo -e '[safe]\n\tdirectory = *' > /home/user/gitconfig
+    echo -e '[safe]\n\tdirectory = *' > /home/user/.gitconfig
 
     exec su --preserve-environment -c "env PATH=$PATH \"$0\"" user
   fi
@@ -47,7 +47,15 @@ source "$ci_dir/shared.sh"
 
 export CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 
-if ! isCI || isCiBranch auto || isCiBranch beta || isCiBranch try || isCiBranch try-perf; then
+# If runner uses an incompatible option and `FORCE_CI_RUSTC` is not defined,
+# switch to in-tree rustc.
+if [ "$FORCE_CI_RUSTC" == "" ]; then
+    echo 'debug: `DISABLE_CI_RUSTC_IF_INCOMPATIBLE` configured.'
+    DISABLE_CI_RUSTC_IF_INCOMPATIBLE=1
+fi
+
+if ! isCI || isCiBranch auto || isCiBranch beta || isCiBranch try || isCiBranch try-perf || \
+  isCiBranch automation/bors/try; then
     RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --set build.print-step-timings --enable-verbose-tests"
     RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --set build.metrics"
     HAS_METRICS=1
@@ -70,7 +78,7 @@ RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --set dist.compression-profile=balance
 # the LLVM build, as not to run out of memory.
 # This is an attempt to fix the spurious build error tracked by
 # https://github.com/rust-lang/rust/issues/108227.
-if isWindows && [[ ${CUSTOM_MINGW-0} -eq 1 ]]; then
+if isKnownToBeMingwBuild; then
     RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --set llvm.link-jobs=1"
 fi
 
@@ -78,6 +86,21 @@ fi
 # process by recompressing the existing xz ones. This decreases the storage
 # space required for CI artifacts.
 RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --dist-compression-formats=xz"
+
+if [ "$EXTERNAL_LLVM" = "1" ]; then
+  RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --set rust.lld=false"
+fi
+
+# Enable the `c` feature for compiler_builtins, but only when the `compiler-rt` source is available
+# (to avoid spending a lot of time cloning llvm)
+if [ "$EXTERNAL_LLVM" = "" ]; then
+  RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --set build.optimized-compiler-builtins"
+  # Likewise, only demand we test all LLVM components if we know we built LLVM with them
+  export COMPILETEST_REQUIRE_ALL_LLVM_COMPONENTS=1
+elif [ "$DEPLOY$DEPLOY_ALT" = "1" ]; then
+    echo "error: dist builds should always use optimized compiler-rt!" >&2
+    exit 1
+fi
 
 if [ "$DIST_SRC" = "" ]; then
   RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --disable-dist-src"
@@ -92,17 +115,22 @@ RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --release-channel=$RUST_RELEASE_CHANNE
 if [ "$DEPLOY$DEPLOY_ALT" = "1" ]; then
   RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --enable-llvm-static-stdcpp"
   RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --set rust.remap-debuginfo"
-  RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --debuginfo-level-std=1"
+
+  if [ "$DEPLOY_ALT" != "" ] && isLinux; then
+    RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --debuginfo-level=2"
+  else
+    RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --debuginfo-level-std=1"
+  fi
 
   if [ "$NO_LLVM_ASSERTIONS" = "1" ]; then
     RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --disable-llvm-assertions"
   elif [ "$DEPLOY_ALT" != "" ]; then
-    if [ "$NO_PARALLEL_COMPILER" = "" ]; then
-      RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --set rust.parallel-compiler"
-    fi
     RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --enable-llvm-assertions"
     RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --set rust.verify-llvm-ir"
   fi
+
+  CODEGEN_BACKENDS="${CODEGEN_BACKENDS:-llvm}"
+  RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --set rust.codegen-backends=$CODEGEN_BACKENDS"
 else
   # We almost always want debug assertions enabled, but sometimes this takes too
   # long for too little benefit, so we just turn them off.
@@ -123,6 +151,17 @@ else
 
   RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --set rust.verify-llvm-ir"
 
+  # When running gcc backend tests, we need to install `libgccjit` and to not run llvm codegen
+  # tests as it will fail them.
+  if [[ "${ENABLE_GCC_CODEGEN}" == "1" ]]; then
+    # Test the Cranelift and GCC backends in CI. Bootstrap knows which targets to run tests on.
+    CODEGEN_BACKENDS="${CODEGEN_BACKENDS:-llvm,cranelift,gcc}"
+  else
+    # Test the Cranelift backend in CI. Bootstrap knows which targets to run tests on.
+    CODEGEN_BACKENDS="${CODEGEN_BACKENDS:-llvm,cranelift}"
+  fi
+  RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --set rust.codegen-backends=$CODEGEN_BACKENDS"
+
   # We enable this for non-dist builders, since those aren't trying to produce
   # fresh binaries. We currently don't entirely support distributing a fresh
   # copy of the compiler (including llvm tools, etc.) if we haven't actually
@@ -132,35 +171,51 @@ else
   # LLVM continuously on at least some builders to ensure it works, though.
   # (And PGO is its own can of worms).
   if [ "$NO_DOWNLOAD_CI_LLVM" = "" ]; then
-    RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --set llvm.download-ci-llvm=if-available"
+    RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --set llvm.download-ci-llvm=if-unchanged"
   else
+    # CI rustc requires CI LLVM to be enabled (see https://github.com/rust-lang/rust/issues/123586).
+    NO_DOWNLOAD_CI_RUSTC=1
     # When building for CI we want to use the static C++ Standard library
     # included with LLVM, since a dynamic libstdcpp may not be available.
     RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --set llvm.static-libstdcpp"
   fi
+
+  if [ "$NO_DOWNLOAD_CI_RUSTC" = "" ]; then
+    RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --set rust.download-rustc=if-unchanged"
+  fi
 fi
 
-if [ "$RUST_RELEASE_CHANNEL" = "nightly" ] || [ "$DIST_REQUIRE_ALL_TOOLS" = "" ]; then
-    RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --enable-missing-tools"
-fi
-
-# Unless we're using an older version of LLVM, check that all LLVM components
-# used by tests are available.
-if [ "$IS_NOT_LATEST_LLVM" = "" ]; then
-  export COMPILETEST_NEEDS_ALL_LLVM_COMPONENTS=1
+if [ "$ENABLE_GCC_CODEGEN" = "1" ]; then
+  # If `ENABLE_GCC_CODEGEN` is set and not empty, we add the `--enable-new-symbol-mangling`
+  # argument to `RUST_CONFIGURE_ARGS` and set the `GCC_EXEC_PREFIX` environment variable.
+  # `cg_gcc` doesn't support the legacy mangling so we need to enforce the new one
+  # if we run `cg_gcc` tests.
+  RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --enable-new-symbol-mangling"
 fi
 
 # Print the date from the local machine and the date from an external source to
 # check for clock drifts. An HTTP URL is used instead of HTTPS since on Azure
 # Pipelines it happened that the certificates were marked as expired.
 datecheck() {
-  echo "== clock drift check =="
+  # If an error has happened, we do not want to start a new group, because that will collapse
+  # a previous group that might have contained the error log.
+  exit_code=$?
+
+  if [ $exit_code -eq 0 ]
+  then
+    echo "::group::Clock drift check"
+  fi
+
   echo -n "  local time: "
   date
   echo -n "  network time: "
   curl -fs --head http://ci-caches.rust-lang.org | grep ^Date: \
       | sed 's/Date: //g' || true
-  echo "== end clock drift check =="
+
+  if [ $exit_code -eq 0 ]
+  then
+    echo "::endgroup::"
+  fi
 }
 datecheck
 trap datecheck EXIT
@@ -171,12 +226,16 @@ trap datecheck EXIT
 # sccache server at the start of the build, but no need to worry if this fails.
 SCCACHE_IDLE_TIMEOUT=10800 sccache --start-server || true
 
+# Our build may overwrite config.toml, so we remove it here
+rm -f config.toml
+
 $SRC/configure $RUST_CONFIGURE_ARGS
 
 retry make prepare
 
 # Display the CPU and memory information. This helps us know why the CI timing
 # is fluctuating.
+echo "::group::Display CPU and Memory information"
 if isMacOS; then
     system_profiler SPHardwareDataType || true
     sysctl hw || true
@@ -186,8 +245,10 @@ else
     cat /proc/meminfo || true
     ncpus=$(grep processor /proc/cpuinfo | wc -l)
 fi
+echo "::endgroup::"
 
 if [ ! -z "$SCRIPT" ]; then
+  echo "Executing ${SCRIPT}"
   sh -x -c "$SCRIPT"
 else
   do_make() {
@@ -202,7 +263,7 @@ fi
 
 if [ "$RUN_CHECK_WITH_PARALLEL_QUERIES" != "" ]; then
   rm -f config.toml
-  $SRC/configure --set rust.parallel-compiler
+  $SRC/configure --set change-id=99999999
 
   # Save the build metrics before we wipe the directory
   if [ "$HAS_METRICS" = 1 ]; then
@@ -217,4 +278,6 @@ if [ "$RUN_CHECK_WITH_PARALLEL_QUERIES" != "" ]; then
   CARGO_INCREMENTAL=0 ../x check
 fi
 
+echo "::group::sccache stats"
 sccache --show-stats || true
+echo "::endgroup::"

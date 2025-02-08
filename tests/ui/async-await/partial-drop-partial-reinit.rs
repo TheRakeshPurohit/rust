@@ -1,7 +1,4 @@
-// edition:2021
-// revisions: no_drop_tracking drop_tracking
-// [drop_tracking] compile-flags: -Zdrop-tracking=yes
-// [no_drop_tracking] compile-flags: -Zdrop-tracking=no
+//@ edition:2021
 #![feature(negative_impls)]
 #![allow(unused)]
 
@@ -11,7 +8,6 @@ fn main() {
     //~| NOTE cannot be sent
     //~| NOTE bound introduced by
     //~| NOTE appears within the type
-    //~| NOTE captures the following types
 }
 
 fn gimme_send<T: Send>(t: T) {
@@ -29,7 +25,7 @@ impl Drop for NotSend {
 impl !Send for NotSend {}
 
 async fn foo() {
-    //~^ NOTE used within this `async fn` body
+    //~^ NOTE used within this `async` fn body
     //~| NOTE within this `impl Future
     let mut x = (NotSend {},);
     drop(x.0);

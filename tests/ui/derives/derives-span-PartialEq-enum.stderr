@@ -1,4 +1,4 @@
-error[E0369]: binary operation `==` cannot be applied to type `Error`
+error[E0369]: binary operation `==` cannot be applied to type `&Error`
   --> $DIR/derives-span-PartialEq-enum.rs:9:6
    |
 LL | #[derive(PartialEq)]
@@ -19,6 +19,6 @@ LL + #[derive(PartialEq)]
 LL | struct Error;
    |
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0369`.

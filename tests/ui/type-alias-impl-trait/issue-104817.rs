@@ -2,8 +2,8 @@
 #![cfg_attr(specialized, feature(specialization))]
 #![allow(incomplete_features)]
 
-// revisions: stock specialized
-// [specialized]check-pass
+//@ revisions: stock specialized
+//@ [specialized]check-pass
 
 trait OpaqueTrait {}
 impl<T> OpaqueTrait for T {}
@@ -14,6 +14,6 @@ fn mk_opaque() -> OpaqueType {
 trait AnotherTrait {}
 impl<T: Send> AnotherTrait for T {}
 impl AnotherTrait for OpaqueType {}
-//[stock]~^ conflicting implementations of trait `AnotherTrait` for type `OpaqueType`
+//[stock]~^ conflicting implementations of trait `AnotherTrait`
 
 fn main() {}

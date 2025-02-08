@@ -1,4 +1,4 @@
-FROM ubuntu:18.04
+FROM ubuntu:22.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   clang \
@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   sudo \
   bzip2 \
   xz-utils \
+  texinfo \
   wget \
   libssl-dev \
   pkg-config \

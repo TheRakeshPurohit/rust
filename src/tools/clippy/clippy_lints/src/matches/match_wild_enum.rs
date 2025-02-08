@@ -1,9 +1,9 @@
-use clippy_utils::diagnostics::span_lint_and_sugg;
+use clippy_utils::diagnostics::{span_lint_and_sugg, span_lint_and_then};
 use clippy_utils::ty::is_type_diagnostic_item;
 use clippy_utils::{is_refutable, peel_hir_pat_refs, recurse_or_patterns};
 use rustc_errors::Applicability;
 use rustc_hir::def::{CtorKind, DefKind, Res};
-use rustc_hir::{Arm, Expr, PatKind, PathSegment, QPath, Ty, TyKind};
+use rustc_hir::{Arm, Expr, PatExpr, PatExprKind, PatKind, PathSegment, QPath, Ty, TyKind};
 use rustc_lint::LateContext;
 use rustc_middle::ty::{self, VariantDef};
 use rustc_span::sym;
@@ -60,8 +60,13 @@ pub(crate) fn check(cx: &LateContext<'_>, ex: &Expr<'_>, arms: &[Arm<'_>]) {
         // covered by the set of guards that cover it, but that's really hard to do.
         recurse_or_patterns(arm.pat, |pat| {
             let path = match &peel_hir_pat_refs(pat).0.kind {
-                PatKind::Path(path) => {
-                    let id = match cx.qpath_res(path, pat.hir_id) {
+                PatKind::Expr(PatExpr {
+                    hir_id,
+                    kind: PatExprKind::Path(path),
+                    ..
+                }) => {
+                    // FIXME(clippy): don't you want to use the hir id of the peeled pat?
+                    let id = match cx.qpath_res(path, *hir_id) {
                         Res::Def(
                             DefKind::Const | DefKind::ConstParam | DefKind::AnonConst | DefKind::InlineConst,
                             _,
@@ -143,30 +148,34 @@ pub(crate) fn check(cx: &LateContext<'_>, ex: &Expr<'_>, arms: &[Arm<'_>]) {
             MATCH_WILDCARD_FOR_SINGLE_VARIANTS,
             wildcard_span,
             "wildcard matches only a single variant and will also match any future added variants",
-            "try this",
+            "try",
             format_suggestion(x),
             Applicability::MaybeIncorrect,
         ),
         variants => {
-            let mut suggestions: Vec<_> = variants.iter().copied().map(format_suggestion).collect();
-            let message = if adt_def.is_variant_list_non_exhaustive() || has_external_hidden {
-                suggestions.push("_".into());
-                "wildcard matches known variants and will also match future added variants"
+            let (message, add_wildcard) = if adt_def.is_variant_list_non_exhaustive() || has_external_hidden {
+                (
+                    "wildcard matches known variants and will also match future added variants",
+                    true,
+                )
             } else {
-                "wildcard match will also match any future added variants"
+                ("wildcard match will also match any future added variants", false)
             };
 
-            span_lint_and_sugg(
-                cx,
-                WILDCARD_ENUM_MATCH_ARM,
-                wildcard_span,
-                message,
-                "try this",
-                suggestions.join(" | "),
-                Applicability::MaybeIncorrect,
-            );
+            span_lint_and_then(cx, WILDCARD_ENUM_MATCH_ARM, wildcard_span, message, |diag| {
+                let mut suggestions: Vec<_> = variants.iter().copied().map(format_suggestion).collect();
+                if add_wildcard {
+                    suggestions.push("_".into());
+                }
+                diag.span_suggestion(
+                    wildcard_span,
+                    "try",
+                    suggestions.join(" | "),
+                    Applicability::MaybeIncorrect,
+                );
+            });
         },
-    };
+    }
 }
 
 enum CommonPrefixSearcher<'a> {
@@ -176,9 +185,8 @@ enum CommonPrefixSearcher<'a> {
 }
 impl<'a> CommonPrefixSearcher<'a> {
     fn with_path(&mut self, path: &'a [PathSegment<'a>]) {
-        match path {
-            [path @ .., _] => self.with_prefix(path),
-            [] => (),
+        if let [path @ .., _] = path {
+            self.with_prefix(path);
         }
     }
 

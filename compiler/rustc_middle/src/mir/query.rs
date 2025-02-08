@@ -1,142 +1,31 @@
 //! Values computed by queries that use MIR.
 
-use crate::mir::ConstantKind;
-use crate::ty::{self, OpaqueHiddenType, Ty, TyCtxt};
+use std::fmt::{self, Debug};
+
+use rustc_abi::{FieldIdx, VariantIdx};
 use rustc_data_structures::fx::FxIndexMap;
-use rustc_data_structures::unord::UnordSet;
 use rustc_errors::ErrorGuaranteed;
-use rustc_hir as hir;
 use rustc_hir::def_id::LocalDefId;
 use rustc_index::bit_set::BitMatrix;
 use rustc_index::{Idx, IndexVec};
-use rustc_span::Span;
-use rustc_target::abi::{FieldIdx, VariantIdx};
+use rustc_macros::{HashStable, TyDecodable, TyEncodable, TypeFoldable, TypeVisitable};
+use rustc_span::{Span, Symbol};
 use smallvec::SmallVec;
-use std::cell::Cell;
-use std::fmt::{self, Debug};
 
-use super::SourceInfo;
-
-#[derive(Copy, Clone, PartialEq, TyEncodable, TyDecodable, HashStable, Debug)]
-pub enum UnsafetyViolationKind {
-    /// Unsafe operation outside `unsafe`.
-    General,
-    /// Unsafe operation in an `unsafe fn` but outside an `unsafe` block.
-    /// Has to be handled as a lint for backwards compatibility.
-    UnsafeFn,
-}
-
-#[derive(Copy, Clone, PartialEq, TyEncodable, TyDecodable, HashStable, Debug)]
-pub enum UnsafetyViolationDetails {
-    CallToUnsafeFunction,
-    UseOfInlineAssembly,
-    InitializingTypeWith,
-    CastOfPointerToInt,
-    UseOfMutableStatic,
-    UseOfExternStatic,
-    DerefOfRawPointer,
-    AccessToUnionField,
-    MutationOfLayoutConstrainedField,
-    BorrowOfLayoutConstrainedField,
-    CallToFunctionWith,
-}
-
-impl UnsafetyViolationDetails {
-    pub fn description_and_note(&self) -> (&'static str, &'static str) {
-        use UnsafetyViolationDetails::*;
-        match self {
-            CallToUnsafeFunction => (
-                "call to unsafe function",
-                "consult the function's documentation for information on how to avoid undefined \
-                 behavior",
-            ),
-            UseOfInlineAssembly => (
-                "use of inline assembly",
-                "inline assembly is entirely unchecked and can cause undefined behavior",
-            ),
-            InitializingTypeWith => (
-                "initializing type with `rustc_layout_scalar_valid_range` attr",
-                "initializing a layout restricted type's field with a value outside the valid \
-                 range is undefined behavior",
-            ),
-            CastOfPointerToInt => {
-                ("cast of pointer to int", "casting pointers to integers in constants")
-            }
-            UseOfMutableStatic => (
-                "use of mutable static",
-                "mutable statics can be mutated by multiple threads: aliasing violations or data \
-                 races will cause undefined behavior",
-            ),
-            UseOfExternStatic => (
-                "use of extern static",
-                "extern statics are not controlled by the Rust type system: invalid data, \
-                 aliasing violations or data races will cause undefined behavior",
-            ),
-            DerefOfRawPointer => (
-                "dereference of raw pointer",
-                "raw pointers may be null, dangling or unaligned; they can violate aliasing rules \
-                 and cause data races: all of these are undefined behavior",
-            ),
-            AccessToUnionField => (
-                "access to union field",
-                "the field may not be properly initialized: using uninitialized data will cause \
-                 undefined behavior",
-            ),
-            MutationOfLayoutConstrainedField => (
-                "mutation of layout constrained field",
-                "mutating layout constrained fields cannot statically be checked for valid values",
-            ),
-            BorrowOfLayoutConstrainedField => (
-                "borrow of layout constrained field with interior mutability",
-                "references to fields of layout constrained fields lose the constraints. Coupled \
-                 with interior mutability, the field can be changed to invalid values",
-            ),
-            CallToFunctionWith => (
-                "call to function with `#[target_feature]`",
-                "can only be called if the required target features are available",
-            ),
-        }
-    }
-}
-
-#[derive(Copy, Clone, PartialEq, TyEncodable, TyDecodable, HashStable, Debug)]
-pub struct UnsafetyViolation {
-    pub source_info: SourceInfo,
-    pub lint_root: hir::HirId,
-    pub kind: UnsafetyViolationKind,
-    pub details: UnsafetyViolationDetails,
-}
-
-#[derive(Copy, Clone, PartialEq, TyEncodable, TyDecodable, HashStable, Debug)]
-pub enum UnusedUnsafe {
-    /// `unsafe` block contains no unsafe operations
-    /// > ``unnecessary `unsafe` block``
-    Unused,
-    /// `unsafe` block nested under another (used) `unsafe` block
-    /// > ``… because it's nested under this `unsafe` block``
-    InUnsafeBlock(hir::HirId),
-}
-
-#[derive(TyEncodable, TyDecodable, HashStable, Debug)]
-pub struct UnsafetyCheckResult {
-    /// Violations that are propagated *upwards* from this function.
-    pub violations: Vec<UnsafetyViolation>,
-
-    /// Used `unsafe` blocks in this function. This is used for the "unused_unsafe" lint.
-    pub used_unsafe_blocks: UnordSet<hir::HirId>,
-
-    /// This is `Some` iff the item is not a closure.
-    pub unused_unsafes: Option<Vec<(hir::HirId, UnusedUnsafe)>>,
-}
+use super::{ConstValue, SourceInfo};
+use crate::ty::fold::fold_regions;
+use crate::ty::{self, CoroutineArgsExt, OpaqueHiddenType, Ty, TyCtxt};
 
 rustc_index::newtype_index! {
     #[derive(HashStable)]
+    #[encodable]
     #[debug_format = "_{}"]
-    pub struct GeneratorSavedLocal {}
+    pub struct CoroutineSavedLocal {}
 }
 
-#[derive(Clone, Debug, TyEncodable, TyDecodable, HashStable, TypeFoldable, TypeVisitable)]
-pub struct GeneratorSavedTy<'tcx> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(TyEncodable, TyDecodable, HashStable, TypeFoldable, TypeVisitable)]
+pub struct CoroutineSavedTy<'tcx> {
     pub ty: Ty<'tcx>,
     /// Source info corresponding to the local in the original MIR body.
     pub source_info: SourceInfo,
@@ -144,15 +33,19 @@ pub struct GeneratorSavedTy<'tcx> {
     pub ignore_for_traits: bool,
 }
 
-/// The layout of generator state.
-#[derive(Clone, TyEncodable, TyDecodable, HashStable, TypeFoldable, TypeVisitable)]
-pub struct GeneratorLayout<'tcx> {
-    /// The type of every local stored inside the generator.
-    pub field_tys: IndexVec<GeneratorSavedLocal, GeneratorSavedTy<'tcx>>,
+/// The layout of coroutine state.
+#[derive(Clone, PartialEq, Eq)]
+#[derive(TyEncodable, TyDecodable, HashStable, TypeFoldable, TypeVisitable)]
+pub struct CoroutineLayout<'tcx> {
+    /// The type of every local stored inside the coroutine.
+    pub field_tys: IndexVec<CoroutineSavedLocal, CoroutineSavedTy<'tcx>>,
+
+    /// The name for debuginfo.
+    pub field_names: IndexVec<CoroutineSavedLocal, Option<Symbol>>,
 
     /// Which of the above fields are in each variant. Note that one field may
     /// be stored in multiple variants.
-    pub variant_fields: IndexVec<VariantIdx, IndexVec<FieldIdx, GeneratorSavedLocal>>,
+    pub variant_fields: IndexVec<VariantIdx, IndexVec<FieldIdx, CoroutineSavedLocal>>,
 
     /// The source that led to each variant being created (usually, a yield or
     /// await).
@@ -163,60 +56,31 @@ pub struct GeneratorLayout<'tcx> {
     /// layout.
     #[type_foldable(identity)]
     #[type_visitable(ignore)]
-    pub storage_conflicts: BitMatrix<GeneratorSavedLocal, GeneratorSavedLocal>,
+    pub storage_conflicts: BitMatrix<CoroutineSavedLocal, CoroutineSavedLocal>,
 }
 
-impl Debug for GeneratorLayout<'_> {
+impl Debug for CoroutineLayout<'_> {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        /// Prints an iterator of (key, value) tuples as a map.
-        struct MapPrinter<'a, K, V>(Cell<Option<Box<dyn Iterator<Item = (K, V)> + 'a>>>);
-        impl<'a, K, V> MapPrinter<'a, K, V> {
-            fn new(iter: impl Iterator<Item = (K, V)> + 'a) -> Self {
-                Self(Cell::new(Some(Box::new(iter))))
-            }
-        }
-        impl<'a, K: Debug, V: Debug> Debug for MapPrinter<'a, K, V> {
-            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-                fmt.debug_map().entries(self.0.take().unwrap()).finish()
-            }
-        }
-
-        /// Prints the generator variant name.
-        struct GenVariantPrinter(VariantIdx);
-        impl From<VariantIdx> for GenVariantPrinter {
-            fn from(idx: VariantIdx) -> Self {
-                GenVariantPrinter(idx)
-            }
-        }
-        impl Debug for GenVariantPrinter {
-            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-                let variant_name = ty::GeneratorSubsts::variant_name(self.0);
-                if fmt.alternate() {
-                    write!(fmt, "{:9}({:?})", variant_name, self.0)
-                } else {
-                    write!(fmt, "{}", variant_name)
+        fmt.debug_struct("CoroutineLayout")
+            .field_with("field_tys", |fmt| {
+                fmt.debug_map().entries(self.field_tys.iter_enumerated()).finish()
+            })
+            .field_with("variant_fields", |fmt| {
+                let mut map = fmt.debug_map();
+                for (idx, fields) in self.variant_fields.iter_enumerated() {
+                    map.key_with(|fmt| {
+                        let variant_name = ty::CoroutineArgs::variant_name(idx);
+                        if fmt.alternate() {
+                            write!(fmt, "{variant_name:9}({idx:?})")
+                        } else {
+                            write!(fmt, "{variant_name}")
+                        }
+                    });
+                    // Force variant fields to print in regular mode instead of alternate mode.
+                    map.value_with(|fmt| write!(fmt, "{fields:?}"));
                 }
-            }
-        }
-
-        /// Forces its contents to print in regular mode instead of alternate mode.
-        struct OneLinePrinter<T>(T);
-        impl<T: Debug> Debug for OneLinePrinter<T> {
-            fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(fmt, "{:?}", self.0)
-            }
-        }
-
-        fmt.debug_struct("GeneratorLayout")
-            .field("field_tys", &MapPrinter::new(self.field_tys.iter_enumerated()))
-            .field(
-                "variant_fields",
-                &MapPrinter::new(
-                    self.variant_fields
-                        .iter_enumerated()
-                        .map(|(k, v)| (GenVariantPrinter(k), OneLinePrinter(v))),
-                ),
-            )
+                map.finish()
+            })
             .field("storage_conflicts", &self.storage_conflicts)
             .finish()
     }
@@ -235,7 +99,7 @@ pub struct BorrowCheckResult<'tcx> {
 
 /// The result of the `mir_const_qualif` query.
 ///
-/// Each field (except `error_occurred`) corresponds to an implementer of the `Qualif` trait in
+/// Each field (except `tainted_by_errors`) corresponds to an implementer of the `Qualif` trait in
 /// `rustc_const_eval/src/transform/check_consts/qualifs.rs`. See that file for more information on each
 /// `Qualif`.
 #[derive(Clone, Copy, Debug, Default, TyEncodable, TyDecodable, HashStable)]
@@ -243,7 +107,6 @@ pub struct ConstQualifs {
     pub has_mut_interior: bool,
     pub needs_drop: bool,
     pub needs_non_const_drop: bool,
-    pub custom_eq: bool,
     pub tainted_by_errors: Option<ErrorGuaranteed>,
 }
 
@@ -255,16 +118,16 @@ pub struct ConstQualifs {
 ///
 /// The requirements are listed as being between various `RegionVid`. The 0th
 /// region refers to `'static`; subsequent region vids refer to the free
-/// regions that appear in the closure (or generator's) type, in order of
+/// regions that appear in the closure (or coroutine's) type, in order of
 /// appearance. (This numbering is actually defined by the `UniversalRegions`
 /// struct in the NLL region checker. See for example
 /// `UniversalRegions::closure_mapping`.) Note the free regions in the
 /// closure's signature and captures are erased.
 ///
-/// Example: If type check produces a closure with the closure substs:
+/// Example: If type check produces a closure with the closure args:
 ///
 /// ```text
-/// ClosureSubsts = [
+/// ClosureArgs = [
 ///     'a,                                         // From the parent.
 ///     'b,
 ///     i8,                                         // the "closure kind"
@@ -276,7 +139,7 @@ pub struct ConstQualifs {
 /// We would "renumber" each free region to a unique vid, as follows:
 ///
 /// ```text
-/// ClosureSubsts = [
+/// ClosureArgs = [
 ///     '1,                                         // From the parent.
 ///     '2,
 ///     i8,                                         // the "closure kind"
@@ -321,7 +184,7 @@ pub struct ClosureOutlivesRequirement<'tcx> {
 }
 
 // Make sure this enum doesn't unintentionally grow
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+#[cfg(target_pointer_width = "64")]
 rustc_data_structures::static_assert_size!(ConstraintCategory<'_>, 16);
 
 /// Outlives-constraints can be categorized to determine whether and why they
@@ -329,20 +192,21 @@ rustc_data_structures::static_assert_size!(ConstraintCategory<'_>, 16);
 /// order of the category, thereby influencing diagnostic output.
 ///
 /// See also `rustc_const_eval::borrow_check::constraints`.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
-#[derive(TyEncodable, TyDecodable, HashStable, Lift, TypeVisitable, TypeFoldable)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(TyEncodable, TyDecodable, HashStable, TypeVisitable, TypeFoldable)]
 pub enum ConstraintCategory<'tcx> {
     Return(ReturnConstraint),
     Yield,
     UseAsConst,
     UseAsStatic,
-    TypeAnnotation,
-    Cast,
-
-    /// A constraint that came from checking the body of a closure.
-    ///
-    /// We try to get the category that the closure used when reporting this.
-    ClosureBounds,
+    TypeAnnotation(AnnotationSource),
+    Cast {
+        /// Whether this cast is a coercion that was automatically inserted by the compiler.
+        is_implicit_coercion: bool,
+        /// Whether this is an unsizing coercion and if yes, this contains the target type.
+        /// Region variables are erased to ReErased.
+        unsize_to: Option<Ty<'tcx>>,
+    },
 
     /// Contains the function type if available.
     CallArgument(Option<Ty<'tcx>>),
@@ -369,13 +233,25 @@ pub enum ConstraintCategory<'tcx> {
 
     /// A constraint that doesn't correspond to anything the user sees.
     Internal,
+
+    /// An internal constraint derived from an illegal universe relation.
+    IllegalUniverse,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 #[derive(TyEncodable, TyDecodable, HashStable, TypeVisitable, TypeFoldable)]
 pub enum ReturnConstraint {
     Normal,
     ClosureUpvar(FieldIdx),
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(TyEncodable, TyDecodable, HashStable, TypeVisitable, TypeFoldable)]
+pub enum AnnotationSource {
+    Ascription,
+    Declaration,
+    OpaqueCast,
+    GenericArg,
 }
 
 /// The subject of a `ClosureOutlivesRequirement` -- that is, the thing
@@ -409,11 +285,13 @@ impl<'tcx> ClosureOutlivesSubjectTy<'tcx> {
     /// All regions of `ty` must be of kind `ReVar` and must represent
     /// universal regions *external* to the closure.
     pub fn bind(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Self {
-        let inner = tcx.fold_regions(ty, |r, depth| match r.kind() {
+        let inner = fold_regions(tcx, ty, |r, depth| match r.kind() {
             ty::ReVar(vid) => {
-                let br =
-                    ty::BoundRegion { var: ty::BoundVar::new(vid.index()), kind: ty::BrAnon(None) };
-                ty::Region::new_late_bound(tcx, depth, br)
+                let br = ty::BoundRegion {
+                    var: ty::BoundVar::new(vid.index()),
+                    kind: ty::BoundRegionKind::Anon,
+                };
+                ty::Region::new_bound(tcx, depth, br)
             }
             _ => bug!("unexpected region in ClosureOutlivesSubjectTy: {r:?}"),
         });
@@ -426,8 +304,8 @@ impl<'tcx> ClosureOutlivesSubjectTy<'tcx> {
         tcx: TyCtxt<'tcx>,
         mut map: impl FnMut(ty::RegionVid) -> ty::Region<'tcx>,
     ) -> Ty<'tcx> {
-        tcx.fold_regions(self.inner, |r, depth| match r.kind() {
-            ty::ReLateBound(debruijn, br) => {
+        fold_regions(tcx, self.inner, |r, depth| match r.kind() {
+            ty::ReBound(debruijn, br) => {
                 debug_assert_eq!(debruijn, depth);
                 map(ty::RegionVid::new(br.var.index()))
             }
@@ -440,17 +318,5 @@ impl<'tcx> ClosureOutlivesSubjectTy<'tcx> {
 #[derive(Copy, Clone, Debug, HashStable)]
 pub struct DestructuredConstant<'tcx> {
     pub variant: Option<VariantIdx>,
-    pub fields: &'tcx [ConstantKind<'tcx>],
-}
-
-/// Coverage information summarized from a MIR if instrumented for source code coverage (see
-/// compiler option `-Cinstrument-coverage`). This information is generated by the
-/// `InstrumentCoverage` MIR pass and can be retrieved via the `coverageinfo` query.
-#[derive(Clone, TyEncodable, TyDecodable, Debug, HashStable)]
-pub struct CoverageInfo {
-    /// The total number of coverage region counters added to the MIR `Body`.
-    pub num_counters: u32,
-
-    /// The total number of coverage region counter expressions added to the MIR `Body`.
-    pub num_expressions: u32,
+    pub fields: &'tcx [(ConstValue<'tcx>, Ty<'tcx>)],
 }

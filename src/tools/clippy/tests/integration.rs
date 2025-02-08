@@ -8,7 +8,6 @@
 //! Clippy doesn't produce an ICE. Lint warnings are ignored by this test.
 
 #![cfg(feature = "integration")]
-#![cfg_attr(feature = "deny-warnings", deny(warnings))]
 #![warn(rust_2018_idioms, unused_lifetimes)]
 
 use std::env;
@@ -29,8 +28,10 @@ fn integration_test() {
         .nth(1)
         .expect("repo name should have format `<org>/<name>`");
 
-    let mut repo_dir = tempfile::tempdir().expect("couldn't create temp dir").into_path();
-    repo_dir.push(crate_name);
+    let repo_dir = tempfile::tempdir()
+        .expect("couldn't create temp dir")
+        .into_path()
+        .join(crate_name);
 
     let st = Command::new("git")
         .args([
@@ -55,6 +56,7 @@ fn integration_test() {
             "clippy",
             "--all-targets",
             "--all-features",
+            "--message-format=short",
             "--",
             "--cap-lints",
             "warn",
@@ -65,6 +67,30 @@ fn integration_test() {
         .expect("unable to run clippy");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // debug:
+    eprintln!("{stderr}");
+
+    // this is an internal test to make sure we would correctly panic on a span_delayed_bug
+    if repo_name == "matthiaskrgr/clippy_ci_panic_test" {
+        // we need to kind of switch around our logic here:
+        // if we find a panic, everything is fine, if we don't panic, SOMETHING is broken about our testing
+
+        // the repo basically just contains a span_delayed_bug that forces rustc/clippy to panic:
+        /*
+           #![feature(rustc_attrs)]
+           #[rustc_error(delayed_bug_from_inside_query)]
+           fn main() {}
+        */
+
+        if stderr.find("error: internal compiler error").is_some() {
+            eprintln!("we saw that we intentionally panicked, yay");
+            return;
+        }
+
+        panic!("panic caused by span_delayed_bug was NOT detected! Something is broken!");
+    }
+
     if let Some(backtrace_start) = stderr.find("error: internal compiler error") {
         static BACKTRACE_END_MSG: &str = "end of query stack";
         let backtrace_end = stderr[backtrace_start..]

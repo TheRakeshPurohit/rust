@@ -1,6 +1,6 @@
-// run-pass
+//@ run-pass
 #![allow(unused_parens)]
-// pretty-expanded FIXME #23616
+#![allow(unit_bindings)]
 
 fn f<T, F>(g: F) -> T where F: FnOnce() -> T { g() }
 

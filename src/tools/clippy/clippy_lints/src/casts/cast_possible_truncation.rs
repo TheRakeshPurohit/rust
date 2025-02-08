@@ -1,10 +1,10 @@
-use clippy_utils::consts::{constant, Constant};
+use clippy_utils::consts::{ConstEvalCtxt, Constant};
 use clippy_utils::diagnostics::{span_lint, span_lint_and_then};
 use clippy_utils::expr_or_init;
 use clippy_utils::source::snippet;
 use clippy_utils::sugg::Sugg;
 use clippy_utils::ty::{get_discriminant_value, is_isize_or_usize};
-use rustc_errors::{Applicability, Diagnostic, SuggestionStyle};
+use rustc_errors::{Applicability, Diag};
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::{BinOpKind, Expr, ExprKind};
 use rustc_lint::LateContext;
@@ -12,10 +12,10 @@ use rustc_middle::ty::{self, FloatTy, Ty};
 use rustc_span::Span;
 use rustc_target::abi::IntegerType;
 
-use super::{utils, CAST_ENUM_TRUNCATION, CAST_POSSIBLE_TRUNCATION};
+use super::{CAST_ENUM_TRUNCATION, CAST_POSSIBLE_TRUNCATION, utils};
 
 fn constant_int(cx: &LateContext<'_>, expr: &Expr<'_>) -> Option<u128> {
-    if let Some(Constant::Int(c)) = constant(cx, cx.typeck_results(), expr) {
+    if let Some(Constant::Int(c)) = ConstEvalCtxt::new(cx).eval(expr) {
         Some(c)
     } else {
         None
@@ -40,11 +40,16 @@ fn apply_reductions(cx: &LateContext<'_>, nbits: u64, expr: &Expr<'_>, signed: b
                     get_constant_bits(cx, right).map_or(0, |b| b.saturating_sub(1))
                 })
             },
-            BinOpKind::Rem | BinOpKind::BitAnd => get_constant_bits(cx, right)
-                .unwrap_or(u64::max_value())
+            BinOpKind::Rem => get_constant_bits(cx, right)
+                .unwrap_or(u64::MAX)
+                .min(apply_reductions(cx, nbits, left, signed)),
+            BinOpKind::BitAnd => get_constant_bits(cx, right)
+                .unwrap_or(u64::MAX)
+                .min(get_constant_bits(cx, left).unwrap_or(u64::MAX))
+                .min(apply_reductions(cx, nbits, right, signed))
                 .min(apply_reductions(cx, nbits, left, signed)),
             BinOpKind::Shr => apply_reductions(cx, nbits, left, signed)
-                .saturating_sub(constant_int(cx, right).map_or(0, |s| u64::try_from(s).expect("shift too high"))),
+                .saturating_sub(constant_int(cx, right).map_or(0, |s| u64::try_from(s).unwrap_or_default())),
             _ => nbits,
         },
         ExprKind::MethodCall(method, left, [right], _) => {
@@ -56,7 +61,7 @@ fn apply_reductions(cx: &LateContext<'_>, nbits: u64, expr: &Expr<'_>, signed: b
             } else {
                 None
             };
-            apply_reductions(cx, nbits, left, signed).min(max_bits.unwrap_or(u64::max_value()))
+            apply_reductions(cx, nbits, left, signed).min(max_bits.unwrap_or(u64::MAX))
         },
         ExprKind::MethodCall(method, _, [lo, hi], _) => {
             if method.ident.as_str() == "clamp" {
@@ -129,10 +134,9 @@ pub(super) fn check(
             };
             let to_nbits = utils::int_ty_to_nbits(cast_to, cx.tcx);
 
-            let cast_from_ptr_size = def.repr().int.map_or(true, |ty| matches!(ty, IntegerType::Pointer(_),));
+            let cast_from_ptr_size = def.repr().int.is_none_or(|ty| matches!(ty, IntegerType::Pointer(_),));
             let suffix = match (cast_from_ptr_size, is_isize_or_usize(cast_to)) {
-                (false, false) if from_nbits > to_nbits => "",
-                (true, false) if from_nbits > to_nbits => "",
+                (_, false) if from_nbits > to_nbits => "",
                 (false, true) if from_nbits > 64 => "",
                 (false, true) if from_nbits > 32 => " on targets with 32-bit wide pointers",
                 _ => return,
@@ -143,7 +147,7 @@ pub(super) fn check(
                     cx,
                     CAST_ENUM_TRUNCATION,
                     expr.span,
-                    &format!(
+                    format!(
                         "casting `{cast_from}::{}` to `{cast_to}` will truncate the value{suffix}",
                         variant.name,
                     ),
@@ -164,7 +168,7 @@ pub(super) fn check(
         _ => return,
     };
 
-    span_lint_and_then(cx, CAST_POSSIBLE_TRUNCATION, expr.span, &msg, |diag| {
+    span_lint_and_then(cx, CAST_POSSIBLE_TRUNCATION, expr.span, msg, |diag| {
         diag.help("if this is intentional allow the lint with `#[allow(clippy::cast_possible_truncation)]` ...");
         if !cast_from.is_floating_point() {
             offer_suggestion(cx, expr, cast_expr, cast_to_span, diag);
@@ -177,7 +181,7 @@ fn offer_suggestion(
     expr: &Expr<'_>,
     cast_expr: &Expr<'_>,
     cast_to_span: Span,
-    diag: &mut Diagnostic,
+    diag: &mut Diag<'_, ()>,
 ) {
     let cast_to_snip = snippet(cx, cast_to_span, "..");
     let suggestion = if cast_to_snip == "_" {
@@ -186,12 +190,10 @@ fn offer_suggestion(
         format!("{cast_to_snip}::try_from({})", Sugg::hir(cx, cast_expr, ".."))
     };
 
-    diag.span_suggestion_with_style(
+    diag.span_suggestion_verbose(
         expr.span,
         "... or use `try_from` and handle the error accordingly",
         suggestion,
         Applicability::Unspecified,
-        // always show the suggestion in a separate line
-        SuggestionStyle::ShowAlways,
     );
 }

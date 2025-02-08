@@ -3,18 +3,20 @@
 //! or 16 bytes of the hash.
 //!
 //! The types in this module represent 64-bit or 128-bit hashes produced by a `StableHasher`.
-//! `Hash64` and `Hash128` expose some utilty functions to encourage users to not extract the inner
+//! `Hash64` and `Hash128` expose some utility functions to encourage users to not extract the inner
 //! hash value as an integer type and accidentally apply varint encoding to it.
 //!
 //! In contrast with `Fingerprint`, users of these types cannot and should not attempt to construct
-//! and decompose these types into constitutent pieces. The point of these types is only to
+//! and decompose these types into constituent pieces. The point of these types is only to
 //! connect the fact that they can only be produced by a `StableHasher` to their
 //! `Encode`/`Decode` impls.
 
-use crate::stable_hasher::{StableHasher, StableHasherResult};
-use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
 use std::fmt;
 use std::ops::BitXorAssign;
+
+use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
+
+use crate::stable_hasher::{FromStableHash, StableHasherHash};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct Hash64 {
@@ -25,7 +27,7 @@ impl Hash64 {
     pub const ZERO: Hash64 = Hash64 { inner: 0 };
 
     #[inline]
-    pub(crate) fn new(n: u64) -> Self {
+    pub fn new(n: u64) -> Self {
         Self { inner: n }
     }
 
@@ -56,10 +58,12 @@ impl<D: Decoder> Decodable<D> for Hash64 {
     }
 }
 
-impl StableHasherResult for Hash64 {
+impl FromStableHash for Hash64 {
+    type Hash = StableHasherHash;
+
     #[inline]
-    fn finish(hasher: StableHasher) -> Self {
-        Self { inner: hasher.finalize().0 }
+    fn from(StableHasherHash([_0, __1]): Self::Hash) -> Self {
+        Self { inner: _0 }
     }
 }
 
@@ -75,9 +79,19 @@ impl fmt::LowerHex for Hash64 {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct Hash128 {
     inner: u128,
+}
+
+// We expect Hash128 to be well mixed. So there's no point in hashing both parts.
+//
+// This also allows using Hash128-containing types in UnHash-based hashmaps, which would otherwise
+// debug_assert! that we're hashing more than a single u64.
+impl std::hash::Hash for Hash128 {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        h.write_u64(self.truncate().as_u64());
+    }
 }
 
 impl Hash128 {
@@ -111,10 +125,11 @@ impl<D: Decoder> Decodable<D> for Hash128 {
     }
 }
 
-impl StableHasherResult for Hash128 {
+impl FromStableHash for Hash128 {
+    type Hash = StableHasherHash;
+
     #[inline]
-    fn finish(hasher: StableHasher) -> Self {
-        let (_0, _1) = hasher.finalize();
+    fn from(StableHasherHash([_0, _1]): Self::Hash) -> Self {
         Self { inner: u128::from(_0) | (u128::from(_1) << 64) }
     }
 }

@@ -1,10 +1,10 @@
 #![feature(
-    no_core, lang_items, intrinsics, unboxed_closures, type_ascription, extern_types,
-    decl_macro, rustc_attrs, transparent_unions, auto_traits,
+    no_core, lang_items, intrinsics, unboxed_closures, extern_types,
+    decl_macro, rustc_attrs, transparent_unions, auto_traits, freeze_impls,
     thread_local
 )]
 #![no_core]
-#![allow(dead_code)]
+#![allow(dead_code, internal_features, ambiguous_wide_pointer_comparisons)]
 
 #[no_mangle]
 unsafe extern "C" fn _Unwind_Resume() {
@@ -44,32 +44,32 @@ impl<T: ?Sized+Unsize<U>, U: ?Sized> DispatchFromDyn<*const U> for *const T {}
 impl<T: ?Sized+Unsize<U>, U: ?Sized> DispatchFromDyn<*mut U> for *mut T {}
 impl<T: ?Sized + Unsize<U>, U: ?Sized> DispatchFromDyn<Box<U, ()>> for Box<T, ()> {}
 
-#[lang = "receiver"]
-pub trait Receiver {}
+#[lang = "legacy_receiver"]
+pub trait LegacyReceiver {}
 
-impl<T: ?Sized> Receiver for &T {}
-impl<T: ?Sized> Receiver for &mut T {}
-impl<T: ?Sized, A: Allocator> Receiver for Box<T, A> {}
+impl<T: ?Sized> LegacyReceiver for &T {}
+impl<T: ?Sized> LegacyReceiver for &mut T {}
+impl<T: ?Sized, A: Allocator> LegacyReceiver for Box<T, A> {}
 
 #[lang = "copy"]
-pub unsafe trait Copy {}
+pub trait Copy {}
 
-unsafe impl Copy for bool {}
-unsafe impl Copy for u8 {}
-unsafe impl Copy for u16 {}
-unsafe impl Copy for u32 {}
-unsafe impl Copy for u64 {}
-unsafe impl Copy for usize {}
-unsafe impl Copy for i8 {}
-unsafe impl Copy for i16 {}
-unsafe impl Copy for i32 {}
-unsafe impl Copy for isize {}
-unsafe impl Copy for f32 {}
-unsafe impl Copy for f64 {}
-unsafe impl Copy for char {}
-unsafe impl<'a, T: ?Sized> Copy for &'a T {}
-unsafe impl<T: ?Sized> Copy for *const T {}
-unsafe impl<T: ?Sized> Copy for *mut T {}
+impl Copy for bool {}
+impl Copy for u8 {}
+impl Copy for u16 {}
+impl Copy for u32 {}
+impl Copy for u64 {}
+impl Copy for usize {}
+impl Copy for i8 {}
+impl Copy for i16 {}
+impl Copy for i32 {}
+impl Copy for isize {}
+impl Copy for f32 {}
+impl Copy for f64 {}
+impl Copy for char {}
+impl<'a, T: ?Sized> Copy for &'a T {}
+impl<T: ?Sized> Copy for *const T {}
+impl<T: ?Sized> Copy for *mut T {}
 
 #[lang = "sync"]
 pub unsafe trait Sync {}
@@ -99,9 +99,6 @@ unsafe impl<T: ?Sized> Freeze for &mut T {}
 
 #[lang = "structural_peq"]
 pub trait StructuralPartialEq {}
-
-#[lang = "structural_teq"]
-pub trait StructuralEq {}
 
 #[lang = "not"]
 pub trait Not {
@@ -166,6 +163,14 @@ impl Add for i8 {
 }
 
 impl Add for usize {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self {
+        self + rhs
+    }
+}
+
+impl Add for isize {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self {
@@ -421,10 +426,48 @@ pub fn panic(_msg: &'static str) -> ! {
     }
 }
 
+macro_rules! panic_const {
+    ($($lang:ident = $message:expr,)+) => {
+        pub mod panic_const {
+            use super::*;
+
+            $(
+                #[track_caller]
+                #[lang = stringify!($lang)]
+                pub fn $lang() -> ! {
+                    panic($message);
+                }
+            )+
+        }
+    }
+}
+
+panic_const! {
+    panic_const_add_overflow = "attempt to add with overflow",
+    panic_const_sub_overflow = "attempt to subtract with overflow",
+    panic_const_mul_overflow = "attempt to multiply with overflow",
+    panic_const_div_overflow = "attempt to divide with overflow",
+    panic_const_rem_overflow = "attempt to calculate the remainder with overflow",
+    panic_const_neg_overflow = "attempt to negate with overflow",
+    panic_const_shr_overflow = "attempt to shift right with overflow",
+    panic_const_shl_overflow = "attempt to shift left with overflow",
+    panic_const_div_by_zero = "attempt to divide by zero",
+    panic_const_rem_by_zero = "attempt to calculate the remainder with a divisor of zero",
+}
+
 #[lang = "panic_cannot_unwind"]
 fn panic_cannot_unwind() -> ! {
     unsafe {
         libc::puts("Panicking\n\0" as *const str as *const u8);
+        intrinsics::abort();
+    }
+}
+
+#[lang = "panic_in_cleanup"]
+#[rustc_nounwind]
+fn panic_in_cleanup() -> ! {
+    unsafe {
+        libc::printf("panic in a destructor during cleanup\n\0" as *const str as *const i8);
         intrinsics::abort();
     }
 }
@@ -451,6 +494,9 @@ pub unsafe fn drop_in_place<T: ?Sized>(to_drop: *mut T) {
     drop_in_place(to_drop);
 }
 
+#[lang = "unpin"]
+pub auto trait Unpin {}
+
 #[lang = "deref"]
 pub trait Deref {
     type Target: ?Sized;
@@ -463,6 +509,7 @@ pub trait Allocator {
 
 impl Allocator for () {}
 
+#[lang = "global_alloc_ty"]
 pub struct Global;
 
 impl Allocator for Global {}
@@ -488,10 +535,23 @@ pub struct Box<T: ?Sized, A: Allocator = Global>(Unique<T>, A);
 
 impl<T: ?Sized + Unsize<U>, U: ?Sized, A: Allocator> CoerceUnsized<Box<U, A>> for Box<T, A> {}
 
+impl<T> Box<T> {
+    pub fn new(val: T) -> Box<T> {
+        unsafe {
+            let size = intrinsics::size_of::<T>();
+            let ptr = libc::malloc(size);
+            intrinsics::copy(&val as *const T as *const u8, ptr, size);
+            Box(Unique { pointer: NonNull(ptr as *const T), _marker: PhantomData }, Global)
+        }
+    }
+}
+
 impl<T: ?Sized, A: Allocator> Drop for Box<T, A> {
     fn drop(&mut self) {
-        // inner value is dropped by compiler
-        libc::free(self.pointer.0 as *mut u8);
+        // inner value is dropped by compiler.
+        unsafe {
+            libc::free(self.0.pointer.0 as *mut u8);
+        }
     }
 }
 
@@ -527,28 +587,70 @@ pub union MaybeUninit<T> {
 }
 
 pub mod intrinsics {
-    use crate::Sized;
-
-    extern "rust-intrinsic" {
-        #[rustc_safe_intrinsic]
-        pub fn abort() -> !;
-        #[rustc_safe_intrinsic]
-        pub fn size_of<T>() -> usize;
-        pub fn size_of_val<T: ?Sized>(val: *const T) -> usize;
-        #[rustc_safe_intrinsic]
-        pub fn min_align_of<T>() -> usize;
-        pub fn min_align_of_val<T: ?Sized>(val: *const T) -> usize;
-        pub fn copy<T>(src: *const T, dst: *mut T, count: usize);
-        pub fn transmute<T, U>(e: T) -> U;
-        pub fn ctlz_nonzero<T>(x: T) -> T;
-        #[rustc_safe_intrinsic]
-        pub fn needs_drop<T: ?Sized>() -> bool;
-        #[rustc_safe_intrinsic]
-        pub fn bitreverse<T>(x: T) -> T;
-        #[rustc_safe_intrinsic]
-        pub fn bswap<T>(x: T) -> T;
-        pub fn write_bytes<T>(dst: *mut T, val: u8, count: usize);
-        pub fn unreachable() -> !;
+    #[rustc_intrinsic]
+    #[rustc_intrinsic_must_be_overridden]
+    pub fn abort() -> ! {
+        loop {}
+    }
+    #[rustc_intrinsic]
+    #[rustc_intrinsic_must_be_overridden]
+    pub fn size_of<T>() -> usize {
+        loop {}
+    }
+    #[rustc_intrinsic]
+    #[rustc_intrinsic_must_be_overridden]
+    pub unsafe fn size_of_val<T: ?::Sized>(_val: *const T) -> usize {
+        loop {}
+    }
+    #[rustc_intrinsic]
+    #[rustc_intrinsic_must_be_overridden]
+    pub fn min_align_of<T>() -> usize {
+        loop {}
+    }
+    #[rustc_intrinsic]
+    #[rustc_intrinsic_must_be_overridden]
+    pub unsafe fn min_align_of_val<T: ?::Sized>(_val: *const T) -> usize {
+        loop {}
+    }
+    #[rustc_intrinsic]
+    #[rustc_intrinsic_must_be_overridden]
+    pub unsafe fn copy<T>(_src: *const T, _dst: *mut T, _count: usize) {
+        loop {}
+    }
+    #[rustc_intrinsic]
+    #[rustc_intrinsic_must_be_overridden]
+    pub unsafe fn transmute<T, U>(_e: T) -> U {
+        loop {}
+    }
+    #[rustc_intrinsic]
+    #[rustc_intrinsic_must_be_overridden]
+    pub unsafe fn ctlz_nonzero<T>(_x: T) -> u32 {
+        loop {}
+    }
+    #[rustc_intrinsic]
+    #[rustc_intrinsic_must_be_overridden]
+    pub fn needs_drop<T: ?::Sized>() -> bool {
+        loop {}
+    }
+    #[rustc_intrinsic]
+    #[rustc_intrinsic_must_be_overridden]
+    pub fn bitreverse<T>(_x: T) -> T {
+        loop {}
+    }
+    #[rustc_intrinsic]
+    #[rustc_intrinsic_must_be_overridden]
+    pub fn bswap<T>(_x: T) -> T {
+        loop {}
+    }
+    #[rustc_intrinsic]
+    #[rustc_intrinsic_must_be_overridden]
+    pub unsafe fn write_bytes<T>(_dst: *mut T, _val: u8, _count: usize) {
+        loop {}
+    }
+    #[rustc_intrinsic]
+    #[rustc_intrinsic_must_be_overridden]
+    pub unsafe fn unreachable() -> ! {
+        loop {}
     }
 }
 
@@ -587,7 +689,7 @@ impl<T> Index<usize> for [T] {
     }
 }
 
-extern {
+extern "C" {
     type VaListImpl;
 }
 

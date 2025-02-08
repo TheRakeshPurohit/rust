@@ -1,12 +1,11 @@
-#![allow(rustc::untranslatable_diagnostic, rustc::diagnostic_outside_of_impl)]
-
 use rustc_hir::def::DefKind;
-use rustc_index::bit_set::BitSet;
+use rustc_index::bit_set::DenseBitSet;
+use rustc_middle::bug;
 use rustc_middle::query::Providers;
 use rustc_middle::ty::{self, Representability, Ty, TyCtxt};
 use rustc_span::def_id::LocalDefId;
 
-pub fn provide(providers: &mut Providers) {
+pub(crate) fn provide(providers: &mut Providers) {
     *providers =
         Providers { representability, representability_adt_ty, params_in_repr, ..*providers };
 }
@@ -14,7 +13,7 @@ pub fn provide(providers: &mut Providers) {
 macro_rules! rtry {
     ($e:expr) => {
         match $e {
-            e @ Representability::Infinite => return e,
+            e @ Representability::Infinite(_) => return e,
             Representability::Representable => {}
         }
     };
@@ -23,15 +22,14 @@ macro_rules! rtry {
 fn representability(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Representability {
     match tcx.def_kind(def_id) {
         DefKind::Struct | DefKind::Union | DefKind::Enum => {
-            let adt_def = tcx.adt_def(def_id);
-            for variant in adt_def.variants() {
+            for variant in tcx.adt_def(def_id).variants() {
                 for field in variant.fields.iter() {
                     rtry!(tcx.representability(field.did.expect_local()));
                 }
             }
             Representability::Representable
         }
-        DefKind::Field => representability_ty(tcx, tcx.type_of(def_id).subst_identity()),
+        DefKind::Field => representability_ty(tcx, tcx.type_of(def_id).instantiate_identity()),
         def_kind => bug!("unexpected {def_kind:?}"),
     }
 }
@@ -68,15 +66,15 @@ representability_adt_ty(Bar<..>) is in the cycle and representability(Bar) is
 *not* in the cycle.
 */
 fn representability_adt_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Representability {
-    let ty::Adt(adt, substs) = ty.kind() else { bug!("expected adt") };
+    let ty::Adt(adt, args) = ty.kind() else { bug!("expected adt") };
     if let Some(def_id) = adt.did().as_local() {
         rtry!(tcx.representability(def_id));
     }
     // At this point, we know that the item of the ADT type is representable;
     // but the type parameters may cause a cycle with an upstream type
     let params_in_repr = tcx.params_in_repr(adt.did());
-    for (i, subst) in substs.iter().enumerate() {
-        if let ty::GenericArgKind::Type(ty) = subst.unpack() {
+    for (i, arg) in args.iter().enumerate() {
+        if let ty::GenericArgKind::Type(ty) = arg.unpack() {
             if params_in_repr.contains(i as u32) {
                 rtry!(representability_ty(tcx, ty));
             }
@@ -85,24 +83,28 @@ fn representability_adt_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Representab
     Representability::Representable
 }
 
-fn params_in_repr(tcx: TyCtxt<'_>, def_id: LocalDefId) -> BitSet<u32> {
+fn params_in_repr(tcx: TyCtxt<'_>, def_id: LocalDefId) -> DenseBitSet<u32> {
     let adt_def = tcx.adt_def(def_id);
     let generics = tcx.generics_of(def_id);
-    let mut params_in_repr = BitSet::new_empty(generics.params.len());
+    let mut params_in_repr = DenseBitSet::new_empty(generics.own_params.len());
     for variant in adt_def.variants() {
         for field in variant.fields.iter() {
-            params_in_repr_ty(tcx, tcx.type_of(field.did).subst_identity(), &mut params_in_repr);
+            params_in_repr_ty(
+                tcx,
+                tcx.type_of(field.did).instantiate_identity(),
+                &mut params_in_repr,
+            );
         }
     }
     params_in_repr
 }
 
-fn params_in_repr_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, params_in_repr: &mut BitSet<u32>) {
+fn params_in_repr_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, params_in_repr: &mut DenseBitSet<u32>) {
     match *ty.kind() {
-        ty::Adt(adt, substs) => {
+        ty::Adt(adt, args) => {
             let inner_params_in_repr = tcx.params_in_repr(adt.did());
-            for (i, subst) in substs.iter().enumerate() {
-                if let ty::GenericArgKind::Type(ty) = subst.unpack() {
+            for (i, arg) in args.iter().enumerate() {
+                if let ty::GenericArgKind::Type(ty) = arg.unpack() {
                     if inner_params_in_repr.contains(i as u32) {
                         params_in_repr_ty(tcx, ty, params_in_repr);
                     }

@@ -4,26 +4,63 @@ use std::ops::Range;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_span::{Span, SpanData};
 
-use crate::borrow_tracker::tree_borrows::{
-    perms::{PermTransition, Permission},
-    tree::LocationState,
-    unimap::UniIndex,
-};
-use crate::borrow_tracker::{AccessKind, ProtectorKind};
+use crate::borrow_tracker::ProtectorKind;
+use crate::borrow_tracker::tree_borrows::perms::{PermTransition, Permission};
+use crate::borrow_tracker::tree_borrows::tree::LocationState;
+use crate::borrow_tracker::tree_borrows::unimap::UniIndex;
 use crate::*;
+
+/// Cause of an access: either a real access or one
+/// inserted by Tree Borrows due to a reborrow or a deallocation.
+#[derive(Clone, Copy, Debug)]
+pub enum AccessCause {
+    Explicit(AccessKind),
+    Reborrow,
+    Dealloc,
+    FnExit(AccessKind),
+}
+
+impl fmt::Display for AccessCause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Explicit(kind) => write!(f, "{kind}"),
+            Self::Reborrow => write!(f, "reborrow"),
+            Self::Dealloc => write!(f, "deallocation"),
+            // This is dead code, since the protector release access itself can never
+            // cause UB (while the protector is active, if some other access invalidates
+            // further use of the protected tag, that is immediate UB).
+            // Describing the cause of UB is the only time this function is called.
+            Self::FnExit(_) => unreachable!("protector accesses can never be the source of UB"),
+        }
+    }
+}
+
+impl AccessCause {
+    fn print_as_access(self, is_foreign: bool) -> String {
+        let rel = if is_foreign { "foreign" } else { "child" };
+        match self {
+            Self::Explicit(kind) => format!("{rel} {kind}"),
+            Self::Reborrow => format!("reborrow (acting as a {rel} read access)"),
+            Self::Dealloc => format!("deallocation (acting as a {rel} write access)"),
+            Self::FnExit(kind) => format!("protector release (acting as a {rel} {kind})"),
+        }
+    }
+}
 
 /// Complete data for an event:
 #[derive(Clone, Debug)]
 pub struct Event {
-    /// Transformation of permissions that occured because of this event
+    /// Transformation of permissions that occurred because of this event.
     pub transition: PermTransition,
-    /// Kind of the access that triggered this event
-    pub access_kind: AccessKind,
-    /// Relative position of the tag to the one used for the access
+    /// Kind of the access that triggered this event.
+    pub access_cause: AccessCause,
+    /// Relative position of the tag to the one used for the access.
     pub is_foreign: bool,
-    /// User-visible range of the access
-    pub access_range: AllocRange,
-    /// The transition recorded by this event only occured on a subrange of
+    /// User-visible range of the access.
+    /// `None` means that this is an implicit access to the entire allocation
+    /// (used for the implicit read on protector release).
+    pub access_range: Option<AllocRange>,
+    /// The transition recorded by this event only occurred on a subrange of
     /// `access_range`: a single access on `access_range` triggers several events,
     /// each with their own mutually disjoint `transition_range`. No-op transitions
     /// should not be recorded as events, so the union of all `transition_range` is not
@@ -36,7 +73,7 @@ pub struct Event {
     /// the `TbError`, which should satisfy
     /// `event.transition_range.contains(error.error_offset)`.
     pub transition_range: Range<u64>,
-    /// Line of code that triggered this event
+    /// Line of code that triggered this event.
     pub span: Span,
 }
 
@@ -83,8 +120,8 @@ impl HistoryData {
         self.events.push((Some(created.0.data()), msg_creation));
         for &Event {
             transition,
-            access_kind,
             is_foreign,
+            access_cause,
             access_range,
             span,
             transition_range: _,
@@ -92,8 +129,20 @@ impl HistoryData {
         {
             // NOTE: `transition_range` is explicitly absent from the error message, it has no significance
             // to the user. The meaningful one is `access_range`.
-            self.events.push((Some(span.data()), format!("{this} later transitioned to {endpoint} due to a {rel} {access_kind} at offsets {access_range:?}", endpoint = transition.endpoint(), rel = if is_foreign { "foreign" } else { "child" })));
-            self.events.push((None, format!("this corresponds to {}", transition.summary())));
+            let access = access_cause.print_as_access(is_foreign);
+            let access_range_text = match access_range {
+                Some(r) => format!("at offsets {r:?}"),
+                None => format!("on every location previously accessed by this tag"),
+            };
+            self.events.push((
+                Some(span.data()),
+                format!(
+                    "{this} later transitioned to {endpoint} due to a {access} {access_range_text}",
+                    endpoint = transition.endpoint()
+                ),
+            ));
+            self.events
+                .push((None, format!("this transition corresponds to {}", transition.summary())));
         }
     }
 }
@@ -153,7 +202,7 @@ impl<'tcx> Tree {
     /// Climb the tree to get the tag of a distant ancestor.
     /// Allows operations on tags that are unreachable by the program
     /// but still exist in the tree. Not guaranteed to perform consistently
-    /// if `tag-gc=1`.
+    /// if `provenance-gc=1`.
     fn nth_parent(&self, tag: BorTag, nth_parent: u8) -> Option<BorTag> {
         let mut idx = self.tag_mapping.get(&tag).unwrap();
         for _ in 0..nth_parent {
@@ -177,7 +226,7 @@ impl<'tcx> Tree {
         } else {
             eprintln!("Tag {tag:?} (to be named '{name}') not found!");
         }
-        Ok(())
+        interp_ok(())
     }
 
     /// Debug helper: determines if the tree contains a tag.
@@ -186,7 +235,7 @@ impl<'tcx> Tree {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub(super) enum TransitionError {
     /// This access is not allowed because some parent tag has insufficient permissions.
     /// For example, if a tag is `Frozen` and encounters a child write this will
@@ -195,10 +244,10 @@ pub(super) enum TransitionError {
     ChildAccessForbidden(Permission),
     /// A protector was triggered due to an invalid transition that loses
     /// too much permissions.
-    /// For example, if a protected tag goes from `Active` to `Frozen` due
-    /// to a foreign write this will produce a `ProtectedTransition(PermTransition(Active, Frozen))`.
+    /// For example, if a protected tag goes from `Active` to `Disabled` due
+    /// to a foreign write this will produce a `ProtectedDisabled(Active)`.
     /// This kind of error can only occur on foreign accesses.
-    ProtectedTransition(PermTransition),
+    ProtectedDisabled(Permission),
     /// Cannot deallocate because some tag in the allocation is strongly protected.
     /// This kind of error can only occur on deallocations.
     ProtectedDealloc,
@@ -231,6 +280,8 @@ impl History {
 pub(super) struct TbError<'node> {
     /// What failure occurred.
     pub error_kind: TransitionError,
+    /// The allocation in which the error is happening.
+    pub alloc_id: AllocId,
     /// The offset (into the allocation) at which the conflict occurred.
     pub error_offset: u64,
     /// The tag on which the error was triggered.
@@ -238,9 +289,8 @@ pub(super) struct TbError<'node> {
     /// On accesses rejected due to insufficient permissions, this is the
     /// tag that lacked those permissions.
     pub conflicting_info: &'node NodeDebugInfo,
-    /// Whether this was a Read or Write access. This field is ignored
-    /// when the error was triggered by a deallocation.
-    pub access_kind: AccessKind,
+    // What kind of access caused this error (read, write, reborrow, deallocation)
+    pub access_cause: AccessCause,
     /// Which tag the access that caused this error was made through, i.e.
     /// which tag was used to read/write/deallocate.
     pub accessed_info: &'node NodeDebugInfo,
@@ -248,48 +298,49 @@ pub(super) struct TbError<'node> {
 
 impl TbError<'_> {
     /// Produce a UB error.
-    pub fn build<'tcx>(self) -> InterpError<'tcx> {
+    pub fn build<'tcx>(self) -> InterpErrorKind<'tcx> {
         use TransitionError::*;
-        let kind = self.access_kind;
+        let cause = self.access_cause;
         let accessed = self.accessed_info;
         let conflicting = self.conflicting_info;
         let accessed_is_conflicting = accessed.tag == conflicting.tag;
+        let title = format!(
+            "{cause} through {accessed} at {alloc_id:?}[{offset:#x}] is forbidden",
+            alloc_id = self.alloc_id,
+            offset = self.error_offset
+        );
         let (title, details, conflicting_tag_name) = match self.error_kind {
             ChildAccessForbidden(perm) => {
                 let conflicting_tag_name =
                     if accessed_is_conflicting { "accessed" } else { "conflicting" };
-                let title = format!("{kind} through {accessed} is forbidden");
                 let mut details = Vec::new();
                 if !accessed_is_conflicting {
                     details.push(format!(
                         "the accessed tag {accessed} is a child of the conflicting tag {conflicting}"
                     ));
                 }
+                let access = cause.print_as_access(/* is_foreign */ false);
                 details.push(format!(
-                    "the {conflicting_tag_name} tag {conflicting} has state {perm} which forbids child {kind}es"
+                    "the {conflicting_tag_name} tag {conflicting} has state {perm} which forbids this {access}"
                 ));
                 (title, details, conflicting_tag_name)
             }
-            ProtectedTransition(transition) => {
+            ProtectedDisabled(before_disabled) => {
                 let conflicting_tag_name = "protected";
-                let title = format!("{kind} through {accessed} is forbidden");
+                let access = cause.print_as_access(/* is_foreign */ true);
                 let details = vec![
                     format!(
                         "the accessed tag {accessed} is foreign to the {conflicting_tag_name} tag {conflicting} (i.e., it is not a child)"
                     ),
                     format!(
-                        "the access would cause the {conflicting_tag_name} tag {conflicting} to transition {transition}"
+                        "this {access} would cause the {conflicting_tag_name} tag {conflicting} (currently {before_disabled}) to become Disabled"
                     ),
-                    format!(
-                        "this is {loss}, which is not allowed for protected tags",
-                        loss = transition.summary(),
-                    ),
+                    format!("protected tags must never be Disabled"),
                 ];
                 (title, details, conflicting_tag_name)
             }
             ProtectedDealloc => {
                 let conflicting_tag_name = "strongly protected";
-                let title = format!("deallocation through {accessed} is forbidden");
                 let details = vec![
                     format!(
                         "the allocation of the accessed tag {accessed} also contains the {conflicting_tag_name} tag {conflicting}"
@@ -316,7 +367,7 @@ type S = &'static str;
 /// Pretty-printing details
 ///
 /// Example:
-/// ```
+/// ```rust,ignore (private type)
 /// DisplayFmtWrapper {
 ///     top: '>',
 ///     bot: '<',
@@ -341,10 +392,10 @@ struct DisplayFmtWrapper {
     warning_text: S,
 }
 
-/// Formating of the permissions on each range.
+/// Formatting of the permissions on each range.
 ///
 /// Example:
-/// ```
+/// ```rust,ignore (private type)
 /// DisplayFmtPermission {
 ///     open: "[",
 ///     sep: "|",
@@ -373,10 +424,10 @@ struct DisplayFmtPermission {
     range_sep: S,
 }
 
-/// Formating of the tree structure.
+/// Formatting of the tree structure.
 ///
 /// Example:
-/// ```
+/// ```rust,ignore (private type)
 /// DisplayFmtPadding {
 ///     join_middle: "|-",
 ///     join_last: "'-",
@@ -414,7 +465,7 @@ struct DisplayFmtPadding {
 /// How to show whether a location has been accessed
 ///
 /// Example:
-/// ```
+/// ```rust,ignore (private type)
 /// DisplayFmtAccess {
 ///     yes: " ",
 ///     no: "?",
@@ -438,7 +489,7 @@ struct DisplayFmtAccess {
     meh: S,
 }
 
-/// All parameters to determine how the tree is formated.
+/// All parameters to determine how the tree is formatted.
 struct DisplayFmt {
     wrapper: DisplayFmtWrapper,
     perm: DisplayFmtPermission,
@@ -539,9 +590,13 @@ impl DisplayRepr {
         extraction_aux(tree, tree.root, show_unnamed, &mut v);
         let Some(root) = v.pop() else {
             if show_unnamed {
-                unreachable!("This allocation contains no tags, not even a root. This should not happen.");
+                unreachable!(
+                    "This allocation contains no tags, not even a root. This should not happen."
+                );
             }
-            eprintln!("This allocation does not contain named tags. Use `miri_print_borrow_state(_, true)` to also print unnamed tags.");
+            eprintln!(
+                "This allocation does not contain named tags. Use `miri_print_borrow_state(_, true)` to also print unnamed tags."
+            );
             return None;
         };
         assert!(v.is_empty());
@@ -713,7 +768,7 @@ const DEFAULT_FORMATTER: DisplayFmt = DisplayFmt {
         bot: '─',
         warning_text: "Warning: this tree is indicative only. Some tags may have been hidden.",
     },
-    perm: DisplayFmtPermission { open: "|", sep: "|", close: "|", uninit: "---", range_sep: ".." },
+    perm: DisplayFmtPermission { open: "|", sep: "|", close: "|", uninit: "----", range_sep: ".." },
     padding: DisplayFmtPadding {
         join_middle: "├",
         join_last: "└",
@@ -743,6 +798,6 @@ impl<'tcx> Tree {
                 /* print warning message about tags not shown */ !show_unnamed,
             );
         }
-        Ok(())
+        interp_ok(())
     }
 }

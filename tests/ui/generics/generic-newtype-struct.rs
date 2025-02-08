@@ -1,7 +1,6 @@
-// run-pass
-// pretty-expanded FIXME #23616
+//@ run-pass
 
-struct S<T>(#[allow(unused_tuple_struct_fields)] T);
+struct S<T>(#[allow(dead_code)] T);
 
 pub fn main() {
     let _s = S(2);

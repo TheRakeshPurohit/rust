@@ -1,7 +1,7 @@
 use clippy_utils::diagnostics::span_lint;
 use rustc_ast::ast::{Expr, ExprKind, Stmt, StmtKind};
 use rustc_lint::{EarlyContext, EarlyLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -13,12 +13,12 @@ declare_clippy_lint! {
     /// where such assignments return a copy of the assigned value.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     ///# let (a, b);
     /// a = b = 42;
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     ///# let (a, b);
     /// b = 42;
     /// a = b;
@@ -56,10 +56,10 @@ impl EarlyLintPass for MultiAssignments {
         if let ExprKind::Assign(target, source, _) = &expr.kind {
             if let ExprKind::Assign(_target, _source, _) = &strip_paren_blocks(target).kind {
                 span_lint(cx, MULTI_ASSIGNMENTS, expr.span, "assignments don't nest intuitively");
-            };
+            }
             if let ExprKind::Assign(_target, _source, _) = &strip_paren_blocks(source).kind {
                 span_lint(cx, MULTI_ASSIGNMENTS, expr.span, "assignments don't nest intuitively");
             }
-        };
+        }
     }
 }

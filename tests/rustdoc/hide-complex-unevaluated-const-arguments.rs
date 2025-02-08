@@ -4,10 +4,12 @@
 //
 // Read the documentation of `rustdoc::clean::utils::print_const_expr`
 // for further details.
-#![feature(const_trait_impl, generic_const_exprs)]
+#![feature(const_trait_impl, generic_const_exprs, adt_const_params, generic_const_items)]
 #![allow(incomplete_features)]
 
-// @has hide_complex_unevaluated_const_arguments/trait.Stage.html
+use std::marker::ConstParamTy;
+
+//@ has hide_complex_unevaluated_const_arguments/trait.Stage.html
 pub trait Stage {
     // A helper constant that prevents const expressions containing it
     // from getting fully evaluated since it doesn't have a body and
@@ -27,20 +29,22 @@ pub trait Stage {
     // This assoc. const could leak the private assoc. function `Struct::new`.
     // Ensure that this does not happen.
     //
-    // @has - '//*[@id="associatedconstant.ARRAY1"]' \
+    //@ has - '//*[@id="associatedconstant.ARRAY1"]' \
     //        'const ARRAY1: [u8; { _ }]'
-    const ARRAY1: [u8; Struct::new(/* ... */).do_something(Self::ABSTRACT * 1_000)];
+    const ARRAY1: [u8; Struct::new(/* ... */).do_something(Self::ABSTRACT * 1_000)]
+        where [(); Struct::new(/* ... */).do_something(Self::ABSTRACT * 1_000)]:;
 
-    // @has - '//*[@id="associatedconstant.VERBOSE"]' \
+    //@ has - '//*[@id="associatedconstant.VERBOSE"]' \
     //        'const VERBOSE: [u16; { _ }]'
-    const VERBOSE: [u16; compute("thing", 9 + 9) * Self::ABSTRACT];
+    const VERBOSE: [u16; compute("thing", 9 + 9) * Self::ABSTRACT]
+        where [(); compute("thing", 9 + 9) * Self::ABSTRACT]:;
 
     // Check that we do not leak the private struct field contained within
     // the path. The output could definitely be improved upon
     // (e.g. printing sth. akin to `<Self as Helper<{ _ }>>::OUT`) but
     // right now “safe is safe”.
     //
-    // @has - '//*[@id="associatedconstant.PATH"]' \
+    //@ has - '//*[@id="associatedconstant.PATH"]' \
     //        'const PATH: usize = _'
     const PATH: usize = <Self as Helper<{ Struct { private: () } }>>::OUT;
 }
@@ -62,13 +66,14 @@ impl<const S: Struct, St: Stage + ?Sized> Helper<S> for St {
 // If rustdoc gets patched to evaluate const arguments, it is fine to replace
 // this test as long as one can ensure that private fields are not leaked!
 //
-// @has hide_complex_unevaluated_const_arguments/trait.Sub.html \
+//@ has hide_complex_unevaluated_const_arguments/trait.Sub.html \
 //      '//pre[@class="rust item-decl"]' \
 //      'pub trait Sub: Sup<{ _ }, { _ }> { }'
 pub trait Sub: Sup<{ 90 * 20 * 4 }, { Struct { private: () } }> {}
 
 pub trait Sup<const N: usize, const S: Struct> {}
 
+#[derive(ConstParamTy, PartialEq, Eq)]
 pub struct Struct { private: () }
 
 impl Struct {

@@ -1,10 +1,10 @@
 // Helpers for handling cast expressions, used in both
 // typeck and codegen.
 
-use crate::ty::{self, Ty};
+use rustc_macros::{HashStable, TyDecodable, TyEncodable};
 use rustc_middle::mir;
 
-use rustc_macros::HashStable;
+use crate::ty::{self, Ty};
 
 /// Types that are represented as ints.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -34,15 +34,12 @@ pub enum CastTy<'tcx> {
     FnPtr,
     /// Raw pointers.
     Ptr(ty::TypeAndMut<'tcx>),
-    /// Casting into a `dyn*` value.
-    DynStar,
 }
 
 /// Cast Kind. See [RFC 401](https://rust-lang.github.io/rfcs/0401-coercions.html)
 /// (or rustc_hir_analysis/check/cast.rs).
 #[derive(Copy, Clone, Debug, TyEncodable, TyDecodable, HashStable)]
 pub enum CastKind {
-    CoercionCast,
     PtrPtrCast,
     PtrAddrCast,
     AddrPtrCast,
@@ -53,7 +50,6 @@ pub enum CastKind {
     ArrayPtrCast,
     FnPtrPtrCast,
     FnPtrAddrCast,
-    DynStarCast,
 }
 
 impl<'tcx> CastTy<'tcx> {
@@ -69,9 +65,8 @@ impl<'tcx> CastTy<'tcx> {
             ty::Uint(u) => Some(CastTy::Int(IntTy::U(u))),
             ty::Float(_) => Some(CastTy::Float),
             ty::Adt(d, _) if d.is_enum() && d.is_payloadfree() => Some(CastTy::Int(IntTy::CEnum)),
-            ty::RawPtr(mt) => Some(CastTy::Ptr(mt)),
+            ty::RawPtr(ty, mutbl) => Some(CastTy::Ptr(ty::TypeAndMut { ty, mutbl })),
             ty::FnPtr(..) => Some(CastTy::FnPtr),
-            ty::Dynamic(_, _, ty::DynStar) => Some(CastTy::DynStar),
             _ => None,
         }
     }
@@ -83,10 +78,9 @@ pub fn mir_cast_kind<'tcx>(from_ty: Ty<'tcx>, cast_ty: Ty<'tcx>) -> mir::CastKin
     let cast = CastTy::from_ty(cast_ty);
     let cast_kind = match (from, cast) {
         (Some(CastTy::Ptr(_) | CastTy::FnPtr), Some(CastTy::Int(_))) => {
-            mir::CastKind::PointerExposeAddress
+            mir::CastKind::PointerExposeProvenance
         }
-        (Some(CastTy::Int(_)), Some(CastTy::Ptr(_))) => mir::CastKind::PointerFromExposedAddress,
-        (_, Some(CastTy::DynStar)) => mir::CastKind::DynStar,
+        (Some(CastTy::Int(_)), Some(CastTy::Ptr(_))) => mir::CastKind::PointerWithExposedProvenance,
         (Some(CastTy::Int(_)), Some(CastTy::Int(_))) => mir::CastKind::IntToInt,
         (Some(CastTy::FnPtr), Some(CastTy::Ptr(_))) => mir::CastKind::FnPtrToPtr,
 

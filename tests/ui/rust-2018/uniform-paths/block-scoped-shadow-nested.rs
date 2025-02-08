@@ -1,4 +1,5 @@
-// edition:2018
+//@ check-pass
+//@ edition:2018
 
 mod my {
     pub mod sub {
@@ -13,7 +14,7 @@ mod sub {
 fn foo() {
     use my::sub;
     {
-        use sub::bar; //~ ERROR `sub` is ambiguous
+        use sub::bar; // OK
     }
 }
 

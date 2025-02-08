@@ -1,27 +1,20 @@
-// min-lldb-version: 310
-// ignore-gdb-version: 7.11.90 - 7.12.9
-
-// compile-flags:-g
+//@ compile-flags:-g
 
 // === GDB TESTS ===================================================================================
 
 // gdb-command:run
 
 // gdb-command:print packed
-// gdbg-check:$1 = {x = 123, y = 234, z = 345}
-// gdbr-check:$1 = packed_struct::Packed {x: 123, y: 234, z: 345}
+// gdb-check:$1 = packed_struct::Packed {x: 123, y: 234, z: 345}
 
 // gdb-command:print packedInPacked
-// gdbg-check:$2 = {a = 1111, b = {x = 2222, y = 3333, z = 4444}, c = 5555, d = {x = 6666, y = 7777, z = 8888}}
-// gdbr-check:$2 = packed_struct::PackedInPacked {a: 1111, b: packed_struct::Packed {x: 2222, y: 3333, z: 4444}, c: 5555, d: packed_struct::Packed {x: 6666, y: 7777, z: 8888}}
+// gdb-check:$2 = packed_struct::PackedInPacked {a: 1111, b: packed_struct::Packed {x: 2222, y: 3333, z: 4444}, c: 5555, d: packed_struct::Packed {x: 6666, y: 7777, z: 8888}}
 
 // gdb-command:print packedInUnpacked
-// gdbg-check:$3 = {a = -1111, b = {x = -2222, y = -3333, z = -4444}, c = -5555, d = {x = -6666, y = -7777, z = -8888}}
-// gdbr-check:$3 = packed_struct::PackedInUnpacked {a: -1111, b: packed_struct::Packed {x: -2222, y: -3333, z: -4444}, c: -5555, d: packed_struct::Packed {x: -6666, y: -7777, z: -8888}}
+// gdb-check:$3 = packed_struct::PackedInUnpacked {a: -1111, b: packed_struct::Packed {x: -2222, y: -3333, z: -4444}, c: -5555, d: packed_struct::Packed {x: -6666, y: -7777, z: -8888}}
 
 // gdb-command:print unpackedInPacked
-// gdbg-check:$4 = {a = 987, b = {x = 876, y = 765, z = 654, w = 543}, c = {x = 432, y = 321, z = 210, w = 109}, d = -98}
-// gdbr-check:$4 = packed_struct::UnpackedInPacked {a: 987, b: packed_struct::Unpacked {x: 876, y: 765, z: 654, w: 543}, c: packed_struct::Unpacked {x: 432, y: 321, z: 210, w: 109}, d: -98}
+// gdb-check:$4 = packed_struct::UnpackedInPacked {a: 987, b: packed_struct::Unpacked {x: 876, y: 765, z: 654, w: 543}, c: packed_struct::Unpacked {x: 432, y: 321, z: 210, w: 109}, d: -98}
 
 // gdb-command:print sizeof(packed)
 // gdb-check:$5 = 14
@@ -34,29 +27,23 @@
 
 // lldb-command:run
 
-// lldb-command:print packed
-// lldbg-check:[...]$0 = { x = 123 y = 234 z = 345 }
-// lldbr-check:(packed_struct::Packed) packed = { x = 123 y = 234 z = 345 }
+// lldb-command:v packed
+// lldb-check:[...] { x = 123 y = 234 z = 345 }
 
-// lldb-command:print packedInPacked
-// lldbg-check:[...]$1 = { a = 1111 b = { x = 2222 y = 3333 z = 4444 } c = 5555 d = { x = 6666 y = 7777 z = 8888 } }
-// lldbr-check:(packed_struct::PackedInPacked) packedInPacked = { a = 1111 b = { x = 2222 y = 3333 z = 4444 } c = 5555 d = { x = 6666 y = 7777 z = 8888 } }
+// lldb-command:v packedInPacked
+// lldb-check:[...] { a = 1111 b = { x = 2222 y = 3333 z = 4444 } c = 5555 d = { x = 6666 y = 7777 z = 8888 } }
 
-// lldb-command:print packedInUnpacked
-// lldbg-check:[...]$2 = { a = -1111 b = { x = -2222 y = -3333 z = -4444 } c = -5555 d = { x = -6666 y = -7777 z = -8888 } }
-// lldbr-check:(packed_struct::PackedInUnpacked) packedInUnpacked = { a = -1111 b = { x = -2222 y = -3333 z = -4444 } c = -5555 d = { x = -6666 y = -7777 z = -8888 } }
+// lldb-command:v packedInUnpacked
+// lldb-check:[...] { a = -1111 b = { x = -2222 y = -3333 z = -4444 } c = -5555 d = { x = -6666 y = -7777 z = -8888 } }
 
-// lldb-command:print unpackedInPacked
-// lldbg-check:[...]$3 = { a = 987 b = { x = 876 y = 765 z = 654 w = 543 } c = { x = 432 y = 321 z = 210 w = 109 } d = -98 }
-// lldbr-check:(packed_struct::UnpackedInPacked) unpackedInPacked = { a = 987 b = { x = 876 y = 765 z = 654 w = 543 } c = { x = 432 y = 321 z = 210 w = 109 } d = -98 }
+// lldb-command:v unpackedInPacked
+// lldb-check:[...] { a = 987 b = { x = 876 y = 765 z = 654 w = 543 } c = { x = 432 y = 321 z = 210 w = 109 } d = -98 }
 
-// lldb-command:print sizeof(packed)
-// lldbg-check:[...]$4 = 14
-// lldbr-check:(usize) = 14
+// lldb-command:expr sizeof(packed)
+// lldb-check:[...] 14
 
-// lldb-command:print sizeof(packedInPacked)
-// lldbg-check:[...]$5 = 40
-// lldbr-check:(usize) = 40
+// lldb-command:expr sizeof(packedInPacked)
+// lldb-check:[...] 40
 
 #![allow(unused_variables)]
 #![feature(omit_gdb_pretty_printer_section)]

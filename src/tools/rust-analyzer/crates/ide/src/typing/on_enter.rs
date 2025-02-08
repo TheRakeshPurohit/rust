@@ -1,8 +1,9 @@
 //! Handles the `Enter` key press. At the momently, this only continues
 //! comments, but should handle indent some time in the future as well.
 
-use ide_db::base_db::{FilePosition, SourceDatabase};
 use ide_db::RootDatabase;
+use ide_db::{base_db::SourceDatabase, FilePosition};
+use span::EditionedFileId;
 use syntax::{
     algo::find_node_at_offset,
     ast::{self, edit::IndentLevel, AstToken},
@@ -11,7 +12,7 @@ use syntax::{
     SyntaxNode, SyntaxToken, TextRange, TextSize, TokenAtOffset,
 };
 
-use text_edit::TextEdit;
+use ide_db::text_edit::TextEdit;
 
 // Feature: On Enter
 //
@@ -52,7 +53,7 @@ use text_edit::TextEdit;
 //
 // image::https://user-images.githubusercontent.com/48062697/113065578-04c21800-91b1-11eb-82b8-22b8c481e645.gif[]
 pub(crate) fn on_enter(db: &RootDatabase, position: FilePosition) -> Option<TextEdit> {
-    let parse = db.parse(position.file_id);
+    let parse = db.parse(EditionedFileId::current_edition(position.file_id));
     let file = parse.tree();
     let token = file.syntax().token_at_offset(position.offset).left_biased()?;
 
@@ -207,7 +208,10 @@ mod tests {
         Some(actual)
     }
 
-    fn do_check(ra_fixture_before: &str, ra_fixture_after: &str) {
+    fn do_check(
+        #[rust_analyzer::rust_fixture] ra_fixture_before: &str,
+        #[rust_analyzer::rust_fixture] ra_fixture_after: &str,
+    ) {
         let ra_fixture_after = &trim_indent(ra_fixture_after);
         let actual = apply_on_enter(ra_fixture_before).unwrap();
         assert_eq_text!(ra_fixture_after, &actual);

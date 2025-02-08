@@ -1,4 +1,4 @@
-use crate::num::NonZeroUsize;
+use crate::num::NonZero;
 use crate::ops::{ControlFlow, Try};
 
 /// An iterator able to yield elements from both ends.
@@ -100,7 +100,7 @@ pub trait DoubleEndedIterator: Iterator {
     /// to `n` times until [`None`] is encountered.
     ///
     /// `advance_back_by(n)` will return `Ok(())` if the iterator successfully advances by
-    /// `n` elements, or a `Err(NonZeroUsize)` with value `k` if [`None`] is encountered, where `k`
+    /// `n` elements, or a `Err(NonZero<usize>)` with value `k` if [`None`] is encountered, where `k`
     /// is remaining number of steps that could not be advanced because the iterator ran out.
     /// If `self` is empty and `n` is non-zero, then this returns `Err(n)`.
     /// Otherwise, `k` is always less than `n`.
@@ -120,25 +120,26 @@ pub trait DoubleEndedIterator: Iterator {
     /// ```
     /// #![feature(iter_advance_by)]
     ///
-    /// use std::num::NonZeroUsize;
+    /// use std::num::NonZero;
+    ///
     /// let a = [3, 4, 5, 6];
     /// let mut iter = a.iter();
     ///
     /// assert_eq!(iter.advance_back_by(2), Ok(()));
     /// assert_eq!(iter.next_back(), Some(&4));
     /// assert_eq!(iter.advance_back_by(0), Ok(()));
-    /// assert_eq!(iter.advance_back_by(100), Err(NonZeroUsize::new(99).unwrap())); // only `&3` was skipped
+    /// assert_eq!(iter.advance_back_by(100), Err(NonZero::new(99).unwrap())); // only `&3` was skipped
     /// ```
     ///
     /// [`Ok(())`]: Ok
     /// [`Err(k)`]: Err
     #[inline]
     #[unstable(feature = "iter_advance_by", reason = "recently added", issue = "77404")]
-    fn advance_back_by(&mut self, n: usize) -> Result<(), NonZeroUsize> {
+    fn advance_back_by(&mut self, n: usize) -> Result<(), NonZero<usize>> {
         for i in 0..n {
             if self.next_back().is_none() {
                 // SAFETY: `i` is always less than `n`.
-                return Err(unsafe { NonZeroUsize::new_unchecked(n - i) });
+                return Err(unsafe { NonZero::new_unchecked(n - i) });
             }
         }
         Ok(())
@@ -373,10 +374,72 @@ impl<'a, I: DoubleEndedIterator + ?Sized> DoubleEndedIterator for &'a mut I {
     fn next_back(&mut self) -> Option<I::Item> {
         (**self).next_back()
     }
-    fn advance_back_by(&mut self, n: usize) -> Result<(), NonZeroUsize> {
+    fn advance_back_by(&mut self, n: usize) -> Result<(), NonZero<usize>> {
         (**self).advance_back_by(n)
     }
     fn nth_back(&mut self, n: usize) -> Option<I::Item> {
         (**self).nth_back(n)
+    }
+    fn rfold<B, F>(self, init: B, f: F) -> B
+    where
+        F: FnMut(B, Self::Item) -> B,
+    {
+        self.spec_rfold(init, f)
+    }
+    fn try_rfold<B, F, R>(&mut self, init: B, f: F) -> R
+    where
+        F: FnMut(B, Self::Item) -> R,
+        R: Try<Output = B>,
+    {
+        self.spec_try_rfold(init, f)
+    }
+}
+
+/// Helper trait to specialize `rfold` and `rtry_fold` for `&mut I where I: Sized`
+trait DoubleEndedIteratorRefSpec: DoubleEndedIterator {
+    fn spec_rfold<B, F>(self, init: B, f: F) -> B
+    where
+        F: FnMut(B, Self::Item) -> B;
+
+    fn spec_try_rfold<B, F, R>(&mut self, init: B, f: F) -> R
+    where
+        F: FnMut(B, Self::Item) -> R,
+        R: Try<Output = B>;
+}
+
+impl<I: DoubleEndedIterator + ?Sized> DoubleEndedIteratorRefSpec for &mut I {
+    default fn spec_rfold<B, F>(self, init: B, mut f: F) -> B
+    where
+        F: FnMut(B, Self::Item) -> B,
+    {
+        let mut accum = init;
+        while let Some(x) = self.next_back() {
+            accum = f(accum, x);
+        }
+        accum
+    }
+
+    default fn spec_try_rfold<B, F, R>(&mut self, init: B, mut f: F) -> R
+    where
+        F: FnMut(B, Self::Item) -> R,
+        R: Try<Output = B>,
+    {
+        let mut accum = init;
+        while let Some(x) = self.next_back() {
+            accum = f(accum, x)?;
+        }
+        try { accum }
+    }
+}
+
+impl<I: DoubleEndedIterator> DoubleEndedIteratorRefSpec for &mut I {
+    impl_fold_via_try_fold! { spec_rfold -> spec_try_rfold }
+
+    fn spec_try_rfold<B, F, R>(&mut self, init: B, f: F) -> R
+    where
+        F: FnMut(B, Self::Item) -> R,
+        R: Try<Output = B>,
+    {
+        (**self).try_rfold(init, f)
     }
 }

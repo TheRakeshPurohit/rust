@@ -1,9 +1,9 @@
 use clippy_utils::diagnostics::{span_lint, span_lint_and_sugg};
-use clippy_utils::source::snippet_opt;
+use clippy_utils::source::SpanRangeExt;
 use rustc_errors::Applicability;
 use rustc_hir::{Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::sym;
 use std::fmt;
 
@@ -17,7 +17,7 @@ declare_clippy_lint! {
     /// cast by using the `add` method instead.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let vec = vec![b'a', b'b', b'c'];
     /// let ptr = vec.as_ptr();
     /// let offset = 1_usize;
@@ -29,7 +29,7 @@ declare_clippy_lint! {
     ///
     /// Could be written:
     ///
-    /// ```rust
+    /// ```no_run
     /// let vec = vec![b'a', b'b', b'c'];
     /// let ptr = vec.as_ptr();
     /// let offset = 1_usize;
@@ -50,12 +50,12 @@ impl<'tcx> LateLintPass<'tcx> for PtrOffsetWithCast {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
         // Check if the expressions is a ptr.offset or ptr.wrapping_offset method call
         let Some((receiver_expr, arg_expr, method)) = expr_as_ptr_offset_call(cx, expr) else {
-            return
+            return;
         };
 
         // Check if the argument to the method call is a cast from usize
         let Some(cast_lhs_expr) = expr_as_cast_from_usize(cx, arg_expr) else {
-            return
+            return;
         };
 
         let msg = format!("use of `{method}` with a `usize` casted to an `isize`");
@@ -64,13 +64,13 @@ impl<'tcx> LateLintPass<'tcx> for PtrOffsetWithCast {
                 cx,
                 PTR_OFFSET_WITH_CAST,
                 expr.span,
-                &msg,
+                msg,
                 "try",
                 sugg,
                 Applicability::MachineApplicable,
             );
         } else {
-            span_lint(cx, PTR_OFFSET_WITH_CAST, expr.span, &msg);
+            span_lint(cx, PTR_OFFSET_WITH_CAST, expr.span, msg);
         }
     }
 }
@@ -91,12 +91,12 @@ fn expr_as_ptr_offset_call<'tcx>(
     cx: &LateContext<'tcx>,
     expr: &'tcx Expr<'_>,
 ) -> Option<(&'tcx Expr<'tcx>, &'tcx Expr<'tcx>, Method)> {
-    if let ExprKind::MethodCall(path_segment, arg_0, [arg_1, ..], _) = &expr.kind {
+    if let ExprKind::MethodCall(path_segment, arg_0, [arg_1], _) = &expr.kind {
         if is_expr_ty_raw_ptr(cx, arg_0) {
             if path_segment.ident.name == sym::offset {
                 return Some((arg_0, arg_1, Method::Offset));
             }
-            if path_segment.ident.name == sym!(wrapping_offset) {
+            if path_segment.ident.name.as_str() == "wrapping_offset" {
                 return Some((arg_0, arg_1, Method::WrappingOffset));
             }
         }
@@ -120,8 +120,8 @@ fn build_suggestion(
     receiver_expr: &Expr<'_>,
     cast_lhs_expr: &Expr<'_>,
 ) -> Option<String> {
-    let receiver = snippet_opt(cx, receiver_expr.span)?;
-    let cast_lhs = snippet_opt(cx, cast_lhs_expr.span)?;
+    let receiver = receiver_expr.span.get_source_text(cx)?;
+    let cast_lhs = cast_lhs_expr.span.get_source_text(cx)?;
     Some(format!("{receiver}.{}({cast_lhs})", method.suggestion()))
 }
 

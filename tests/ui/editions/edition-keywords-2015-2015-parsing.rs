@@ -1,5 +1,5 @@
-// edition:2015
-// aux-build:edition-kw-macro-2015.rs
+//@ edition:2015
+//@ aux-build:edition-kw-macro-2015.rs
 
 #[macro_use]
 extern crate edition_kw_macro_2015;
@@ -13,12 +13,14 @@ pub fn check_async() {
     let mut r#async = 1; // OK
 
     r#async = consumes_async!(async); // OK
-    r#async = consumes_async!(r#async); //~ ERROR no rules expected the token `r#async`
-    r#async = consumes_async_raw!(async); //~ ERROR no rules expected the token `async`
+    r#async = consumes_async!(r#async); //~ ERROR no rules expected `r#async`
+    r#async = consumes_async_raw!(async); //~ ERROR no rules expected `async`
     r#async = consumes_async_raw!(r#async); // OK
 
     if passes_ident!(async) == 1 {} // OK
     if passes_ident!(r#async) == 1 {} // OK
+    if passes_tt!(async) == 1 {} // OK
+    if passes_tt!(r#async) == 1 {} // OK
     module::async(); // OK
     module::r#async(); // OK
 }

@@ -1,9 +1,12 @@
 //! Definition of [`CValue`] and [`CPlace`]
 
-use crate::prelude::*;
-
 use cranelift_codegen::entity::EntityRef;
 use cranelift_codegen::ir::immediates::Offset32;
+use cranelift_frontend::Variable;
+use rustc_middle::ty::FnSig;
+use rustc_middle::ty::layout::HasTypingEnv;
+
+use crate::prelude::*;
 
 fn codegen_field<'tcx>(
     fx: &mut FunctionCx<'_, '_, 'tcx>,
@@ -19,34 +22,36 @@ fn codegen_field<'tcx>(
         (base.offset_i64(fx, i64::try_from(field_offset.bytes()).unwrap()), field_layout)
     };
 
-    if let Some(extra) = extra {
-        if field_layout.is_sized() {
-            return simple(fx);
-        }
-        match field_layout.ty.kind() {
-            ty::Slice(..) | ty::Str | ty::Foreign(..) => simple(fx),
-            ty::Adt(def, _) if def.repr().packed() => {
-                assert_eq!(layout.align.abi.bytes(), 1);
-                simple(fx)
-            }
-            _ => {
-                // We have to align the offset for DST's
-                let unaligned_offset = field_offset.bytes();
-                let (_, unsized_align) =
-                    crate::unsize::size_and_align_of_dst(fx, field_layout, extra);
+    if field_layout.is_sized() {
+        return simple(fx);
+    }
+    match field_layout.ty.kind() {
+        ty::Slice(..) | ty::Str => simple(fx),
+        _ => {
+            let unaligned_offset = field_offset.bytes();
 
-                let one = fx.bcx.ins().iconst(fx.pointer_type, 1);
-                let align_sub_1 = fx.bcx.ins().isub(unsized_align, one);
-                let and_lhs = fx.bcx.ins().iadd_imm(align_sub_1, unaligned_offset as i64);
-                let zero = fx.bcx.ins().iconst(fx.pointer_type, 0);
-                let and_rhs = fx.bcx.ins().isub(zero, unsized_align);
-                let offset = fx.bcx.ins().band(and_lhs, and_rhs);
+            // Get the alignment of the field
+            let (_, mut unsized_align) = crate::unsize::size_and_align_of(fx, field_layout, extra);
 
-                (base.offset_value(fx, offset), field_layout)
+            // For packed types, we need to cap alignment.
+            if let ty::Adt(def, _) = layout.ty.kind() {
+                if let Some(packed) = def.repr().pack {
+                    let packed = fx.bcx.ins().iconst(fx.pointer_type, packed.bytes() as i64);
+                    let cmp = fx.bcx.ins().icmp(IntCC::UnsignedLessThan, unsized_align, packed);
+                    unsized_align = fx.bcx.ins().select(cmp, unsized_align, packed);
+                }
             }
+
+            // Bump the unaligned offset up to the appropriate alignment
+            let one = fx.bcx.ins().iconst(fx.pointer_type, 1);
+            let align_sub_1 = fx.bcx.ins().isub(unsized_align, one);
+            let and_lhs = fx.bcx.ins().iadd_imm(align_sub_1, unaligned_offset as i64);
+            let zero = fx.bcx.ins().iconst(fx.pointer_type, 0);
+            let and_rhs = fx.bcx.ins().isub(zero, unsized_align);
+            let offset = fx.bcx.ins().band(and_lhs, and_rhs);
+
+            (base.offset_value(fx, offset), field_layout)
         }
-    } else {
-        simple(fx)
     }
 }
 
@@ -91,6 +96,14 @@ impl<'tcx> CValue<'tcx> {
         CValue(CValueInner::ByValPair(value, extra), layout)
     }
 
+    /// Create an instance of a ZST
+    ///
+    /// The is represented by a dangling pointer of suitable alignment.
+    pub(crate) fn zst(layout: TyAndLayout<'tcx>) -> CValue<'tcx> {
+        assert!(layout.is_zst());
+        CValue::by_ref(crate::Pointer::dangling(layout.align.pref), layout)
+    }
+
     pub(crate) fn layout(&self) -> TyAndLayout<'tcx> {
         self.1
     }
@@ -119,8 +132,8 @@ impl<'tcx> CValue<'tcx> {
 
         match self.0 {
             CValueInner::ByRef(ptr, None) => {
-                let (a_scalar, b_scalar) = match self.1.abi {
-                    Abi::ScalarPair(a, b) => (a, b),
+                let (a_scalar, b_scalar) = match self.1.backend_repr {
+                    BackendRepr::ScalarPair(a, b) => (a, b),
                     _ => unreachable!("dyn_star_force_data_on_stack({:?})", self),
                 };
                 let b_offset = scalar_pair_calculate_b_offset(fx.tcx, a_scalar, b_scalar);
@@ -131,18 +144,11 @@ impl<'tcx> CValue<'tcx> {
                 (ptr.get_addr(fx), vtable)
             }
             CValueInner::ByValPair(data, vtable) => {
-                let stack_slot = fx.bcx.create_sized_stack_slot(StackSlotData {
-                    kind: StackSlotKind::ExplicitSlot,
-                    // FIXME Don't force the size to a multiple of 16 bytes once Cranelift gets a way to
-                    // specify stack slot alignment.
-                    size: (u32::try_from(fx.target_config.pointer_type().bytes()).unwrap() + 15)
-                        / 16
-                        * 16,
-                });
-                let data_ptr = Pointer::stack_slot(stack_slot);
-                let mut flags = MemFlags::new();
-                flags.set_notrap();
-                data_ptr.store(fx, data, flags);
+                let data_ptr = fx.create_stack_slot(
+                    u32::try_from(fx.target_config.pointer_type().bytes()).unwrap(),
+                    u32::try_from(fx.target_config.pointer_type().bytes()).unwrap(),
+                );
+                data_ptr.store(fx, data, MemFlags::trusted());
 
                 (data_ptr.get_addr(fx), vtable)
             }
@@ -159,14 +165,15 @@ impl<'tcx> CValue<'tcx> {
         }
     }
 
-    /// Load a value with layout.abi of scalar
+    /// Load a value with layout.backend_repr of scalar
+    #[track_caller]
     pub(crate) fn load_scalar(self, fx: &mut FunctionCx<'_, '_, 'tcx>) -> Value {
         let layout = self.1;
         match self.0 {
             CValueInner::ByRef(ptr, None) => {
-                let clif_ty = match layout.abi {
-                    Abi::Scalar(scalar) => scalar_to_clif_type(fx.tcx, scalar),
-                    Abi::Vector { element, count } => scalar_to_clif_type(fx.tcx, element)
+                let clif_ty = match layout.backend_repr {
+                    BackendRepr::Scalar(scalar) => scalar_to_clif_type(fx.tcx, scalar),
+                    BackendRepr::Vector { element, count } => scalar_to_clif_type(fx.tcx, element)
                         .by(u32::try_from(count).unwrap())
                         .unwrap(),
                     _ => unreachable!("{:?}", layout.ty),
@@ -181,13 +188,14 @@ impl<'tcx> CValue<'tcx> {
         }
     }
 
-    /// Load a value pair with layout.abi of scalar pair
+    /// Load a value pair with layout.backend_repr of scalar pair
+    #[track_caller]
     pub(crate) fn load_scalar_pair(self, fx: &mut FunctionCx<'_, '_, 'tcx>) -> (Value, Value) {
         let layout = self.1;
         match self.0 {
             CValueInner::ByRef(ptr, None) => {
-                let (a_scalar, b_scalar) = match layout.abi {
-                    Abi::ScalarPair(a, b) => (a, b),
+                let (a_scalar, b_scalar) = match layout.backend_repr {
+                    BackendRepr::ScalarPair(a, b) => (a, b),
                     _ => unreachable!("load_scalar_pair({:?})", self),
                 };
                 let b_offset = scalar_pair_calculate_b_offset(fx.tcx, a_scalar, b_scalar);
@@ -215,8 +223,8 @@ impl<'tcx> CValue<'tcx> {
         let layout = self.1;
         match self.0 {
             CValueInner::ByVal(_) => unreachable!(),
-            CValueInner::ByValPair(val1, val2) => match layout.abi {
-                Abi::ScalarPair(_, _) => {
+            CValueInner::ByValPair(val1, val2) => match layout.backend_repr {
+                BackendRepr::ScalarPair(_, _) => {
                     let val = match field.as_u32() {
                         0 => val1,
                         1 => val2,
@@ -225,7 +233,7 @@ impl<'tcx> CValue<'tcx> {
                     let field_layout = layout.field(&*fx, usize::from(field));
                     CValue::by_val(val, field_layout)
                 }
-                _ => unreachable!("value_field for ByValPair with abi {:?}", layout.abi),
+                _ => unreachable!("value_field for ByValPair with abi {:?}", layout.backend_repr),
             },
             CValueInner::ByRef(ptr, None) => {
                 let (field_ptr, field_layout) = codegen_field(fx, ptr, None, layout, field);
@@ -247,6 +255,34 @@ impl<'tcx> CValue<'tcx> {
         let (lane_count, lane_ty) = layout.ty.simd_size_and_type(fx.tcx);
         let lane_layout = fx.layout_of(lane_ty);
         assert!(lane_idx < lane_count);
+
+        match self.0 {
+            CValueInner::ByVal(_) | CValueInner::ByValPair(_, _) => unreachable!(),
+            CValueInner::ByRef(ptr, None) => {
+                let field_offset = lane_layout.size * lane_idx;
+                let field_ptr = ptr.offset_i64(fx, i64::try_from(field_offset.bytes()).unwrap());
+                CValue::by_ref(field_ptr, lane_layout)
+            }
+            CValueInner::ByRef(_, Some(_)) => unreachable!(),
+        }
+    }
+
+    /// Like [`CValue::value_field`] except using the passed type as lane type instead of the one
+    /// specified by the vector type.
+    pub(crate) fn value_typed_lane(
+        self,
+        fx: &mut FunctionCx<'_, '_, 'tcx>,
+        lane_ty: Ty<'tcx>,
+        lane_idx: u64,
+    ) -> CValue<'tcx> {
+        let layout = self.1;
+        assert!(layout.ty.is_simd());
+        let (orig_lane_count, orig_lane_ty) = layout.ty.simd_size_and_type(fx.tcx);
+        let lane_layout = fx.layout_of(lane_ty);
+        assert!(
+            (lane_idx + 1) * lane_layout.size <= orig_lane_count * fx.layout_of(orig_lane_ty).size
+        );
+
         match self.0 {
             CValueInner::ByVal(_) | CValueInner::ByValPair(_, _) => unreachable!(),
             CValueInner::ByRef(ptr, None) => {
@@ -290,23 +326,22 @@ impl<'tcx> CValue<'tcx> {
 
         let clif_ty = fx.clif_type(layout.ty).unwrap();
 
-        if let ty::Bool = layout.ty.kind() {
-            assert!(
-                const_val == ty::ScalarInt::FALSE || const_val == ty::ScalarInt::TRUE,
-                "Invalid bool 0x{:032X}",
-                const_val
-            );
-        }
-
         let val = match layout.ty.kind() {
             ty::Uint(UintTy::U128) | ty::Int(IntTy::I128) => {
-                let const_val = const_val.to_bits(layout.size).unwrap();
+                let const_val = const_val.to_bits(layout.size);
                 let lsb = fx.bcx.ins().iconst(types::I64, const_val as u64 as i64);
                 let msb = fx.bcx.ins().iconst(types::I64, (const_val >> 64) as u64 as i64);
                 fx.bcx.ins().iconcat(lsb, msb)
             }
-            ty::Bool | ty::Char | ty::Uint(_) | ty::Int(_) | ty::Ref(..) | ty::RawPtr(..) => {
-                fx.bcx.ins().iconst(clif_ty, const_val.to_bits(layout.size).unwrap() as i64)
+            ty::Bool
+            | ty::Char
+            | ty::Uint(_)
+            | ty::Int(_)
+            | ty::Ref(..)
+            | ty::RawPtr(..)
+            | ty::FnPtr(..) => {
+                let raw_val = const_val.size().truncate(const_val.to_bits(layout.size));
+                fx.bcx.ins().iconst(clif_ty, raw_val as i64)
             }
             ty::Float(FloatTy::F32) => {
                 fx.bcx.ins().f32const(Ieee32::with_bits(u32::try_from(const_val).unwrap()))
@@ -326,7 +361,7 @@ impl<'tcx> CValue<'tcx> {
     pub(crate) fn cast_pointer_to(self, layout: TyAndLayout<'tcx>) -> Self {
         assert!(matches!(self.layout().ty.kind(), ty::Ref(..) | ty::RawPtr(..) | ty::FnPtr(..)));
         assert!(matches!(layout.ty.kind(), ty::Ref(..) | ty::RawPtr(..) | ty::FnPtr(..)));
-        assert_eq!(self.layout().abi, layout.abi);
+        assert_eq!(self.layout().backend_repr, layout.backend_repr);
         CValue(self.0, layout)
     }
 }
@@ -364,17 +399,15 @@ impl<'tcx> CPlace<'tcx> {
 
         if layout.size.bytes() >= u64::from(u32::MAX - 16) {
             fx.tcx
-                .sess
+                .dcx()
                 .fatal(format!("values of type {} are too big to store on the stack", layout.ty));
         }
 
-        let stack_slot = fx.bcx.create_sized_stack_slot(StackSlotData {
-            kind: StackSlotKind::ExplicitSlot,
-            // FIXME Don't force the size to a multiple of 16 bytes once Cranelift gets a way to
-            // specify stack slot alignment.
-            size: (u32::try_from(layout.size.bytes()).unwrap() + 15) / 16 * 16,
-        });
-        CPlace { inner: CPlaceInner::Addr(Pointer::stack_slot(stack_slot), None), layout }
+        let stack_slot = fx.create_stack_slot(
+            u32::try_from(layout.size.bytes()).unwrap(),
+            u32::try_from(layout.align.pref.bytes()).unwrap(),
+        );
+        CPlace { inner: CPlaceInner::Addr(stack_slot, None), layout }
     }
 
     pub(crate) fn new_var(
@@ -539,13 +572,7 @@ impl<'tcx> CPlace<'tcx> {
                 _ if src_ty.is_vector() && dst_ty.is_vector() => codegen_bitcast(fx, dst_ty, data),
                 _ if src_ty.is_vector() || dst_ty.is_vector() => {
                     // FIXME(bytecodealliance/wasmtime#6104) do something more efficient for transmutes between vectors and integers.
-                    let stack_slot = fx.bcx.create_sized_stack_slot(StackSlotData {
-                        kind: StackSlotKind::ExplicitSlot,
-                        // FIXME Don't force the size to a multiple of 16 bytes once Cranelift gets a way to
-                        // specify stack slot alignment.
-                        size: (src_ty.bytes() + 15) / 16 * 16,
-                    });
-                    let ptr = Pointer::stack_slot(stack_slot);
+                    let ptr = fx.create_stack_slot(src_ty.bytes(), src_ty.bytes());
                     ptr.store(fx, data, MemFlags::trusted());
                     ptr.load(fx, dst_ty, MemFlags::trusted())
                 }
@@ -583,17 +610,27 @@ impl<'tcx> CPlace<'tcx> {
         let dst_layout = self.layout();
         match self.inner {
             CPlaceInner::Var(_local, var) => {
-                let data = CValue(from.0, dst_layout).load_scalar(fx);
+                let data = match from.1.backend_repr {
+                    BackendRepr::Scalar(_) => CValue(from.0, dst_layout).load_scalar(fx),
+                    _ => {
+                        let (ptr, meta) = from.force_stack(fx);
+                        assert!(meta.is_none());
+                        CValue(CValueInner::ByRef(ptr, None), dst_layout).load_scalar(fx)
+                    }
+                };
                 let dst_ty = fx.clif_type(self.layout().ty).unwrap();
                 transmute_scalar(fx, var, data, dst_ty);
             }
             CPlaceInner::VarPair(_local, var1, var2) => {
-                let (data1, data2) = if from.layout().ty == dst_layout.ty {
-                    CValue(from.0, dst_layout).load_scalar_pair(fx)
-                } else {
-                    let (ptr, meta) = from.force_stack(fx);
-                    assert!(meta.is_none());
-                    CValue(CValueInner::ByRef(ptr, None), dst_layout).load_scalar_pair(fx)
+                let (data1, data2) = match from.1.backend_repr {
+                    BackendRepr::ScalarPair(_, _) => {
+                        CValue(from.0, dst_layout).load_scalar_pair(fx)
+                    }
+                    _ => {
+                        let (ptr, meta) = from.force_stack(fx);
+                        assert!(meta.is_none());
+                        CValue(CValueInner::ByRef(ptr, None), dst_layout).load_scalar_pair(fx)
+                    }
                 };
                 let (dst_ty1, dst_ty2) = fx.clif_pair_type(self.layout().ty).unwrap();
                 transmute_scalar(fx, var1, data1, dst_ty1);
@@ -601,42 +638,59 @@ impl<'tcx> CPlace<'tcx> {
             }
             CPlaceInner::Addr(_, Some(_)) => bug!("Can't write value to unsized place {:?}", self),
             CPlaceInner::Addr(to_ptr, None) => {
-                if dst_layout.size == Size::ZERO || dst_layout.abi == Abi::Uninhabited {
+                if dst_layout.size == Size::ZERO
+                    || dst_layout.backend_repr == BackendRepr::Uninhabited
+                {
                     return;
                 }
 
                 let mut flags = MemFlags::new();
                 flags.set_notrap();
-                match from.layout().abi {
-                    Abi::Scalar(_) => {
-                        let val = from.load_scalar(fx);
-                        to_ptr.store(fx, val, flags);
-                        return;
-                    }
-                    Abi::ScalarPair(a_scalar, b_scalar) => {
-                        let (value, extra) = from.load_scalar_pair(fx);
-                        let b_offset = scalar_pair_calculate_b_offset(fx.tcx, a_scalar, b_scalar);
-                        to_ptr.store(fx, value, flags);
-                        to_ptr.offset(fx, b_offset).store(fx, extra, flags);
-                        return;
-                    }
-                    _ => {}
-                }
 
                 match from.0 {
                     CValueInner::ByVal(val) => {
                         to_ptr.store(fx, val, flags);
                     }
-                    CValueInner::ByValPair(_, _) => {
-                        bug!("Non ScalarPair abi {:?} for ByValPair CValue", dst_layout.abi);
-                    }
+                    CValueInner::ByValPair(val1, val2) => match from.layout().backend_repr {
+                        BackendRepr::ScalarPair(a_scalar, b_scalar) => {
+                            let b_offset =
+                                scalar_pair_calculate_b_offset(fx.tcx, a_scalar, b_scalar);
+                            to_ptr.store(fx, val1, flags);
+                            to_ptr.offset(fx, b_offset).store(fx, val2, flags);
+                        }
+                        _ => {
+                            bug!(
+                                "Non ScalarPair repr {:?} for ByValPair CValue",
+                                dst_layout.backend_repr
+                            )
+                        }
+                    },
                     CValueInner::ByRef(from_ptr, None) => {
+                        match from.layout().backend_repr {
+                            BackendRepr::Scalar(_) => {
+                                let val = from.load_scalar(fx);
+                                to_ptr.store(fx, val, flags);
+                                return;
+                            }
+                            BackendRepr::ScalarPair(a_scalar, b_scalar) => {
+                                let b_offset =
+                                    scalar_pair_calculate_b_offset(fx.tcx, a_scalar, b_scalar);
+                                let (val1, val2) = from.load_scalar_pair(fx);
+                                to_ptr.store(fx, val1, flags);
+                                to_ptr.offset(fx, b_offset).store(fx, val2, flags);
+                                return;
+                            }
+                            _ => {}
+                        }
+
                         let from_addr = from_ptr.get_addr(fx);
                         let to_addr = to_ptr.get_addr(fx);
                         let src_layout = from.1;
                         let size = dst_layout.size.bytes();
-                        let src_align = src_layout.align.abi.bytes() as u8;
-                        let dst_align = dst_layout.align.abi.bytes() as u8;
+                        // `emit_small_memory_copy` uses `u8` for alignments, just use the maximum
+                        // alignment that fits in a `u8` if the actual alignment is larger.
+                        let src_align = src_layout.align.abi.bytes().try_into().unwrap_or(128);
+                        let dst_align = dst_layout.align.abi.bytes().try_into().unwrap_or(128);
                         fx.bcx.emit_small_memory_copy(
                             fx.target_config,
                             to_addr,
@@ -654,7 +708,9 @@ impl<'tcx> CPlace<'tcx> {
         }
     }
 
-    pub(crate) fn place_opaque_cast(
+    /// Used for `ProjectionElem::Subtype`, `ty` has to be monomorphized before
+    /// passed on.
+    pub(crate) fn place_transmute_type(
         self,
         fx: &mut FunctionCx<'_, '_, 'tcx>,
         ty: Ty<'tcx>,
@@ -690,13 +746,8 @@ impl<'tcx> CPlace<'tcx> {
         };
 
         let (field_ptr, field_layout) = codegen_field(fx, base, extra, layout, field);
-        if field_layout.is_unsized() {
-            if let ty::Foreign(_) = field_layout.ty.kind() {
-                assert!(extra.is_none());
-                CPlace::for_ptr(field_ptr, field_layout)
-            } else {
-                CPlace::for_ptr_with_extra(field_ptr, extra.unwrap(), field_layout)
-            }
+        if has_ptr_meta(fx.tcx, field_layout.ty) {
+            CPlace::for_ptr_with_extra(field_ptr, extra.unwrap(), field_layout)
         } else {
             CPlace::for_ptr(field_ptr, field_layout)
         }
@@ -714,6 +765,34 @@ impl<'tcx> CPlace<'tcx> {
         let (lane_count, lane_ty) = layout.ty.simd_size_and_type(fx.tcx);
         let lane_layout = fx.layout_of(lane_ty);
         assert!(lane_idx < lane_count);
+
+        match self.inner {
+            CPlaceInner::Var(_, _) => unreachable!(),
+            CPlaceInner::VarPair(_, _, _) => unreachable!(),
+            CPlaceInner::Addr(ptr, None) => {
+                let field_offset = lane_layout.size * lane_idx;
+                let field_ptr = ptr.offset_i64(fx, i64::try_from(field_offset.bytes()).unwrap());
+                CPlace::for_ptr(field_ptr, lane_layout)
+            }
+            CPlaceInner::Addr(_, Some(_)) => unreachable!(),
+        }
+    }
+
+    /// Like [`CPlace::place_field`] except using the passed type as lane type instead of the one
+    /// specified by the vector type.
+    pub(crate) fn place_typed_lane(
+        self,
+        fx: &mut FunctionCx<'_, '_, 'tcx>,
+        lane_ty: Ty<'tcx>,
+        lane_idx: u64,
+    ) -> CPlace<'tcx> {
+        let layout = self.layout();
+        assert!(layout.ty.is_simd());
+        let (orig_lane_count, orig_lane_ty) = layout.ty.simd_size_and_type(fx.tcx);
+        let lane_layout = fx.layout_of(lane_ty);
+        assert!(
+            (lane_idx + 1) * lane_layout.size <= orig_lane_count * fx.layout_of(orig_lane_ty).size
+        );
 
         match self.inner {
             CPlaceInner::Var(_, _) => unreachable!(),
@@ -752,7 +831,7 @@ impl<'tcx> CPlace<'tcx> {
     }
 
     pub(crate) fn place_deref(self, fx: &mut FunctionCx<'_, '_, 'tcx>) -> CPlace<'tcx> {
-        let inner_layout = fx.layout_of(self.layout().ty.builtin_deref(true).unwrap().ty);
+        let inner_layout = fx.layout_of(self.layout().ty.builtin_deref(true).unwrap());
         if has_ptr_meta(fx.tcx, inner_layout.ty) {
             let (addr, extra) = self.to_cvalue(fx).load_scalar_pair(fx);
             CPlace::for_ptr_with_extra(Pointer::new(addr), extra, inner_layout)
@@ -799,27 +878,51 @@ pub(crate) fn assert_assignable<'tcx>(
         return;
     }
     match (from_ty.kind(), to_ty.kind()) {
-        (ty::Ref(_, a, _), ty::Ref(_, b, _))
-        | (
-            ty::RawPtr(TypeAndMut { ty: a, mutbl: _ }),
-            ty::RawPtr(TypeAndMut { ty: b, mutbl: _ }),
-        ) => {
+        (ty::Ref(_, a, _), ty::Ref(_, b, _)) | (ty::RawPtr(a, _), ty::RawPtr(b, _)) => {
             assert_assignable(fx, *a, *b, limit - 1);
         }
-        (ty::Ref(_, a, _), ty::RawPtr(TypeAndMut { ty: b, mutbl: _ }))
-        | (ty::RawPtr(TypeAndMut { ty: a, mutbl: _ }), ty::Ref(_, b, _)) => {
+        (ty::Ref(_, a, _), ty::RawPtr(b, _)) | (ty::RawPtr(a, _), ty::Ref(_, b, _)) => {
             assert_assignable(fx, *a, *b, limit - 1);
         }
-        (ty::FnPtr(_), ty::FnPtr(_)) => {
-            let from_sig = fx.tcx.normalize_erasing_late_bound_regions(
-                ParamEnv::reveal_all(),
-                from_ty.fn_sig(fx.tcx),
-            );
-            let to_sig = fx
+        (ty::FnPtr(..), ty::FnPtr(..)) => {
+            let from_sig = fx
                 .tcx
-                .normalize_erasing_late_bound_regions(ParamEnv::reveal_all(), to_ty.fn_sig(fx.tcx));
+                .normalize_erasing_late_bound_regions(fx.typing_env(), from_ty.fn_sig(fx.tcx));
+            let FnSig {
+                inputs_and_output: types_from,
+                c_variadic: c_variadic_from,
+                safety: unsafety_from,
+                abi: abi_from,
+            } = from_sig;
+            let to_sig =
+                fx.tcx.normalize_erasing_late_bound_regions(fx.typing_env(), to_ty.fn_sig(fx.tcx));
+            let FnSig {
+                inputs_and_output: types_to,
+                c_variadic: c_variadic_to,
+                safety: unsafety_to,
+                abi: abi_to,
+            } = to_sig;
+            let mut types_from = types_from.iter();
+            let mut types_to = types_to.iter();
+            loop {
+                match (types_from.next(), types_to.next()) {
+                    (Some(a), Some(b)) => assert_assignable(fx, a, b, limit - 1),
+                    (None, None) => break,
+                    (Some(_), None) | (None, Some(_)) => panic!("{:#?}/{:#?}", from_ty, to_ty),
+                }
+            }
             assert_eq!(
-                from_sig, to_sig,
+                c_variadic_from, c_variadic_to,
+                "Can't write fn ptr with incompatible sig {:?} to place with sig {:?}\n\n{:#?}",
+                from_sig, to_sig, fx,
+            );
+            assert_eq!(
+                unsafety_from, unsafety_to,
+                "Can't write fn ptr with incompatible sig {:?} to place with sig {:?}\n\n{:#?}",
+                from_sig, to_sig, fx,
+            );
+            assert_eq!(
+                abi_from, abi_to,
                 "Can't write fn ptr with incompatible sig {:?} to place with sig {:?}\n\n{:#?}",
                 from_sig, to_sig, fx,
             );
@@ -828,9 +931,8 @@ pub(crate) fn assert_assignable<'tcx>(
         (&ty::Dynamic(from_traits, _, _from_kind), &ty::Dynamic(to_traits, _, _to_kind)) => {
             // FIXME(dyn-star): Do the right thing with DynKinds
             for (from, to) in from_traits.iter().zip(to_traits) {
-                let from =
-                    fx.tcx.normalize_erasing_late_bound_regions(ParamEnv::reveal_all(), from);
-                let to = fx.tcx.normalize_erasing_late_bound_regions(ParamEnv::reveal_all(), to);
+                let from = fx.tcx.normalize_erasing_late_bound_regions(fx.typing_env(), from);
+                let to = fx.tcx.normalize_erasing_late_bound_regions(fx.typing_env(), to);
                 assert_eq!(
                     from, to,
                     "Can't write trait object of incompatible traits {:?} to place with traits {:?}\n\n{:#?}",
@@ -850,11 +952,11 @@ pub(crate) fn assert_assignable<'tcx>(
                 }
             }
         }
-        (&ty::Adt(adt_def_a, substs_a), &ty::Adt(adt_def_b, substs_b))
+        (&ty::Adt(adt_def_a, args_a), &ty::Adt(adt_def_b, args_b))
             if adt_def_a.did() == adt_def_b.did() =>
         {
-            let mut types_a = substs_a.types();
-            let mut types_b = substs_b.types();
+            let mut types_a = args_a.types();
+            let mut types_b = args_b.types();
             loop {
                 match (types_a.next(), types_b.next()) {
                     (Some(a), Some(b)) => assert_assignable(fx, a, b, limit - 1),
@@ -864,11 +966,11 @@ pub(crate) fn assert_assignable<'tcx>(
             }
         }
         (ty::Array(a, _), ty::Array(b, _)) => assert_assignable(fx, *a, *b, limit - 1),
-        (&ty::Closure(def_id_a, substs_a), &ty::Closure(def_id_b, substs_b))
+        (&ty::Closure(def_id_a, args_a), &ty::Closure(def_id_b, args_b))
             if def_id_a == def_id_b =>
         {
-            let mut types_a = substs_a.types();
-            let mut types_b = substs_b.types();
+            let mut types_a = args_a.types();
+            let mut types_b = args_b.types();
             loop {
                 match (types_a.next(), types_b.next()) {
                     (Some(a), Some(b)) => assert_assignable(fx, a, b, limit - 1),
@@ -877,8 +979,31 @@ pub(crate) fn assert_assignable<'tcx>(
                 }
             }
         }
-        (ty::Param(_), _) | (_, ty::Param(_)) if fx.tcx.sess.opts.unstable_opts.polymorphize => {
-            // No way to check if it is correct or not with polymorphization enabled
+        (&ty::Coroutine(def_id_a, args_a), &ty::Coroutine(def_id_b, args_b))
+            if def_id_a == def_id_b =>
+        {
+            let mut types_a = args_a.types();
+            let mut types_b = args_b.types();
+            loop {
+                match (types_a.next(), types_b.next()) {
+                    (Some(a), Some(b)) => assert_assignable(fx, a, b, limit - 1),
+                    (None, None) => return,
+                    (Some(_), None) | (None, Some(_)) => panic!("{:#?}/{:#?}", from_ty, to_ty),
+                }
+            }
+        }
+        (&ty::CoroutineWitness(def_id_a, args_a), &ty::CoroutineWitness(def_id_b, args_b))
+            if def_id_a == def_id_b =>
+        {
+            let mut types_a = args_a.types();
+            let mut types_b = args_b.types();
+            loop {
+                match (types_a.next(), types_b.next()) {
+                    (Some(a), Some(b)) => assert_assignable(fx, a, b, limit - 1),
+                    (None, None) => return,
+                    (Some(_), None) | (None, Some(_)) => panic!("{:#?}/{:#?}", from_ty, to_ty),
+                }
+            }
         }
         _ => {
             assert_eq!(

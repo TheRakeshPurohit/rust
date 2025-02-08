@@ -1,6 +1,7 @@
-// aux-build:private-inferred-type.rs
+//@ aux-build:private-inferred-type.rs
 
 #![allow(warnings)]
+#![allow(private_interfaces)]
 
 extern crate private_inferred_type as ext;
 
@@ -26,5 +27,4 @@ trait Tr2<T> {}
 impl<T> Tr2<T> for u8 {}
 fn g() -> impl Tr2<m::Alias> { 0 } //~ ERROR type `Priv` is private
 fn g_ext() -> impl Tr2<ext::Alias> { 0 } //~ ERROR type `ext::Priv` is private
-
 fn main() {}

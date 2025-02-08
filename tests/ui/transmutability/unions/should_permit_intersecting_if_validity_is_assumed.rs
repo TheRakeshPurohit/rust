@@ -1,4 +1,4 @@
-// check-pass
+//@ check-pass
 //! If validity is assumed, there need only be one matching bit-pattern between
 //! the source and destination types.
 
@@ -7,12 +7,11 @@
 #![allow(dead_code, incomplete_features, non_camel_case_types)]
 
 mod assert {
-    use std::mem::{Assume, BikeshedIntrinsicFrom};
-    pub struct Context;
+    use std::mem::{Assume, TransmuteFrom};
 
     pub fn is_maybe_transmutable<Src, Dst>()
     where
-        Dst: BikeshedIntrinsicFrom<Src, Context, { Assume::SAFETY.and(Assume::VALIDITY) }>
+        Dst: TransmuteFrom<Src, { Assume::SAFETY.and(Assume::VALIDITY) }>
     {}
 }
 

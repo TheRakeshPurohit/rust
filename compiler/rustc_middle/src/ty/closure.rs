@@ -1,20 +1,20 @@
+use std::fmt::Write;
+
+use rustc_data_structures::captures::Captures;
+use rustc_data_structures::fx::FxIndexMap;
+use rustc_hir as hir;
+use rustc_hir::HirId;
+use rustc_hir::def_id::LocalDefId;
+use rustc_macros::{HashStable, TyDecodable, TyEncodable, TypeFoldable, TypeVisitable};
+use rustc_span::def_id::LocalDefIdMap;
+use rustc_span::{Ident, Span, Symbol};
+
+use super::TyCtxt;
 use crate::hir::place::{
     Place as HirPlace, PlaceBase as HirPlaceBase, ProjectionKind as HirProjectionKind,
 };
-use crate::{mir, ty};
-
-use std::fmt::Write;
-
 use crate::query::Providers;
-use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
-use rustc_hir::def_id::{DefId, LocalDefId};
-use rustc_hir::{self as hir, LangItem};
-use rustc_span::symbol::Ident;
-use rustc_span::{Span, Symbol};
-
-use super::{Ty, TyCtxt};
-
-use self::BorrowKind::*;
+use crate::{mir, ty};
 
 /// Captures are represented using fields inside a structure.
 /// This represents accessing self in the closure structure
@@ -23,7 +23,7 @@ pub const CAPTURE_STRUCT_LOCAL: mir::Local = mir::Local::from_u32(1);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, TyEncodable, TyDecodable, HashStable)]
 #[derive(TypeFoldable, TypeVisitable)]
 pub struct UpvarPath {
-    pub hir_id: hir::HirId,
+    pub hir_id: HirId,
 }
 
 /// Upvars do not get their own `NodeId`. Instead, we use the pair of
@@ -37,14 +37,14 @@ pub struct UpvarId {
 }
 
 impl UpvarId {
-    pub fn new(var_hir_id: hir::HirId, closure_def_id: LocalDefId) -> UpvarId {
+    pub fn new(var_hir_id: HirId, closure_def_id: LocalDefId) -> UpvarId {
         UpvarId { var_path: UpvarPath { hir_id: var_hir_id }, closure_expr_id: closure_def_id }
     }
 }
 
 /// Information describing the capture of an upvar. This is computed
 /// during `typeck`, specifically by `regionck`.
-#[derive(PartialEq, Clone, Debug, Copy, TyEncodable, TyDecodable, HashStable)]
+#[derive(Eq, PartialEq, Clone, Debug, Copy, TyEncodable, TyDecodable, HashStable, Hash)]
 #[derive(TypeFoldable, TypeVisitable)]
 pub enum UpvarCapture {
     /// Upvar is captured by value. This is always true when the
@@ -56,12 +56,9 @@ pub enum UpvarCapture {
     ByRef(BorrowKind),
 }
 
-pub type UpvarListMap = FxHashMap<DefId, FxIndexMap<hir::HirId, UpvarId>>;
-pub type UpvarCaptureMap = FxHashMap<UpvarId, UpvarCapture>;
-
 /// Given the closure DefId this map provides a map of root variables to minimum
 /// set of `CapturedPlace`s that need to be tracked to support all captures of that closure.
-pub type MinCaptureInformationMap<'tcx> = FxHashMap<LocalDefId, RootVariableMinCaptureList<'tcx>>;
+pub type MinCaptureInformationMap<'tcx> = LocalDefIdMap<RootVariableMinCaptureList<'tcx>>;
 
 /// Part of `MinCaptureInformationMap`; Maps a root variable to the list of `CapturedPlace`.
 /// Used to track the minimum set of `Place`s that need to be captured to support all
@@ -69,65 +66,13 @@ pub type MinCaptureInformationMap<'tcx> = FxHashMap<LocalDefId, RootVariableMinC
 ///
 /// This provides a convenient and quick way of checking if a variable being used within
 /// a closure is a capture of a local variable.
-pub type RootVariableMinCaptureList<'tcx> = FxIndexMap<hir::HirId, MinCaptureList<'tcx>>;
+pub type RootVariableMinCaptureList<'tcx> = FxIndexMap<HirId, MinCaptureList<'tcx>>;
 
 /// Part of `MinCaptureInformationMap`; List of `CapturePlace`s.
 pub type MinCaptureList<'tcx> = Vec<CapturedPlace<'tcx>>;
 
-/// Represents the various closure traits in the language. This
-/// will determine the type of the environment (`self`, in the
-/// desugaring) argument that the closure expects.
-///
-/// You can get the environment type of a closure using
-/// `tcx.closure_env_ty()`.
-#[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, TyEncodable, TyDecodable)]
-#[derive(HashStable)]
-pub enum ClosureKind {
-    // Warning: Ordering is significant here! The ordering is chosen
-    // because the trait Fn is a subtrait of FnMut and so in turn, and
-    // hence we order it so that Fn < FnMut < FnOnce.
-    Fn,
-    FnMut,
-    FnOnce,
-}
-
-impl<'tcx> ClosureKind {
-    /// This is the initial value used when doing upvar inference.
-    pub const LATTICE_BOTTOM: ClosureKind = ClosureKind::Fn;
-
-    /// Returns `true` if a type that impls this closure kind
-    /// must also implement `other`.
-    pub fn extends(self, other: ty::ClosureKind) -> bool {
-        self <= other
-    }
-
-    /// Converts `self` to a [`DefId`] of the corresponding trait.
-    ///
-    /// Note: the inverse of this function is [`TyCtxt::fn_trait_kind_from_def_id`].
-    pub fn to_def_id(&self, tcx: TyCtxt<'_>) -> DefId {
-        tcx.require_lang_item(
-            match self {
-                ClosureKind::Fn => LangItem::Fn,
-                ClosureKind::FnMut => LangItem::FnMut,
-                ClosureKind::FnOnce => LangItem::FnOnce,
-            },
-            None,
-        )
-    }
-
-    /// Returns the representative scalar type for this closure kind.
-    /// See `Ty::to_opt_closure_kind` for more details.
-    pub fn to_ty(self, tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
-        match self {
-            ClosureKind::Fn => tcx.types.i8,
-            ClosureKind::FnMut => tcx.types.i16,
-            ClosureKind::FnOnce => tcx.types.i32,
-        }
-    }
-}
-
 /// A composite describing a `Place` that is captured by a closure.
-#[derive(PartialEq, Clone, Debug, TyEncodable, TyDecodable, HashStable)]
+#[derive(Eq, PartialEq, Clone, Debug, TyEncodable, TyDecodable, HashStable, Hash)]
 #[derive(TypeFoldable, TypeVisitable)]
 pub struct CapturedPlace<'tcx> {
     /// Name and span where the binding happens.
@@ -141,9 +86,6 @@ pub struct CapturedPlace<'tcx> {
 
     /// Represents if `place` can be mutated or not.
     pub mutability: hir::Mutability,
-
-    /// Region of the resulting reference if the upvar is captured by ref.
-    pub region: Option<ty::Region<'tcx>>,
 }
 
 impl<'tcx> CapturedPlace<'tcx> {
@@ -176,6 +118,8 @@ impl<'tcx> CapturedPlace<'tcx> {
                 // Ignore derefs for now, as they are likely caused by
                 // autoderefs that don't appear in the original code.
                 HirProjectionKind::Deref => {}
+                // Just change the type to the hidden type, so we can actually project.
+                HirProjectionKind::OpaqueCast => {}
                 proj => bug!("Unexpected projection {:?} in captured place", proj),
             }
             ty = proj.ty;
@@ -186,7 +130,7 @@ impl<'tcx> CapturedPlace<'tcx> {
 
     /// Returns the hir-id of the root variable for the captured place.
     /// e.g., if `a.b.c` was captured, would return the hir-id for `a`.
-    pub fn get_root_variable(&self) -> hir::HirId {
+    pub fn get_root_variable(&self) -> HirId {
         match self.place.base {
             HirPlaceBase::Upvar(upvar_id) => upvar_id.var_path.hir_id,
             base => bug!("Expected upvar, found={:?}", base),
@@ -232,22 +176,29 @@ impl<'tcx> CapturedPlace<'tcx> {
                 .span
         }
     }
+
+    pub fn is_by_ref(&self) -> bool {
+        match self.info.capture_kind {
+            ty::UpvarCapture::ByValue => false,
+            ty::UpvarCapture::ByRef(..) => true,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, HashStable)]
 pub struct ClosureTypeInfo<'tcx> {
     user_provided_sig: ty::CanonicalPolyFnSig<'tcx>,
-    captures: &'tcx [&'tcx ty::CapturedPlace<'tcx>],
+    captures: &'tcx ty::List<&'tcx ty::CapturedPlace<'tcx>>,
     kind_origin: Option<&'tcx (Span, HirPlace<'tcx>)>,
 }
 
 fn closure_typeinfo<'tcx>(tcx: TyCtxt<'tcx>, def: LocalDefId) -> ClosureTypeInfo<'tcx> {
-    debug_assert!(tcx.is_closure(def.to_def_id()));
+    debug_assert!(tcx.is_closure_like(def.to_def_id()));
     let typeck_results = tcx.typeck(def);
     let user_provided_sig = typeck_results.user_provided_sigs[&def];
     let captures = typeck_results.closure_min_captures_flattened(def);
-    let captures = tcx.arena.alloc_from_iter(captures);
-    let hir_id = tcx.hir().local_def_id_to_hir_id(def);
+    let captures = tcx.mk_captures_from_iter(captures);
+    let hir_id = tcx.local_def_id_to_hir_id(def);
     let kind_origin = typeck_results.closure_kind_origins().get(hir_id);
     ClosureTypeInfo { user_provided_sig, captures, kind_origin }
 }
@@ -262,7 +213,7 @@ impl<'tcx> TyCtxt<'tcx> {
     }
 
     pub fn closure_captures(self, def_id: LocalDefId) -> &'tcx [&'tcx ty::CapturedPlace<'tcx>] {
-        if !self.is_closure(def_id.to_def_id()) {
+        if !self.is_closure_like(def_id.to_def_id()) {
             return &[];
         };
         self.closure_typeinfo(def_id).captures
@@ -279,7 +230,7 @@ impl<'tcx> TyCtxt<'tcx> {
 /// Eg: 1. `foo.x` which is represented using `projections=[Field(x)]` is an ancestor of
 ///        `foo.x.y` which is represented using `projections=[Field(x), Field(y)]`.
 ///        Note both `foo.x` and `foo.x.y` start off of the same root variable `foo`.
-///     2. Since we only look at the projections here function will return `bar.x` as an a valid
+///     2. Since we only look at the projections here function will return `bar.x` as a valid
 ///        ancestor of `foo.x.y`. It's the caller's responsibility to ensure that both projections
 ///        list are being applied to the same root variable.
 pub fn is_ancestor_or_same_capture(
@@ -298,7 +249,7 @@ pub fn is_ancestor_or_same_capture(
 /// Part of `MinCaptureInformationMap`; describes the capture kind (&, &mut, move)
 /// for a particular capture as well as identifying the part of the source code
 /// that triggered this capture to occur.
-#[derive(PartialEq, Clone, Debug, Copy, TyEncodable, TyDecodable, HashStable)]
+#[derive(Eq, PartialEq, Clone, Debug, Copy, TyEncodable, TyDecodable, HashStable, Hash)]
 #[derive(TypeFoldable, TypeVisitable)]
 pub struct CaptureInfo {
     /// Expr Id pointing to use that resulted in selecting the current capture kind
@@ -330,12 +281,12 @@ pub struct CaptureInfo {
     ///
     /// In this example, if `capture_disjoint_fields` is **not** set, then x will be captured,
     /// but we won't see it being used during capture analysis, since it's essentially a discard.
-    pub capture_kind_expr_id: Option<hir::HirId>,
+    pub capture_kind_expr_id: Option<HirId>,
     /// Expr Id pointing to use that resulted the corresponding place being captured
     ///
     /// See `capture_kind_expr_id` for example.
     ///
-    pub path_expr_id: Option<hir::HirId>,
+    pub path_expr_id: Option<HirId>,
 
     /// Capture mode that was selected
     pub capture_kind: UpvarCapture,
@@ -350,7 +301,7 @@ pub fn place_to_string_for_capture<'tcx>(tcx: TyCtxt<'tcx>, place: &HirPlace<'tc
     for (i, proj) in place.projections.iter().enumerate() {
         match proj.kind {
             HirProjectionKind::Deref => {
-                curr_string = format!("*{}", curr_string);
+                curr_string = format!("*{curr_string}");
             }
             HirProjectionKind::Field(idx, variant) => match place.ty_before_projection(i).kind() {
                 ty::Adt(def, ..) => {
@@ -377,11 +328,11 @@ pub fn place_to_string_for_capture<'tcx>(tcx: TyCtxt<'tcx>, place: &HirPlace<'tc
     curr_string
 }
 
-#[derive(Clone, PartialEq, Debug, TyEncodable, TyDecodable, Copy, HashStable)]
+#[derive(Eq, Clone, PartialEq, Debug, TyEncodable, TyDecodable, Copy, HashStable, Hash)]
 #[derive(TypeFoldable, TypeVisitable)]
 pub enum BorrowKind {
     /// Data must be immutable and is aliasable.
-    ImmBorrow,
+    Immutable,
 
     /// Data must be immutable but not aliasable. This kind of borrow
     /// cannot currently be expressed by the user and is used only in
@@ -427,17 +378,19 @@ pub enum BorrowKind {
     /// immutable, but not aliasable. This solves the problem. For
     /// simplicity, we don't give users the way to express this
     /// borrow, it's just used when translating closures.
-    UniqueImmBorrow,
+    ///
+    /// FIXME: Rename this to indicate the borrow is actually not immutable.
+    UniqueImmutable,
 
     /// Data is mutable and not aliasable.
-    MutBorrow,
+    Mutable,
 }
 
 impl BorrowKind {
     pub fn from_mutbl(m: hir::Mutability) -> BorrowKind {
         match m {
-            hir::Mutability::Mut => MutBorrow,
-            hir::Mutability::Not => ImmBorrow,
+            hir::Mutability::Mut => BorrowKind::Mutable,
+            hir::Mutability::Not => BorrowKind::Immutable,
         }
     }
 
@@ -447,15 +400,85 @@ impl BorrowKind {
     /// question.
     pub fn to_mutbl_lossy(self) -> hir::Mutability {
         match self {
-            MutBorrow => hir::Mutability::Mut,
-            ImmBorrow => hir::Mutability::Not,
+            BorrowKind::Mutable => hir::Mutability::Mut,
+            BorrowKind::Immutable => hir::Mutability::Not,
 
             // We have no type corresponding to a unique imm borrow, so
             // use `&mut`. It gives all the capabilities of a `&uniq`
             // and hence is a safe "over approximation".
-            UniqueImmBorrow => hir::Mutability::Mut,
+            BorrowKind::UniqueImmutable => hir::Mutability::Mut,
         }
     }
+}
+
+pub fn analyze_coroutine_closure_captures<'a, 'tcx: 'a, T>(
+    parent_captures: impl IntoIterator<Item = &'a CapturedPlace<'tcx>>,
+    child_captures: impl IntoIterator<Item = &'a CapturedPlace<'tcx>>,
+    mut for_each: impl FnMut((usize, &'a CapturedPlace<'tcx>), (usize, &'a CapturedPlace<'tcx>)) -> T,
+) -> impl Iterator<Item = T> + Captures<'a> + Captures<'tcx> {
+    std::iter::from_coroutine(
+        #[coroutine]
+        move || {
+            let mut child_captures = child_captures.into_iter().enumerate().peekable();
+
+            // One parent capture may correspond to several child captures if we end up
+            // refining the set of captures via edition-2021 precise captures. We want to
+            // match up any number of child captures with one parent capture, so we keep
+            // peeking off this `Peekable` until the child doesn't match anymore.
+            for (parent_field_idx, parent_capture) in parent_captures.into_iter().enumerate() {
+                // Make sure we use every field at least once, b/c why are we capturing something
+                // if it's not used in the inner coroutine.
+                let mut field_used_at_least_once = false;
+
+                // A parent matches a child if they share the same prefix of projections.
+                // The child may have more, if it is capturing sub-fields out of
+                // something that is captured by-move in the parent closure.
+                while child_captures.peek().is_some_and(|(_, child_capture)| {
+                    child_prefix_matches_parent_projections(parent_capture, child_capture)
+                }) {
+                    let (child_field_idx, child_capture) = child_captures.next().unwrap();
+                    // This analysis only makes sense if the parent capture is a
+                    // prefix of the child capture.
+                    assert!(
+                        child_capture.place.projections.len()
+                            >= parent_capture.place.projections.len(),
+                        "parent capture ({parent_capture:#?}) expected to be prefix of \
+                    child capture ({child_capture:#?})"
+                    );
+
+                    yield for_each(
+                        (parent_field_idx, parent_capture),
+                        (child_field_idx, child_capture),
+                    );
+
+                    field_used_at_least_once = true;
+                }
+
+                // Make sure the field was used at least once.
+                assert!(
+                    field_used_at_least_once,
+                    "we captured {parent_capture:#?} but it was not used in the child coroutine?"
+                );
+            }
+            assert_eq!(child_captures.next(), None, "leftover child captures?");
+        },
+    )
+}
+
+fn child_prefix_matches_parent_projections(
+    parent_capture: &ty::CapturedPlace<'_>,
+    child_capture: &ty::CapturedPlace<'_>,
+) -> bool {
+    let HirPlaceBase::Upvar(parent_base) = parent_capture.place.base else {
+        bug!("expected capture to be an upvar");
+    };
+    let HirPlaceBase::Upvar(child_base) = child_capture.place.base else {
+        bug!("expected capture to be an upvar");
+    };
+
+    parent_base.var_path.hir_id == child_base.var_path.hir_id
+        && std::iter::zip(&child_capture.place.projections, &parent_capture.place.projections)
+            .all(|(child, parent)| child.kind == parent.kind)
 }
 
 pub fn provide(providers: &mut Providers) {

@@ -1,7 +1,7 @@
 #![feature(prelude_import)]
-// check-pass
-// compile-flags: -Zunpretty=expanded
-// edition:2021
+//@ check-pass
+//@ compile-flags: -Zunpretty=expanded
+//@ edition:2021
 //
 // This test checks the code generated for all[*] the builtin derivable traits
 // on a variety of structs and enums. It protects against accidental changes to
@@ -33,6 +33,7 @@ impl ::core::clone::Clone for Empty {
 impl ::core::marker::Copy for Empty { }
 #[automatically_derived]
 impl ::core::fmt::Debug for Empty {
+    #[inline]
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         ::core::fmt::Formatter::write_str(f, "Empty")
     }
@@ -55,12 +56,10 @@ impl ::core::cmp::PartialEq for Empty {
     fn eq(&self, other: &Empty) -> bool { true }
 }
 #[automatically_derived]
-impl ::core::marker::StructuralEq for Empty { }
-#[automatically_derived]
 impl ::core::cmp::Eq for Empty {
     #[inline]
     #[doc(hidden)]
-    #[no_coverage]
+    #[coverage(off)]
     fn assert_receiver_is_total_eq(&self) -> () {}
 }
 #[automatically_derived]
@@ -97,6 +96,7 @@ impl ::core::clone::Clone for Point {
 impl ::core::marker::Copy for Point { }
 #[automatically_derived]
 impl ::core::fmt::Debug for Point {
+    #[inline]
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         ::core::fmt::Formatter::debug_struct_field2_finish(f, "Point", "x",
             &self.x, "y", &&self.y)
@@ -130,12 +130,10 @@ impl ::core::cmp::PartialEq for Point {
     }
 }
 #[automatically_derived]
-impl ::core::marker::StructuralEq for Point { }
-#[automatically_derived]
 impl ::core::cmp::Eq for Point {
     #[inline]
     #[doc(hidden)]
-    #[no_coverage]
+    #[coverage(off)]
     fn assert_receiver_is_total_eq(&self) -> () {
         let _: ::core::cmp::AssertParamIsEq<u32>;
     }
@@ -183,6 +181,7 @@ impl ::core::clone::Clone for PackedPoint {
 impl ::core::marker::Copy for PackedPoint { }
 #[automatically_derived]
 impl ::core::fmt::Debug for PackedPoint {
+    #[inline]
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         ::core::fmt::Formatter::debug_struct_field2_finish(f, "PackedPoint",
             "x", &{ self.x }, "y", &&{ self.y })
@@ -216,12 +215,10 @@ impl ::core::cmp::PartialEq for PackedPoint {
     }
 }
 #[automatically_derived]
-impl ::core::marker::StructuralEq for PackedPoint { }
-#[automatically_derived]
 impl ::core::cmp::Eq for PackedPoint {
     #[inline]
     #[doc(hidden)]
-    #[no_coverage]
+    #[coverage(off)]
     fn assert_receiver_is_total_eq(&self) -> () {
         let _: ::core::cmp::AssertParamIsEq<u32>;
     }
@@ -276,6 +273,7 @@ impl ::core::clone::Clone for Big {
 impl ::core::marker::Copy for Big { }
 #[automatically_derived]
 impl ::core::fmt::Debug for Big {
+    #[inline]
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         let names: &'static _ =
             &["b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8"];
@@ -329,12 +327,10 @@ impl ::core::cmp::PartialEq for Big {
     }
 }
 #[automatically_derived]
-impl ::core::marker::StructuralEq for Big { }
-#[automatically_derived]
 impl ::core::cmp::Eq for Big {
     #[inline]
     #[doc(hidden)]
-    #[no_coverage]
+    #[coverage(off)]
     fn assert_receiver_is_total_eq(&self) -> () {
         let _: ::core::cmp::AssertParamIsEq<u32>;
     }
@@ -475,6 +471,7 @@ impl Copy for PackedManualCopy {}
 struct Unsized([u32]);
 #[automatically_derived]
 impl ::core::fmt::Debug for Unsized {
+    #[inline]
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         ::core::fmt::Formatter::debug_tuple_field1_finish(f, "Unsized",
             &&self.0)
@@ -495,12 +492,10 @@ impl ::core::cmp::PartialEq for Unsized {
     fn eq(&self, other: &Unsized) -> bool { self.0 == other.0 }
 }
 #[automatically_derived]
-impl ::core::marker::StructuralEq for Unsized { }
-#[automatically_derived]
 impl ::core::cmp::Eq for Unsized {
     #[inline]
     #[doc(hidden)]
-    #[no_coverage]
+    #[coverage(off)]
     fn assert_receiver_is_total_eq(&self) -> () {
         let _: ::core::cmp::AssertParamIsEq<[u32]>;
     }
@@ -518,25 +513,6 @@ impl ::core::cmp::Ord for Unsized {
     #[inline]
     fn cmp(&self, other: &Unsized) -> ::core::cmp::Ordering {
         ::core::cmp::Ord::cmp(&self.0, &other.0)
-    }
-}
-
-// A packed struct with an unsized `[u8]` field. This is currently allowed, but
-// causes a warning and will be phased out at some point.
-#[repr(packed)]
-struct PackedUnsizedU8([u8]);
-#[automatically_derived]
-impl ::core::fmt::Debug for PackedUnsizedU8 {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        ::core::fmt::Formatter::debug_tuple_field1_finish(f,
-            "PackedUnsizedU8", &&self.0)
-    }
-}
-#[automatically_derived]
-impl ::core::hash::Hash for PackedUnsizedU8 {
-    #[inline]
-    fn hash<__H: ::core::hash::Hasher>(&self, state: &mut __H) -> () {
-        ::core::hash::Hash::hash(&self.0, state)
     }
 }
 
@@ -569,6 +545,7 @@ impl<T: ::core::marker::Copy + Trait, U: ::core::marker::Copy>
 #[automatically_derived]
 impl<T: ::core::fmt::Debug + Trait, U: ::core::fmt::Debug> ::core::fmt::Debug
     for Generic<T, U> where T::A: ::core::fmt::Debug {
+    #[inline]
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         ::core::fmt::Formatter::debug_struct_field3_finish(f, "Generic", "t",
             &self.t, "ta", &self.ta, "u", &&self.u)
@@ -609,13 +586,11 @@ impl<T: ::core::cmp::PartialEq + Trait, U: ::core::cmp::PartialEq>
     }
 }
 #[automatically_derived]
-impl<T: Trait, U> ::core::marker::StructuralEq for Generic<T, U> { }
-#[automatically_derived]
 impl<T: ::core::cmp::Eq + Trait, U: ::core::cmp::Eq> ::core::cmp::Eq for
     Generic<T, U> where T::A: ::core::cmp::Eq {
     #[inline]
     #[doc(hidden)]
-    #[no_coverage]
+    #[coverage(off)]
     fn assert_receiver_is_total_eq(&self) -> () {
         let _: ::core::cmp::AssertParamIsEq<T>;
         let _: ::core::cmp::AssertParamIsEq<T::A>;
@@ -687,6 +662,7 @@ impl<T: ::core::fmt::Debug + ::core::marker::Copy + Trait,
     U: ::core::fmt::Debug + ::core::marker::Copy> ::core::fmt::Debug for
     PackedGeneric<T, U> where T::A: ::core::fmt::Debug + ::core::marker::Copy
     {
+    #[inline]
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         ::core::fmt::Formatter::debug_tuple_field3_finish(f, "PackedGeneric",
             &{ self.0 }, &{ self.1 }, &&{ self.2 })
@@ -731,14 +707,12 @@ impl<T: ::core::cmp::PartialEq + ::core::marker::Copy + Trait,
     }
 }
 #[automatically_derived]
-impl<T: Trait, U> ::core::marker::StructuralEq for PackedGeneric<T, U> { }
-#[automatically_derived]
 impl<T: ::core::cmp::Eq + ::core::marker::Copy + Trait, U: ::core::cmp::Eq +
     ::core::marker::Copy> ::core::cmp::Eq for PackedGeneric<T, U> where
     T::A: ::core::cmp::Eq + ::core::marker::Copy {
     #[inline]
     #[doc(hidden)]
-    #[no_coverage]
+    #[coverage(off)]
     fn assert_receiver_is_total_eq(&self) -> () {
         let _: ::core::cmp::AssertParamIsEq<T>;
         let _: ::core::cmp::AssertParamIsEq<T::A>;
@@ -797,15 +771,16 @@ impl ::core::clone::Clone for Enum0 {
 impl ::core::marker::Copy for Enum0 { }
 #[automatically_derived]
 impl ::core::fmt::Debug for Enum0 {
+    #[inline]
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        unsafe { ::core::intrinsics::unreachable() }
+        match *self {}
     }
 }
 #[automatically_derived]
 impl ::core::hash::Hash for Enum0 {
     #[inline]
     fn hash<__H: ::core::hash::Hasher>(&self, state: &mut __H) -> () {
-        unsafe { ::core::intrinsics::unreachable() }
+        match *self {}
     }
 }
 #[automatically_derived]
@@ -813,17 +788,13 @@ impl ::core::marker::StructuralPartialEq for Enum0 { }
 #[automatically_derived]
 impl ::core::cmp::PartialEq for Enum0 {
     #[inline]
-    fn eq(&self, other: &Enum0) -> bool {
-        unsafe { ::core::intrinsics::unreachable() }
-    }
+    fn eq(&self, other: &Enum0) -> bool { match *self {} }
 }
-#[automatically_derived]
-impl ::core::marker::StructuralEq for Enum0 { }
 #[automatically_derived]
 impl ::core::cmp::Eq for Enum0 {
     #[inline]
     #[doc(hidden)]
-    #[no_coverage]
+    #[coverage(off)]
     fn assert_receiver_is_total_eq(&self) -> () {}
 }
 #[automatically_derived]
@@ -831,15 +802,13 @@ impl ::core::cmp::PartialOrd for Enum0 {
     #[inline]
     fn partial_cmp(&self, other: &Enum0)
         -> ::core::option::Option<::core::cmp::Ordering> {
-        unsafe { ::core::intrinsics::unreachable() }
+        match *self {}
     }
 }
 #[automatically_derived]
 impl ::core::cmp::Ord for Enum0 {
     #[inline]
-    fn cmp(&self, other: &Enum0) -> ::core::cmp::Ordering {
-        unsafe { ::core::intrinsics::unreachable() }
-    }
+    fn cmp(&self, other: &Enum0) -> ::core::cmp::Ordering { match *self {} }
 }
 
 // A single-variant enum.
@@ -860,6 +829,7 @@ impl ::core::clone::Clone for Enum1 {
 }
 #[automatically_derived]
 impl ::core::fmt::Debug for Enum1 {
+    #[inline]
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         match self {
             Enum1::Single { x: __self_0 } =>
@@ -886,17 +856,15 @@ impl ::core::cmp::PartialEq for Enum1 {
     fn eq(&self, other: &Enum1) -> bool {
         match (self, other) {
             (Enum1::Single { x: __self_0 }, Enum1::Single { x: __arg1_0 }) =>
-                *__self_0 == *__arg1_0,
+                __self_0 == __arg1_0,
         }
     }
 }
 #[automatically_derived]
-impl ::core::marker::StructuralEq for Enum1 { }
-#[automatically_derived]
 impl ::core::cmp::Eq for Enum1 {
     #[inline]
     #[doc(hidden)]
-    #[no_coverage]
+    #[coverage(off)]
     fn assert_receiver_is_total_eq(&self) -> () {
         let _: ::core::cmp::AssertParamIsEq<u32>;
     }
@@ -936,6 +904,7 @@ impl ::core::clone::Clone for Fieldless1 {
 }
 #[automatically_derived]
 impl ::core::fmt::Debug for Fieldless1 {
+    #[inline]
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         ::core::fmt::Formatter::write_str(f, "A")
     }
@@ -958,12 +927,10 @@ impl ::core::cmp::PartialEq for Fieldless1 {
     fn eq(&self, other: &Fieldless1) -> bool { true }
 }
 #[automatically_derived]
-impl ::core::marker::StructuralEq for Fieldless1 { }
-#[automatically_derived]
 impl ::core::cmp::Eq for Fieldless1 {
     #[inline]
     #[doc(hidden)]
-    #[no_coverage]
+    #[coverage(off)]
     fn assert_receiver_is_total_eq(&self) -> () {}
 }
 #[automatically_derived]
@@ -999,6 +966,7 @@ impl ::core::clone::Clone for Fieldless {
 impl ::core::marker::Copy for Fieldless { }
 #[automatically_derived]
 impl ::core::fmt::Debug for Fieldless {
+    #[inline]
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         ::core::fmt::Formatter::write_str(f,
             match self {
@@ -1017,8 +985,8 @@ impl ::core::default::Default for Fieldless {
 impl ::core::hash::Hash for Fieldless {
     #[inline]
     fn hash<__H: ::core::hash::Hasher>(&self, state: &mut __H) -> () {
-        let __self_tag = ::core::intrinsics::discriminant_value(self);
-        ::core::hash::Hash::hash(&__self_tag, state)
+        let __self_discr = ::core::intrinsics::discriminant_value(self);
+        ::core::hash::Hash::hash(&__self_discr, state)
     }
 }
 #[automatically_derived]
@@ -1027,18 +995,16 @@ impl ::core::marker::StructuralPartialEq for Fieldless { }
 impl ::core::cmp::PartialEq for Fieldless {
     #[inline]
     fn eq(&self, other: &Fieldless) -> bool {
-        let __self_tag = ::core::intrinsics::discriminant_value(self);
-        let __arg1_tag = ::core::intrinsics::discriminant_value(other);
-        __self_tag == __arg1_tag
+        let __self_discr = ::core::intrinsics::discriminant_value(self);
+        let __arg1_discr = ::core::intrinsics::discriminant_value(other);
+        __self_discr == __arg1_discr
     }
 }
-#[automatically_derived]
-impl ::core::marker::StructuralEq for Fieldless { }
 #[automatically_derived]
 impl ::core::cmp::Eq for Fieldless {
     #[inline]
     #[doc(hidden)]
-    #[no_coverage]
+    #[coverage(off)]
     fn assert_receiver_is_total_eq(&self) -> () {}
 }
 #[automatically_derived]
@@ -1046,18 +1012,18 @@ impl ::core::cmp::PartialOrd for Fieldless {
     #[inline]
     fn partial_cmp(&self, other: &Fieldless)
         -> ::core::option::Option<::core::cmp::Ordering> {
-        let __self_tag = ::core::intrinsics::discriminant_value(self);
-        let __arg1_tag = ::core::intrinsics::discriminant_value(other);
-        ::core::cmp::PartialOrd::partial_cmp(&__self_tag, &__arg1_tag)
+        let __self_discr = ::core::intrinsics::discriminant_value(self);
+        let __arg1_discr = ::core::intrinsics::discriminant_value(other);
+        ::core::cmp::PartialOrd::partial_cmp(&__self_discr, &__arg1_discr)
     }
 }
 #[automatically_derived]
 impl ::core::cmp::Ord for Fieldless {
     #[inline]
     fn cmp(&self, other: &Fieldless) -> ::core::cmp::Ordering {
-        let __self_tag = ::core::intrinsics::discriminant_value(self);
-        let __arg1_tag = ::core::intrinsics::discriminant_value(other);
-        ::core::cmp::Ord::cmp(&__self_tag, &__arg1_tag)
+        let __self_discr = ::core::intrinsics::discriminant_value(self);
+        let __arg1_discr = ::core::intrinsics::discriminant_value(other);
+        ::core::cmp::Ord::cmp(&__self_discr, &__arg1_discr)
     }
 }
 
@@ -1087,6 +1053,7 @@ impl ::core::clone::Clone for Mixed {
 impl ::core::marker::Copy for Mixed { }
 #[automatically_derived]
 impl ::core::fmt::Debug for Mixed {
+    #[inline]
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         match self {
             Mixed::P => ::core::fmt::Formatter::write_str(f, "P"),
@@ -1109,8 +1076,8 @@ impl ::core::default::Default for Mixed {
 impl ::core::hash::Hash for Mixed {
     #[inline]
     fn hash<__H: ::core::hash::Hasher>(&self, state: &mut __H) -> () {
-        let __self_tag = ::core::intrinsics::discriminant_value(self);
-        ::core::hash::Hash::hash(&__self_tag, state);
+        let __self_discr = ::core::intrinsics::discriminant_value(self);
+        ::core::hash::Hash::hash(&__self_discr, state);
         match self {
             Mixed::R(__self_0) => ::core::hash::Hash::hash(__self_0, state),
             Mixed::S { d1: __self_0, d2: __self_1 } => {
@@ -1127,26 +1094,24 @@ impl ::core::marker::StructuralPartialEq for Mixed { }
 impl ::core::cmp::PartialEq for Mixed {
     #[inline]
     fn eq(&self, other: &Mixed) -> bool {
-        let __self_tag = ::core::intrinsics::discriminant_value(self);
-        let __arg1_tag = ::core::intrinsics::discriminant_value(other);
-        __self_tag == __arg1_tag &&
+        let __self_discr = ::core::intrinsics::discriminant_value(self);
+        let __arg1_discr = ::core::intrinsics::discriminant_value(other);
+        __self_discr == __arg1_discr &&
             match (self, other) {
                 (Mixed::R(__self_0), Mixed::R(__arg1_0)) =>
-                    *__self_0 == *__arg1_0,
+                    __self_0 == __arg1_0,
                 (Mixed::S { d1: __self_0, d2: __self_1 }, Mixed::S {
                     d1: __arg1_0, d2: __arg1_1 }) =>
-                    *__self_0 == *__arg1_0 && *__self_1 == *__arg1_1,
+                    __self_0 == __arg1_0 && __self_1 == __arg1_1,
                 _ => true,
             }
     }
 }
 #[automatically_derived]
-impl ::core::marker::StructuralEq for Mixed { }
-#[automatically_derived]
 impl ::core::cmp::Eq for Mixed {
     #[inline]
     #[doc(hidden)]
-    #[no_coverage]
+    #[coverage(off)]
     fn assert_receiver_is_total_eq(&self) -> () {
         let _: ::core::cmp::AssertParamIsEq<u32>;
         let _: ::core::cmp::AssertParamIsEq<Option<u32>>;
@@ -1158,8 +1123,8 @@ impl ::core::cmp::PartialOrd for Mixed {
     #[inline]
     fn partial_cmp(&self, other: &Mixed)
         -> ::core::option::Option<::core::cmp::Ordering> {
-        let __self_tag = ::core::intrinsics::discriminant_value(self);
-        let __arg1_tag = ::core::intrinsics::discriminant_value(other);
+        let __self_discr = ::core::intrinsics::discriminant_value(self);
+        let __arg1_discr = ::core::intrinsics::discriminant_value(other);
         match (self, other) {
             (Mixed::R(__self_0), Mixed::R(__arg1_0)) =>
                 ::core::cmp::PartialOrd::partial_cmp(__self_0, __arg1_0),
@@ -1172,8 +1137,8 @@ impl ::core::cmp::PartialOrd for Mixed {
                     cmp => cmp,
                 },
             _ =>
-                ::core::cmp::PartialOrd::partial_cmp(&__self_tag,
-                    &__arg1_tag),
+                ::core::cmp::PartialOrd::partial_cmp(&__self_discr,
+                    &__arg1_discr),
         }
     }
 }
@@ -1181,9 +1146,9 @@ impl ::core::cmp::PartialOrd for Mixed {
 impl ::core::cmp::Ord for Mixed {
     #[inline]
     fn cmp(&self, other: &Mixed) -> ::core::cmp::Ordering {
-        let __self_tag = ::core::intrinsics::discriminant_value(self);
-        let __arg1_tag = ::core::intrinsics::discriminant_value(other);
-        match ::core::cmp::Ord::cmp(&__self_tag, &__arg1_tag) {
+        let __self_discr = ::core::intrinsics::discriminant_value(self);
+        let __arg1_discr = ::core::intrinsics::discriminant_value(other);
+        match ::core::cmp::Ord::cmp(&__self_discr, &__arg1_discr) {
             ::core::cmp::Ordering::Equal =>
                 match (self, other) {
                     (Mixed::R(__self_0), Mixed::R(__arg1_0)) =>
@@ -1221,6 +1186,7 @@ impl ::core::clone::Clone for Fielded {
 }
 #[automatically_derived]
 impl ::core::fmt::Debug for Fielded {
+    #[inline]
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         match self {
             Fielded::X(__self_0) =>
@@ -1239,8 +1205,8 @@ impl ::core::fmt::Debug for Fielded {
 impl ::core::hash::Hash for Fielded {
     #[inline]
     fn hash<__H: ::core::hash::Hasher>(&self, state: &mut __H) -> () {
-        let __self_tag = ::core::intrinsics::discriminant_value(self);
-        ::core::hash::Hash::hash(&__self_tag, state);
+        let __self_discr = ::core::intrinsics::discriminant_value(self);
+        ::core::hash::Hash::hash(&__self_discr, state);
         match self {
             Fielded::X(__self_0) => ::core::hash::Hash::hash(__self_0, state),
             Fielded::Y(__self_0) => ::core::hash::Hash::hash(__self_0, state),
@@ -1254,27 +1220,25 @@ impl ::core::marker::StructuralPartialEq for Fielded { }
 impl ::core::cmp::PartialEq for Fielded {
     #[inline]
     fn eq(&self, other: &Fielded) -> bool {
-        let __self_tag = ::core::intrinsics::discriminant_value(self);
-        let __arg1_tag = ::core::intrinsics::discriminant_value(other);
-        __self_tag == __arg1_tag &&
+        let __self_discr = ::core::intrinsics::discriminant_value(self);
+        let __arg1_discr = ::core::intrinsics::discriminant_value(other);
+        __self_discr == __arg1_discr &&
             match (self, other) {
                 (Fielded::X(__self_0), Fielded::X(__arg1_0)) =>
-                    *__self_0 == *__arg1_0,
+                    __self_0 == __arg1_0,
                 (Fielded::Y(__self_0), Fielded::Y(__arg1_0)) =>
-                    *__self_0 == *__arg1_0,
+                    __self_0 == __arg1_0,
                 (Fielded::Z(__self_0), Fielded::Z(__arg1_0)) =>
-                    *__self_0 == *__arg1_0,
+                    __self_0 == __arg1_0,
                 _ => unsafe { ::core::intrinsics::unreachable() }
             }
     }
 }
 #[automatically_derived]
-impl ::core::marker::StructuralEq for Fielded { }
-#[automatically_derived]
 impl ::core::cmp::Eq for Fielded {
     #[inline]
     #[doc(hidden)]
-    #[no_coverage]
+    #[coverage(off)]
     fn assert_receiver_is_total_eq(&self) -> () {
         let _: ::core::cmp::AssertParamIsEq<u32>;
         let _: ::core::cmp::AssertParamIsEq<bool>;
@@ -1286,8 +1250,8 @@ impl ::core::cmp::PartialOrd for Fielded {
     #[inline]
     fn partial_cmp(&self, other: &Fielded)
         -> ::core::option::Option<::core::cmp::Ordering> {
-        let __self_tag = ::core::intrinsics::discriminant_value(self);
-        let __arg1_tag = ::core::intrinsics::discriminant_value(other);
+        let __self_discr = ::core::intrinsics::discriminant_value(self);
+        let __arg1_discr = ::core::intrinsics::discriminant_value(other);
         match (self, other) {
             (Fielded::X(__self_0), Fielded::X(__arg1_0)) =>
                 ::core::cmp::PartialOrd::partial_cmp(__self_0, __arg1_0),
@@ -1296,8 +1260,8 @@ impl ::core::cmp::PartialOrd for Fielded {
             (Fielded::Z(__self_0), Fielded::Z(__arg1_0)) =>
                 ::core::cmp::PartialOrd::partial_cmp(__self_0, __arg1_0),
             _ =>
-                ::core::cmp::PartialOrd::partial_cmp(&__self_tag,
-                    &__arg1_tag),
+                ::core::cmp::PartialOrd::partial_cmp(&__self_discr,
+                    &__arg1_discr),
         }
     }
 }
@@ -1305,9 +1269,9 @@ impl ::core::cmp::PartialOrd for Fielded {
 impl ::core::cmp::Ord for Fielded {
     #[inline]
     fn cmp(&self, other: &Fielded) -> ::core::cmp::Ordering {
-        let __self_tag = ::core::intrinsics::discriminant_value(self);
-        let __arg1_tag = ::core::intrinsics::discriminant_value(other);
-        match ::core::cmp::Ord::cmp(&__self_tag, &__arg1_tag) {
+        let __self_discr = ::core::intrinsics::discriminant_value(self);
+        let __arg1_discr = ::core::intrinsics::discriminant_value(other);
+        match ::core::cmp::Ord::cmp(&__self_discr, &__arg1_discr) {
             ::core::cmp::Ordering::Equal =>
                 match (self, other) {
                     (Fielded::X(__self_0), Fielded::X(__arg1_0)) =>
@@ -1345,6 +1309,7 @@ impl<T: ::core::marker::Copy, U: ::core::marker::Copy> ::core::marker::Copy
 #[automatically_derived]
 impl<T: ::core::fmt::Debug, U: ::core::fmt::Debug> ::core::fmt::Debug for
     EnumGeneric<T, U> {
+    #[inline]
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         match self {
             EnumGeneric::One(__self_0) =>
@@ -1361,8 +1326,8 @@ impl<T: ::core::hash::Hash, U: ::core::hash::Hash> ::core::hash::Hash for
     EnumGeneric<T, U> {
     #[inline]
     fn hash<__H: ::core::hash::Hasher>(&self, state: &mut __H) -> () {
-        let __self_tag = ::core::intrinsics::discriminant_value(self);
-        ::core::hash::Hash::hash(&__self_tag, state);
+        let __self_discr = ::core::intrinsics::discriminant_value(self);
+        ::core::hash::Hash::hash(&__self_discr, state);
         match self {
             EnumGeneric::One(__self_0) =>
                 ::core::hash::Hash::hash(__self_0, state),
@@ -1378,26 +1343,24 @@ impl<T: ::core::cmp::PartialEq, U: ::core::cmp::PartialEq>
     ::core::cmp::PartialEq for EnumGeneric<T, U> {
     #[inline]
     fn eq(&self, other: &EnumGeneric<T, U>) -> bool {
-        let __self_tag = ::core::intrinsics::discriminant_value(self);
-        let __arg1_tag = ::core::intrinsics::discriminant_value(other);
-        __self_tag == __arg1_tag &&
+        let __self_discr = ::core::intrinsics::discriminant_value(self);
+        let __arg1_discr = ::core::intrinsics::discriminant_value(other);
+        __self_discr == __arg1_discr &&
             match (self, other) {
                 (EnumGeneric::One(__self_0), EnumGeneric::One(__arg1_0)) =>
-                    *__self_0 == *__arg1_0,
+                    __self_0 == __arg1_0,
                 (EnumGeneric::Two(__self_0), EnumGeneric::Two(__arg1_0)) =>
-                    *__self_0 == *__arg1_0,
+                    __self_0 == __arg1_0,
                 _ => unsafe { ::core::intrinsics::unreachable() }
             }
     }
 }
 #[automatically_derived]
-impl<T, U> ::core::marker::StructuralEq for EnumGeneric<T, U> { }
-#[automatically_derived]
 impl<T: ::core::cmp::Eq, U: ::core::cmp::Eq> ::core::cmp::Eq for
     EnumGeneric<T, U> {
     #[inline]
     #[doc(hidden)]
-    #[no_coverage]
+    #[coverage(off)]
     fn assert_receiver_is_total_eq(&self) -> () {
         let _: ::core::cmp::AssertParamIsEq<T>;
         let _: ::core::cmp::AssertParamIsEq<U>;
@@ -1409,16 +1372,16 @@ impl<T: ::core::cmp::PartialOrd, U: ::core::cmp::PartialOrd>
     #[inline]
     fn partial_cmp(&self, other: &EnumGeneric<T, U>)
         -> ::core::option::Option<::core::cmp::Ordering> {
-        let __self_tag = ::core::intrinsics::discriminant_value(self);
-        let __arg1_tag = ::core::intrinsics::discriminant_value(other);
+        let __self_discr = ::core::intrinsics::discriminant_value(self);
+        let __arg1_discr = ::core::intrinsics::discriminant_value(other);
         match (self, other) {
             (EnumGeneric::One(__self_0), EnumGeneric::One(__arg1_0)) =>
                 ::core::cmp::PartialOrd::partial_cmp(__self_0, __arg1_0),
             (EnumGeneric::Two(__self_0), EnumGeneric::Two(__arg1_0)) =>
                 ::core::cmp::PartialOrd::partial_cmp(__self_0, __arg1_0),
             _ =>
-                ::core::cmp::PartialOrd::partial_cmp(&__self_tag,
-                    &__arg1_tag),
+                ::core::cmp::PartialOrd::partial_cmp(&__self_discr,
+                    &__arg1_discr),
         }
     }
 }
@@ -1427,9 +1390,9 @@ impl<T: ::core::cmp::Ord, U: ::core::cmp::Ord> ::core::cmp::Ord for
     EnumGeneric<T, U> {
     #[inline]
     fn cmp(&self, other: &EnumGeneric<T, U>) -> ::core::cmp::Ordering {
-        let __self_tag = ::core::intrinsics::discriminant_value(self);
-        let __arg1_tag = ::core::intrinsics::discriminant_value(other);
-        match ::core::cmp::Ord::cmp(&__self_tag, &__arg1_tag) {
+        let __self_discr = ::core::intrinsics::discriminant_value(self);
+        let __arg1_discr = ::core::intrinsics::discriminant_value(other);
+        match ::core::cmp::Ord::cmp(&__self_discr, &__arg1_discr) {
             ::core::cmp::Ordering::Equal =>
                 match (self, other) {
                     (EnumGeneric::One(__self_0), EnumGeneric::One(__arg1_0)) =>
@@ -1441,6 +1404,30 @@ impl<T: ::core::cmp::Ord, U: ::core::cmp::Ord> ::core::cmp::Ord for
             cmp => cmp,
         }
     }
+}
+
+// An enum that has variant, which does't implement `Copy`.
+enum NonCopyEnum {
+
+    // The `dyn NonCopyTrait` implements `PartialEq`, but it doesn't require `Copy`.
+    // So we cannot generate `PartialEq` with dereference.
+    NonCopyField(Box<dyn NonCopyTrait>),
+}
+#[automatically_derived]
+impl ::core::marker::StructuralPartialEq for NonCopyEnum { }
+#[automatically_derived]
+impl ::core::cmp::PartialEq for NonCopyEnum {
+    #[inline]
+    fn eq(&self, other: &NonCopyEnum) -> bool {
+        match (self, other) {
+            (NonCopyEnum::NonCopyField(__self_0),
+                NonCopyEnum::NonCopyField(__arg1_0)) => __self_0 == __arg1_0,
+        }
+    }
+}
+trait NonCopyTrait {}
+impl PartialEq for dyn NonCopyTrait {
+    fn eq(&self, _other: &Self) -> bool { true }
 }
 
 // A union. Most builtin traits are not derivable for unions.

@@ -29,19 +29,6 @@ impl Future for Delay {
     }
 }
 
-fn mk_waker() -> Waker {
-    use std::sync::Arc;
-
-    struct MyWaker;
-    impl Wake for MyWaker {
-        fn wake(self: Arc<Self>) {
-            unimplemented!()
-        }
-    }
-
-    Waker::from(Arc::new(MyWaker))
-}
-
 async fn do_stuff() {
     (&mut Delay::new(1)).await;
 }
@@ -89,8 +76,7 @@ impl Future for DoStuff {
 }
 
 fn run_fut<T>(fut: impl Future<Output = T>) -> T {
-    let waker = mk_waker();
-    let mut context = Context::from_waker(&waker);
+    let mut context = Context::from_waker(Waker::noop());
 
     let mut pinned = pin!(fut);
     loop {
@@ -102,8 +88,7 @@ fn run_fut<T>(fut: impl Future<Output = T>) -> T {
 }
 
 fn self_referential_box() {
-    let waker = mk_waker();
-    let cx = &mut Context::from_waker(&waker);
+    let cx = &mut Context::from_waker(Waker::noop());
 
     async fn my_fut() -> i32 {
         let val = 10;

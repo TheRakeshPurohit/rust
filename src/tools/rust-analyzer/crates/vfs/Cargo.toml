@@ -1,7 +1,8 @@
 [package]
 name = "vfs"
 version = "0.0.0"
-description = "TBD"
+repository.workspace = true
+description = "A virtual file system for rust-analyzer."
 
 authors.workspace = true
 edition.workspace = true
@@ -12,10 +13,15 @@ rust-version.workspace = true
 doctest = false
 
 [dependencies]
-rustc-hash = "1.1.0"
+rustc-hash.workspace = true
+tracing.workspace = true
 fst = "0.4.7"
-indexmap = "1.9.1"
+indexmap.workspace = true
 nohash-hasher.workspace = true
+crossbeam-channel.workspace = true
 
 paths.workspace = true
 stdx.workspace = true
+
+[lints]
+workspace = true

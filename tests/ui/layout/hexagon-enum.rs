@@ -1,5 +1,6 @@
-// compile-flags: --target hexagon-unknown-linux-musl
-// needs-llvm-components: hexagon
+//@ compile-flags: --target hexagon-unknown-linux-musl
+//@ normalize-stderr: "randomization_seed: \d+" -> "randomization_seed: $$SEED"
+//@ needs-llvm-components: hexagon
 //
 // Verify that the hexagon targets implement the repr(C) for enums correctly.
 //

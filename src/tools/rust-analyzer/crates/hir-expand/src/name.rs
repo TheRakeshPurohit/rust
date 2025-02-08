@@ -2,85 +2,135 @@
 
 use std::fmt;
 
-use syntax::{ast, utils::is_raw_identifier, SmolStr};
+use intern::{sym, Symbol};
+use span::{Edition, SyntaxContextId};
+use syntax::utils::is_raw_identifier;
+use syntax::{ast, format_smolstr};
 
 /// `Name` is a wrapper around string, which is used in hir for both references
 /// and declarations. In theory, names should also carry hygiene info, but we are
 /// not there yet!
 ///
-/// Note that `Name` holds and prints escaped name i.e. prefixed with "r#" when it
-/// is a raw identifier. Use [`unescaped()`][Name::unescaped] when you need the
-/// name without "r#".
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Name(Repr);
-
-/// Wrapper of `Name` to print the name without "r#" even when it is a raw identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct UnescapedName<'a>(&'a Name);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum Repr {
-    Text(SmolStr),
-    TupleField(usize),
+/// Note that the rawness (`r#`) of names is not preserved. Names are always stored without a `r#` prefix.
+/// This is because we want to show (in completions etc.) names as raw depending on the needs
+/// of the current crate, for example if it is edition 2021 complete `gen` even if the defining
+/// crate is in edition 2024 and wrote `r#gen`, and the opposite holds as well.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct Name {
+    symbol: Symbol,
+    // If you are making this carry actual hygiene, beware that the special handling for variables and labels
+    // in bodies can go.
+    ctx: (),
 }
 
-impl<'a> UnescapedName<'a> {
-    /// Returns the textual representation of this name as a [`SmolStr`]. Prefer using this over
-    /// [`ToString::to_string`] if possible as this conversion is cheaper in the general case.
-    pub fn to_smol_str(&self) -> SmolStr {
-        match &self.0 .0 {
-            Repr::Text(it) => {
-                if let Some(stripped) = it.strip_prefix("r#") {
-                    SmolStr::new(stripped)
-                } else {
-                    it.clone()
-                }
-            }
-            Repr::TupleField(it) => SmolStr::new(it.to_string()),
-        }
+impl fmt::Debug for Name {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Name")
+            .field("symbol", &self.symbol.as_str())
+            .field("ctx", &self.ctx)
+            .finish()
     }
+}
 
-    pub fn display(&'a self, db: &dyn crate::db::ExpandDatabase) -> impl fmt::Display + 'a {
-        _ = db;
-        UnescapedDisplay { name: self }
+impl Ord for Name {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.symbol.as_str().cmp(other.symbol.as_str())
+    }
+}
+
+impl PartialOrd for Name {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+// No need to strip `r#`, all comparisons are done against well-known symbols.
+impl PartialEq<Symbol> for Name {
+    fn eq(&self, sym: &Symbol) -> bool {
+        self.symbol == *sym
+    }
+}
+
+impl PartialEq<&Symbol> for Name {
+    fn eq(&self, &sym: &&Symbol) -> bool {
+        self.symbol == *sym
+    }
+}
+
+impl PartialEq<Name> for Symbol {
+    fn eq(&self, name: &Name) -> bool {
+        *self == name.symbol
+    }
+}
+
+impl PartialEq<Name> for &Symbol {
+    fn eq(&self, name: &Name) -> bool {
+        **self == name.symbol
     }
 }
 
 impl Name {
-    /// Note: this is private to make creating name from random string hard.
-    /// Hopefully, this should allow us to integrate hygiene cleaner in the
-    /// future, and to switch to interned representation of names.
-    const fn new_text(text: SmolStr) -> Name {
-        Name(Repr::Text(text))
+    fn new_text(text: &str) -> Name {
+        Name { symbol: Symbol::intern(text), ctx: () }
+    }
+
+    pub fn new(text: &str, mut ctx: SyntaxContextId) -> Name {
+        // For comparisons etc. we remove the edition, because sometimes we search for some `Name`
+        // and we don't know which edition it came from.
+        // Can't do that for all `SyntaxContextId`s because it breaks Salsa.
+        ctx.remove_root_edition();
+        _ = ctx;
+        match text.strip_prefix("r#") {
+            Some(text) => Self::new_text(text),
+            None => Self::new_text(text),
+        }
+    }
+
+    pub fn new_root(text: &str) -> Name {
+        // The edition doesn't matter for hygiene.
+        Self::new(text, SyntaxContextId::root(Edition::Edition2015))
     }
 
     pub fn new_tuple_field(idx: usize) -> Name {
-        Name(Repr::TupleField(idx))
+        let symbol = match idx {
+            0 => sym::INTEGER_0.clone(),
+            1 => sym::INTEGER_1.clone(),
+            2 => sym::INTEGER_2.clone(),
+            3 => sym::INTEGER_3.clone(),
+            4 => sym::INTEGER_4.clone(),
+            5 => sym::INTEGER_5.clone(),
+            6 => sym::INTEGER_6.clone(),
+            7 => sym::INTEGER_7.clone(),
+            8 => sym::INTEGER_8.clone(),
+            9 => sym::INTEGER_9.clone(),
+            10 => sym::INTEGER_10.clone(),
+            11 => sym::INTEGER_11.clone(),
+            12 => sym::INTEGER_12.clone(),
+            13 => sym::INTEGER_13.clone(),
+            14 => sym::INTEGER_14.clone(),
+            15 => sym::INTEGER_15.clone(),
+            _ => Symbol::intern(&idx.to_string()),
+        };
+        Name { symbol, ctx: () }
     }
 
     pub fn new_lifetime(lt: &ast::Lifetime) -> Name {
-        Self::new_text(lt.text().into())
-    }
-
-    /// Shortcut to create inline plain text name. Panics if `text.len() > 22`
-    const fn new_inline(text: &str) -> Name {
-        Name::new_text(SmolStr::new_inline(text))
-    }
-
-    /// Resolve a name from the text of token.
-    fn resolve(raw_text: &str) -> Name {
-        match raw_text.strip_prefix("r#") {
-            // When `raw_text` starts with "r#" but the name does not coincide with any
-            // keyword, we never need the prefix so we strip it.
-            Some(text) if !is_raw_identifier(text) => Name::new_text(SmolStr::new(text)),
-            // Keywords (in the current edition) *can* be used as a name in earlier editions of
-            // Rust, e.g. "try" in Rust 2015. Even in such cases, we keep track of them in their
-            // escaped form.
-            None if is_raw_identifier(raw_text) => {
-                Name::new_text(SmolStr::from_iter(["r#", raw_text]))
-            }
-            _ => Name::new_text(raw_text.into()),
+        let text = lt.text();
+        match text.strip_prefix("'r#") {
+            Some(text) => Self::new_text(&format_smolstr!("'{text}")),
+            None => Self::new_text(text.as_str()),
         }
+    }
+
+    pub fn new_symbol(symbol: Symbol, ctx: SyntaxContextId) -> Self {
+        debug_assert!(!symbol.as_str().starts_with("r#"));
+        _ = ctx;
+        Self { symbol, ctx: () }
+    }
+
+    // FIXME: This needs to go once we have hygiene
+    pub fn new_symbol_root(sym: Symbol) -> Self {
+        Self::new_symbol(sym, SyntaxContextId::root(Edition::Edition2015))
     }
 
     /// A fake name for things missing in the source code.
@@ -92,98 +142,75 @@ impl Name {
     /// Ideally, we want a `gensym` semantics for missing names -- each missing
     /// name is equal only to itself. It's not clear how to implement this in
     /// salsa though, so we punt on that bit for a moment.
-    pub const fn missing() -> Name {
-        Name::new_inline("[missing name]")
+    pub fn missing() -> Name {
+        Name { symbol: sym::MISSING_NAME.clone(), ctx: () }
     }
 
-    /// Generates a new name which is only equal to itself, by incrementing a counter. Due
-    /// its implementation, it should not be used in things that salsa considers, like
-    /// type names or field names, and it should be only used in names of local variables
-    /// and labels and similar things.
-    pub fn generate_new_name() -> Name {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static CNT: AtomicUsize = AtomicUsize::new(0);
-        let c = CNT.fetch_add(1, Ordering::Relaxed);
-        Name::new_text(format!("<ra@gennew>{c}").into())
+    /// Returns true if this is a fake name for things missing in the source code. See
+    /// [`missing()`][Self::missing] for details.
+    ///
+    /// Use this method instead of comparing with `Self::missing()` as missing names
+    /// (ideally should) have a `gensym` semantics.
+    pub fn is_missing(&self) -> bool {
+        self == &Name::missing()
+    }
+
+    /// Generates a new name that attempts to be unique. Should only be used when body lowering and
+    /// creating desugared locals and labels. The caller is responsible for picking an index
+    /// that is stable across re-executions
+    pub fn generate_new_name(idx: usize) -> Name {
+        Name::new_text(&format!("<ra@gennew>{idx}"))
     }
 
     /// Returns the tuple index this name represents if it is a tuple field.
     pub fn as_tuple_index(&self) -> Option<usize> {
-        match self.0 {
-            Repr::TupleField(idx) => Some(idx),
-            _ => None,
-        }
+        self.symbol.as_str().parse().ok()
+    }
+
+    /// Whether this name needs to be escaped in the given edition via `r#`.
+    pub fn needs_escape(&self, edition: Edition) -> bool {
+        is_raw_identifier(self.symbol.as_str(), edition)
     }
 
     /// Returns the text this name represents if it isn't a tuple field.
-    pub fn as_text(&self) -> Option<SmolStr> {
-        match &self.0 {
-            Repr::Text(it) => Some(it.clone()),
-            _ => None,
-        }
+    ///
+    /// Do not use this for user-facing text, use `display` instead to handle editions properly.
+    // FIXME: This should take a database argument to hide the interning
+    pub fn as_str(&self) -> &str {
+        self.symbol.as_str()
     }
 
-    /// Returns the text this name represents if it isn't a tuple field.
-    pub fn as_str(&self) -> Option<&str> {
-        match &self.0 {
-            Repr::Text(it) => Some(it),
-            _ => None,
-        }
-    }
-
-    /// Returns the textual representation of this name as a [`SmolStr`].
-    /// Prefer using this over [`ToString::to_string`] if possible as this conversion is cheaper in
-    /// the general case.
-    pub fn to_smol_str(&self) -> SmolStr {
-        match &self.0 {
-            Repr::Text(it) => it.clone(),
-            Repr::TupleField(it) => SmolStr::new(it.to_string()),
-        }
-    }
-
-    pub fn unescaped(&self) -> UnescapedName<'_> {
-        UnescapedName(self)
-    }
-
-    pub fn is_escaped(&self) -> bool {
-        match &self.0 {
-            Repr::Text(it) => it.starts_with("r#"),
-            Repr::TupleField(_) => false,
-        }
-    }
-
-    pub fn display<'a>(&'a self, db: &dyn crate::db::ExpandDatabase) -> impl fmt::Display + 'a {
+    pub fn display<'a>(
+        &'a self,
+        db: &dyn crate::db::ExpandDatabase,
+        edition: Edition,
+    ) -> impl fmt::Display + 'a {
         _ = db;
-        Display { name: self }
+        self.display_no_db(edition)
+    }
+
+    // FIXME: Remove this in favor of `display`, see fixme on `as_str`
+    #[doc(hidden)]
+    pub fn display_no_db(&self, edition: Edition) -> impl fmt::Display + '_ {
+        Display { name: self, needs_escaping: is_raw_identifier(self.symbol.as_str(), edition) }
+    }
+
+    pub fn symbol(&self) -> &Symbol {
+        &self.symbol
     }
 }
 
 struct Display<'a> {
     name: &'a Name,
+    needs_escaping: bool,
 }
 
-impl<'a> fmt::Display for Display<'a> {
+impl fmt::Display for Display<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.name.0 {
-            Repr::Text(text) => fmt::Display::fmt(&text, f),
-            Repr::TupleField(idx) => fmt::Display::fmt(&idx, f),
+        if self.needs_escaping {
+            write!(f, "r#")?;
         }
-    }
-}
-
-struct UnescapedDisplay<'a> {
-    name: &'a UnescapedName<'a>,
-}
-
-impl<'a> fmt::Display for UnescapedDisplay<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.name.0 .0 {
-            Repr::Text(text) => {
-                let text = text.strip_prefix("r#").unwrap_or(text);
-                fmt::Display::fmt(&text, f)
-            }
-            Repr::TupleField(idx) => fmt::Display::fmt(&idx, f),
-        }
+        fmt::Display::fmt(self.name.symbol.as_str(), f)
     }
 }
 
@@ -195,14 +222,14 @@ impl AsName for ast::NameRef {
     fn as_name(&self) -> Name {
         match self.as_tuple_field() {
             Some(idx) => Name::new_tuple_field(idx),
-            None => Name::resolve(&self.text()),
+            None => Name::new_root(&self.text()),
         }
     }
 }
 
 impl AsName for ast::Name {
     fn as_name(&self) -> Name {
-        Name::resolve(&self.text())
+        Name::new_root(&self.text())
     }
 }
 
@@ -217,7 +244,7 @@ impl AsName for ast::NameOrNameRef {
 
 impl<Span> AsName for tt::Ident<Span> {
     fn as_name(&self) -> Name {
-        Name::resolve(&self.text)
+        Name::new_root(self.sym.as_str())
     }
 }
 
@@ -235,217 +262,6 @@ impl AsName for ast::FieldKind {
 
 impl AsName for base_db::Dependency {
     fn as_name(&self) -> Name {
-        Name::new_text(SmolStr::new(&*self.name))
+        Name::new_root(&self.name)
     }
 }
-
-pub mod known {
-    macro_rules! known_names {
-        ($($ident:ident),* $(,)?) => {
-            $(
-                #[allow(bad_style)]
-                pub const $ident: super::Name =
-                    super::Name::new_inline(stringify!($ident));
-            )*
-        };
-    }
-
-    known_names!(
-        // Primitives
-        isize,
-        i8,
-        i16,
-        i32,
-        i64,
-        i128,
-        usize,
-        u8,
-        u16,
-        u32,
-        u64,
-        u128,
-        f32,
-        f64,
-        bool,
-        char,
-        str,
-        // Special names
-        macro_rules,
-        doc,
-        cfg,
-        cfg_attr,
-        register_attr,
-        register_tool,
-        // Components of known path (value or mod name)
-        std,
-        core,
-        alloc,
-        iter,
-        ops,
-        future,
-        result,
-        boxed,
-        option,
-        prelude,
-        rust_2015,
-        rust_2018,
-        rust_2021,
-        v1,
-        // Components of known path (type name)
-        Iterator,
-        IntoIterator,
-        Item,
-        IntoIter,
-        Try,
-        Ok,
-        Future,
-        IntoFuture,
-        Result,
-        Option,
-        Output,
-        Target,
-        Box,
-        RangeFrom,
-        RangeFull,
-        RangeInclusive,
-        RangeToInclusive,
-        RangeTo,
-        Range,
-        Neg,
-        Not,
-        None,
-        Index,
-        // Components of known path (function name)
-        filter_map,
-        next,
-        iter_mut,
-        len,
-        is_empty,
-        new,
-        // Builtin macros
-        asm,
-        assert,
-        column,
-        compile_error,
-        concat_idents,
-        concat_bytes,
-        concat,
-        const_format_args,
-        core_panic,
-        env,
-        file,
-        format_args_nl,
-        format_args,
-        global_asm,
-        include_bytes,
-        include_str,
-        include,
-        line,
-        llvm_asm,
-        log_syntax,
-        module_path,
-        option_env,
-        std_panic,
-        stringify,
-        trace_macros,
-        unreachable,
-        // Builtin derives
-        Copy,
-        Clone,
-        Default,
-        Debug,
-        Hash,
-        Ord,
-        PartialOrd,
-        Eq,
-        PartialEq,
-        // Builtin attributes
-        bench,
-        cfg_accessible,
-        cfg_eval,
-        crate_type,
-        derive,
-        global_allocator,
-        no_core,
-        no_std,
-        test,
-        test_case,
-        recursion_limit,
-        feature,
-        // known methods of lang items
-        call_once,
-        call_mut,
-        call,
-        eq,
-        ne,
-        ge,
-        gt,
-        le,
-        lt,
-        // known fields of lang items
-        pieces,
-        // lang items
-        add_assign,
-        add,
-        bitand_assign,
-        bitand,
-        bitor_assign,
-        bitor,
-        bitxor_assign,
-        bitxor,
-        branch,
-        deref_mut,
-        deref,
-        div_assign,
-        div,
-        drop,
-        fn_mut,
-        fn_once,
-        future_trait,
-        index,
-        index_mut,
-        into_future,
-        mul_assign,
-        mul,
-        neg,
-        not,
-        owned_box,
-        partial_ord,
-        poll,
-        r#fn,
-        rem_assign,
-        rem,
-        shl_assign,
-        shl,
-        shr_assign,
-        shr,
-        sub_assign,
-        sub,
-        unsafe_cell,
-        va_list
-    );
-
-    // self/Self cannot be used as an identifier
-    pub const SELF_PARAM: super::Name = super::Name::new_inline("self");
-    pub const SELF_TYPE: super::Name = super::Name::new_inline("Self");
-
-    pub const STATIC_LIFETIME: super::Name = super::Name::new_inline("'static");
-
-    #[macro_export]
-    macro_rules! name {
-        (self) => {
-            $crate::name::known::SELF_PARAM
-        };
-        (Self) => {
-            $crate::name::known::SELF_TYPE
-        };
-        ('static) => {
-            $crate::name::known::STATIC_LIFETIME
-        };
-        ($ident:ident) => {
-            $crate::name::known::$ident
-        };
-    }
-}
-
-pub use crate::name;

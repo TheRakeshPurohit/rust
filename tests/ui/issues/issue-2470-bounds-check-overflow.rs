@@ -1,6 +1,6 @@
-// run-fail
-// error-pattern:index out of bounds
-// ignore-emscripten no processes
+//@ run-fail
+//@ error-pattern:index out of bounds
+//@ needs-subprocess
 
 use std::mem;
 

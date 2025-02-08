@@ -1,5 +1,4 @@
-// check-pass
-// ignore-compare-mode-chalk
+//@ check-pass
 
 #![allow(dead_code)]
 

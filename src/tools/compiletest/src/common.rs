@@ -1,17 +1,18 @@
-pub use self::Mode::*;
-
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
-use std::fmt;
-use std::iter;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
+use std::sync::OnceLock;
+use std::{fmt, iter};
 
-use crate::util::{add_dylib_path, PathBufExt};
-use lazycell::AtomicLazyCell;
+use build_helper::git::GitConfig;
+use semver::Version;
 use serde::de::{Deserialize, Deserializer, Error as _};
-use std::collections::{HashMap, HashSet};
 use test::{ColorConfig, OutputFormat};
+
+pub use self::Mode::*;
+use crate::util::{PathBufExt, add_dylib_path};
 
 macro_rules! string_enum {
     ($(#[$meta:meta])* $vis:vis enum $name:ident { $($variant:ident => $repr:expr,)* }) => {
@@ -38,22 +39,25 @@ macro_rules! string_enum {
         }
 
         impl FromStr for $name {
-            type Err = ();
+            type Err = String;
 
-            fn from_str(s: &str) -> Result<Self, ()> {
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
                 match s {
                     $($repr => Ok(Self::$variant),)*
-                    _ => Err(()),
+                    _ => Err(format!(concat!("unknown `", stringify!($name), "` variant: `{}`"), s)),
                 }
             }
         }
     }
 }
 
+// Make the macro visible outside of this module, for tests.
+#[cfg(test)]
+pub(crate) use string_enum;
+
 string_enum! {
     #[derive(Clone, Copy, PartialEq, Debug)]
     pub enum Mode {
-        RunPassValgrind => "run-pass-valgrind",
         Pretty => "pretty",
         DebugInfo => "debuginfo",
         Codegen => "codegen",
@@ -63,9 +67,12 @@ string_enum! {
         Incremental => "incremental",
         RunMake => "run-make",
         Ui => "ui",
-        JsDocTest => "js-doc-test",
+        RustdocJs => "rustdoc-js",
         MirOpt => "mir-opt",
         Assembly => "assembly",
+        CoverageMap => "coverage-map",
+        CoverageRun => "coverage-run",
+        Crashes => "crashes",
     }
 }
 
@@ -76,11 +83,20 @@ impl Default for Mode {
 }
 
 impl Mode {
-    pub fn disambiguator(self) -> &'static str {
+    pub fn aux_dir_disambiguator(self) -> &'static str {
         // Pretty-printing tests could run concurrently, and if they do,
         // they need to keep their output segregated.
         match self {
             Pretty => ".pretty",
+            _ => "",
+        }
+    }
+
+    pub fn output_dir_disambiguator(self) -> &'static str {
+        // Coverage tests use the same test files for multiple test modes,
+        // so each mode should have a separate output directory.
+        match self {
+            CoverageMap | CoverageRun => self.to_str(),
             _ => "",
         }
     }
@@ -106,7 +122,6 @@ string_enum! {
     #[derive(Clone, Debug, PartialEq)]
     pub enum CompareMode {
         Polonius => "polonius",
-        Chalk => "chalk",
         NextSolver => "next-solver",
         NextSolverCoherence => "next-solver-coherence",
         SplitDwarf => "split-dwarf",
@@ -140,6 +155,23 @@ impl PanicStrategy {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Sanitizer {
+    Address,
+    Cfi,
+    Dataflow,
+    Kcfi,
+    KernelAddress,
+    Leak,
+    Memory,
+    Memtag,
+    Safestack,
+    ShadowCallStack,
+    Thread,
+    Hwaddress,
+}
+
 /// Configuration for compiletest
 #[derive(Debug, Default, Clone)]
 pub struct Config {
@@ -155,11 +187,14 @@ pub struct Config {
     /// The rustc executable.
     pub rustc_path: PathBuf,
 
+    /// The cargo executable.
+    pub cargo_path: Option<PathBuf>,
+
     /// The rustdoc executable.
     pub rustdoc_path: Option<PathBuf>,
 
-    /// The rust-demangler executable.
-    pub rust_demangler_path: Option<PathBuf>,
+    /// The coverage-dump executable.
+    pub coverage_dump_path: Option<PathBuf>,
 
     /// The Python executable to use for LLDB and htmldocck.
     pub python: String,
@@ -175,13 +210,6 @@ pub struct Config {
 
     /// Path to LLVM's bin directory.
     pub llvm_bin_dir: Option<PathBuf>,
-
-    /// The valgrind path.
-    pub valgrind_path: Option<String>,
-
-    /// Whether to fail if we can't run run-pass-valgrind tests under valgrind
-    /// (or, alternatively, to silently run them like regular run-pass tests).
-    pub force_valgrind: bool,
 
     /// The path to the Clang executable to run Clang-based tests with. If
     /// `None` then these tests will be ignored.
@@ -212,10 +240,16 @@ pub struct Config {
     /// Run ignored tests
     pub run_ignored: bool,
 
+    /// Whether rustc was built with debug assertions.
+    pub with_rustc_debug_assertions: bool,
+
+    /// Whether std was built with debug assertions.
+    pub with_std_debug_assertions: bool,
+
     /// Only run tests that match these filters
     pub filters: Vec<String>,
 
-    /// Skip tests tests matching these substrings. Corresponds to
+    /// Skip tests matching these substrings. Corresponds to
     /// `test::TestOpts::skip`. `filter_exact` does not apply to these flags.
     pub skip: Vec<String>,
 
@@ -232,14 +266,19 @@ pub struct Config {
     pub logfile: Option<PathBuf>,
 
     /// A command line to prefix program execution with,
-    /// for running under valgrind
-    pub runtool: Option<String>,
+    /// for running under valgrind for example.
+    ///
+    /// Similar to `CARGO_*_RUNNER` configuration.
+    pub runner: Option<String>,
 
     /// Flags to pass to the compiler when building for the host
     pub host_rustcflags: Vec<String>,
 
     /// Flags to pass to the compiler when building for the target
     pub target_rustcflags: Vec<String>,
+
+    /// Whether the compiler and stdlib has been built with randomized struct layouts
+    pub rust_randomized_layout: bool,
 
     /// Whether tests should be optimized by default. Individual test-suites and test files may
     /// override this setting.
@@ -263,17 +302,11 @@ pub struct Config {
     /// Version of GDB, encoded as ((major * 1000) + minor) * 1000 + patch
     pub gdb_version: Option<u32>,
 
-    /// Whether GDB has native rust support
-    pub gdb_native_rust: bool,
-
     /// Version of LLDB
     pub lldb_version: Option<u32>,
 
-    /// Whether LLDB has native rust support
-    pub lldb_native_rust: bool,
-
     /// Version of LLVM
-    pub llvm_version: Option<u32>,
+    pub llvm_version: Option<Version>,
 
     /// Is LLVM a system LLVM
     pub system_llvm: bool,
@@ -313,8 +346,11 @@ pub struct Config {
     /// created in `/<build_base>/rustfix_missing_coverage.txt`
     pub rustfix_coverage: bool,
 
-    /// whether to run `tidy` when a rustdoc test fails
-    pub has_tidy: bool,
+    /// whether to run `tidy` (html-tidy) when a rustdoc test fails
+    pub has_html_tidy: bool,
+
+    /// whether to run `enzyme` autodiff tests
+    pub has_enzyme: bool,
 
     /// The current Rust channel
     pub channel: String,
@@ -344,12 +380,30 @@ pub struct Config {
     /// Whether to rerun tests even if the inputs are unchanged.
     pub force_rerun: bool,
 
-    /// Only rerun the tests that result has been modified accoring to Git status
+    /// Only rerun the tests that result has been modified according to Git status
     pub only_modified: bool,
 
-    pub target_cfgs: AtomicLazyCell<TargetCfgs>,
+    pub target_cfgs: OnceLock<TargetCfgs>,
+    pub builtin_cfg_names: OnceLock<HashSet<String>>,
 
     pub nocapture: bool,
+
+    // Needed both to construct build_helper::git::GitConfig
+    pub git_repository: String,
+    pub nightly_branch: String,
+    pub git_merge_commit_email: String,
+
+    /// True if the profiler runtime is enabled for this target.
+    /// Used by the "needs-profiler-runtime" directive in test files.
+    pub profiler_runtime: bool,
+
+    /// Command for visual diff display, e.g. `diff-tool --color=always`.
+    pub diff_command: Option<String>,
+
+    /// Path to minicore aux library, used for `no_core` tests that need `core` stubs in
+    /// cross-compilation scenarios that do not otherwise want/need to `-Zbuild-std`. Used in e.g.
+    /// ABI tests.
+    pub minicore_path: PathBuf,
 }
 
 impl Config {
@@ -361,13 +415,7 @@ impl Config {
     }
 
     pub fn target_cfgs(&self) -> &TargetCfgs {
-        match self.target_cfgs.borrow() {
-            Some(cfgs) => cfgs,
-            None => {
-                let _ = self.target_cfgs.fill(TargetCfgs::new(self));
-                self.target_cfgs.borrow().unwrap()
-            }
-        }
+        self.target_cfgs.get_or_init(|| TargetCfgs::new(self))
     }
 
     pub fn target_cfg(&self) -> &TargetCfg {
@@ -376,9 +424,6 @@ impl Config {
 
     pub fn matches_arch(&self, arch: &str) -> bool {
         self.target_cfg().arch == arch ||
-        // Shorthand for convenience. The arch for
-        // asmjs-unknown-emscripten is actually wasm32.
-        (arch == "asmjs" && self.target.starts_with("asmjs")) ||
         // Matching all the thumb variants as one can be convenient.
         // (thumbv6m, thumbv7em, thumbv7m, etc.)
         (arch == "thumb" && self.target.starts_with("thumb"))
@@ -412,6 +457,20 @@ impl Config {
         self.target_cfg().panic == PanicStrategy::Unwind
     }
 
+    /// Get the list of builtin, 'well known' cfg names
+    pub fn builtin_cfg_names(&self) -> &HashSet<String> {
+        self.builtin_cfg_names.get_or_init(|| builtin_cfg_names(self))
+    }
+
+    pub fn has_threads(&self) -> bool {
+        // Wasm targets don't have threads unless `-threads` is in the target
+        // name, such as `wasm32-wasip1-threads`.
+        if self.target.starts_with("wasm") {
+            return self.target.contains("threads");
+        }
+        true
+    }
+
     pub fn has_asm_support(&self) -> bool {
         static ASM_SUPPORTED_ARCHS: &[&str] = &[
             "x86", "x86_64", "arm", "aarch64", "riscv32",
@@ -421,7 +480,29 @@ impl Config {
         ];
         ASM_SUPPORTED_ARCHS.contains(&self.target_cfg().arch.as_str())
     }
+
+    pub fn git_config(&self) -> GitConfig<'_> {
+        GitConfig {
+            git_repository: &self.git_repository,
+            nightly_branch: &self.nightly_branch,
+            git_merge_commit_email: &self.git_merge_commit_email,
+        }
+    }
+
+    pub fn has_subprocess_support(&self) -> bool {
+        // FIXME(#135928): compiletest is always a **host** tool. Building and running an
+        // capability detection executable against the **target** is not trivial. The short term
+        // solution here is to hard-code some targets to allow/deny, unfortunately.
+
+        let unsupported_target = self.target_cfg().env == "sgx"
+            || matches!(self.target_cfg().arch.as_str(), "wasm32" | "wasm64")
+            || self.target_cfg().os == "emscripten";
+        !unsupported_target
+    }
 }
+
+/// Known widths of `target_has_atomic`.
+pub const KNOWN_TARGET_HAS_ATOMIC_WIDTHS: &[&str] = &["8", "16", "32", "64", "128", "ptr"];
 
 #[derive(Debug, Clone)]
 pub struct TargetCfgs {
@@ -438,9 +519,10 @@ pub struct TargetCfgs {
 
 impl TargetCfgs {
     fn new(config: &Config) -> TargetCfgs {
-        let targets: HashMap<String, TargetCfg> = serde_json::from_str(&rustc_output(
+        let mut targets: HashMap<String, TargetCfg> = serde_json::from_str(&rustc_output(
             config,
             &["--print=all-target-specs-json", "-Zunstable-options"],
+            Default::default(),
         ))
         .unwrap();
 
@@ -453,7 +535,36 @@ impl TargetCfgs {
         let mut all_families = HashSet::new();
         let mut all_pointer_widths = HashSet::new();
 
-        for (target, cfg) in targets.into_iter() {
+        // If current target is not included in the `--print=all-target-specs-json` output,
+        // we check whether it is a custom target from the user or a synthetic target from bootstrap.
+        if !targets.contains_key(&config.target) {
+            let mut envs: HashMap<String, String> = HashMap::new();
+
+            if let Ok(t) = std::env::var("RUST_TARGET_PATH") {
+                envs.insert("RUST_TARGET_PATH".into(), t);
+            }
+
+            // This returns false only when the target is neither a synthetic target
+            // nor a custom target from the user, indicating it is most likely invalid.
+            if config.target.ends_with(".json") || !envs.is_empty() {
+                targets.insert(
+                    config.target.clone(),
+                    serde_json::from_str(&rustc_output(
+                        config,
+                        &[
+                            "--print=target-spec-json",
+                            "-Zunstable-options",
+                            "--target",
+                            &config.target,
+                        ],
+                        envs,
+                    ))
+                    .unwrap(),
+                );
+            }
+        }
+
+        for (target, cfg) in targets.iter() {
             all_archs.insert(cfg.arch.clone());
             all_oses.insert(cfg.os.clone());
             all_oses_and_envs.insert(cfg.os_and_env());
@@ -464,11 +575,11 @@ impl TargetCfgs {
             }
             all_pointer_widths.insert(format!("{}bit", cfg.pointer_width));
 
-            all_targets.insert(target.into());
+            all_targets.insert(target.clone());
         }
 
         Self {
-            current: Self::get_current_target_config(config),
+            current: Self::get_current_target_config(config, &targets),
             all_targets,
             all_archs,
             all_oses,
@@ -480,18 +591,24 @@ impl TargetCfgs {
         }
     }
 
-    fn get_current_target_config(config: &Config) -> TargetCfg {
-        let mut arch = None;
-        let mut os = None;
-        let mut env = None;
-        let mut abi = None;
-        let mut families = Vec::new();
-        let mut pointer_width = None;
-        let mut endian = None;
-        let mut panic = None;
+    fn get_current_target_config(
+        config: &Config,
+        targets: &HashMap<String, TargetCfg>,
+    ) -> TargetCfg {
+        let mut cfg = targets[&config.target].clone();
 
+        // To get the target information for the current target, we take the target spec obtained
+        // from `--print=all-target-specs-json`, and then we enrich it with the information
+        // gathered from `--print=cfg --target=$target`.
+        //
+        // This is done because some parts of the target spec can be overridden with `-C` flags,
+        // which are respected for `--print=cfg` but not for `--print=all-target-specs-json`. The
+        // code below extracts them from `--print=cfg`: make sure to only override fields that can
+        // actually be changed with `-C` flags.
         for config in
-            rustc_output(config, &["--print=cfg", "--target", &config.target]).trim().lines()
+            rustc_output(config, &["--print=cfg", "--target", &config.target], Default::default())
+                .trim()
+                .lines()
         {
             let (name, value) = config
                 .split_once("=\"")
@@ -500,67 +617,34 @@ impl TargetCfgs {
                         name,
                         Some(
                             value
-                                .strip_suffix("\"")
+                                .strip_suffix('\"')
                                 .expect("key-value pair should be properly quoted"),
                         ),
                     )
                 })
                 .unwrap_or_else(|| (config, None));
 
-            match name {
-                "target_arch" => {
-                    arch = Some(value.expect("target_arch should be a key-value pair").to_string());
+            match (name, value) {
+                // Can be overridden with `-C panic=$strategy`.
+                ("panic", Some("abort")) => cfg.panic = PanicStrategy::Abort,
+                ("panic", Some("unwind")) => cfg.panic = PanicStrategy::Unwind,
+                ("panic", other) => panic!("unexpected value for panic cfg: {other:?}"),
+
+                ("target_has_atomic", Some(width))
+                    if KNOWN_TARGET_HAS_ATOMIC_WIDTHS.contains(&width) =>
+                {
+                    cfg.target_has_atomic.insert(width.to_string());
                 }
-                "target_os" => {
-                    os = Some(value.expect("target_os sould be a key-value pair").to_string());
+                ("target_has_atomic", Some(other)) => {
+                    panic!("unexpected value for `target_has_atomic` cfg: {other:?}")
                 }
-                "target_env" => {
-                    env = Some(value.expect("target_env should be a key-value pair").to_string());
-                }
-                "target_abi" => {
-                    abi = Some(value.expect("target_abi should be a key-value pair").to_string());
-                }
-                "target_family" => {
-                    families
-                        .push(value.expect("target_family should be a key-value pair").to_string());
-                }
-                "target_pointer_width" => {
-                    pointer_width = Some(
-                        value
-                            .expect("target_pointer_width should be a key-value pair")
-                            .parse::<u32>()
-                            .expect("target_pointer_width should be a valid u32"),
-                    );
-                }
-                "target_endian" => {
-                    endian = Some(match value.expect("target_endian should be a key-value pair") {
-                        "big" => Endian::Big,
-                        "little" => Endian::Little,
-                        _ => panic!("target_endian should be either 'big' or 'little'"),
-                    });
-                }
-                "panic" => {
-                    panic = Some(match value.expect("panic should be a key-value pair") {
-                        "abort" => PanicStrategy::Abort,
-                        "unwind" => PanicStrategy::Unwind,
-                        _ => panic!("panic should be either 'abort' or 'unwind'"),
-                    });
-                }
-                _ => (),
+                // Nightly-only std-internal impl detail.
+                ("target_has_atomic", None) => {}
+                _ => {}
             }
         }
 
-        TargetCfg {
-            arch: arch.expect("target configuration should specify target_arch"),
-            os: os.expect("target configuration should specify target_os"),
-            env: env.expect("target configuration should specify target_env"),
-            abi: abi.expect("target configuration should specify target_abi"),
-            families,
-            pointer_width: pointer_width
-                .expect("target configuration should specify target_pointer_width"),
-            endian: endian.expect("target configuration should specify target_endian"),
-            panic: panic.expect("target configuration should specify panic"),
-        }
+        cfg
     }
 }
 
@@ -582,6 +666,20 @@ pub struct TargetCfg {
     endian: Endian,
     #[serde(rename = "panic-strategy", default)]
     pub(crate) panic: PanicStrategy,
+    #[serde(default)]
+    pub(crate) dynamic_linking: bool,
+    #[serde(rename = "supported-sanitizers", default)]
+    pub(crate) sanitizers: Vec<Sanitizer>,
+    #[serde(rename = "supports-xray", default)]
+    pub(crate) xray: bool,
+    #[serde(default = "default_reloc_model")]
+    pub(crate) relocation_model: String,
+
+    // Not present in target cfg json output, additional derived information.
+    #[serde(skip)]
+    /// Supported target atomic widths: e.g. `8` to `128` or `ptr`. This is derived from the builtin
+    /// `target_has_atomic` `cfg`s e.g. `target_has_atomic="8"`.
+    pub(crate) target_has_atomic: BTreeSet<String>,
 }
 
 impl TargetCfg {
@@ -594,6 +692,10 @@ fn default_os() -> String {
     "none".into()
 }
 
+fn default_reloc_model() -> String {
+    "pic".into()
+}
+
 #[derive(Eq, PartialEq, Clone, Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Endian {
@@ -602,11 +704,24 @@ pub enum Endian {
     Big,
 }
 
-fn rustc_output(config: &Config, args: &[&str]) -> String {
+fn builtin_cfg_names(config: &Config) -> HashSet<String> {
+    rustc_output(
+        config,
+        &["--print=check-cfg", "-Zunstable-options", "--check-cfg=cfg()"],
+        Default::default(),
+    )
+    .lines()
+    .map(|l| if let Some((name, _)) = l.split_once('=') { name.to_string() } else { l.to_string() })
+    .chain(std::iter::once(String::from("test")))
+    .collect()
+}
+
+fn rustc_output(config: &Config, args: &[&str], envs: HashMap<String, String>) -> String {
     let mut command = Command::new(&config.rustc_path);
     add_dylib_path(&mut command, iter::once(&config.compile_lib_path));
     command.args(&config.target_rustcflags).args(args);
     command.env("RUSTC_BOOTSTRAP", "1");
+    command.envs(envs);
 
     let output = match command.output() {
         Ok(output) => output,
@@ -657,6 +772,8 @@ pub fn expected_output_path(
 
 pub const UI_EXTENSIONS: &[&str] = &[
     UI_STDERR,
+    UI_SVG,
+    UI_WINDOWS_SVG,
     UI_STDOUT,
     UI_FIXED,
     UI_RUN_STDERR,
@@ -664,8 +781,12 @@ pub const UI_EXTENSIONS: &[&str] = &[
     UI_STDERR_64,
     UI_STDERR_32,
     UI_STDERR_16,
+    UI_COVERAGE,
+    UI_COVERAGE_MAP,
 ];
 pub const UI_STDERR: &str = "stderr";
+pub const UI_SVG: &str = "svg";
+pub const UI_WINDOWS_SVG: &str = "windows.svg";
 pub const UI_STDOUT: &str = "stdout";
 pub const UI_FIXED: &str = "fixed";
 pub const UI_RUN_STDERR: &str = "run.stderr";
@@ -673,10 +794,12 @@ pub const UI_RUN_STDOUT: &str = "run.stdout";
 pub const UI_STDERR_64: &str = "64bit.stderr";
 pub const UI_STDERR_32: &str = "32bit.stderr";
 pub const UI_STDERR_16: &str = "16bit.stderr";
+pub const UI_COVERAGE: &str = "coverage";
+pub const UI_COVERAGE_MAP: &str = "cov-map";
 
 /// Absolute path to the directory where all output for all tests in the given
 /// `relative_dir` group should reside. Example:
-///   /path/to/build/host-triple/test/ui/relative/
+///   /path/to/build/host-tuple/test/ui/relative/
 /// This is created early when tests are collected to avoid race conditions.
 pub fn output_relative_path(config: &Config, relative_dir: &Path) -> PathBuf {
     config.build_base.join(relative_dir)
@@ -691,6 +814,7 @@ pub fn output_testname_unique(
     let mode = config.compare_mode.as_ref().map_or("", |m| m.to_str());
     let debugger = config.debugger.as_ref().map_or("", |m| m.to_str());
     PathBuf::from(&testpaths.file.file_stem().unwrap())
+        .with_extra_extension(config.mode.output_dir_disambiguator())
         .with_extra_extension(revision.unwrap_or(""))
         .with_extra_extension(mode)
         .with_extra_extension(debugger)
@@ -698,7 +822,7 @@ pub fn output_testname_unique(
 
 /// Absolute path to the directory where all output for the given
 /// test/revision should reside. Example:
-///   /path/to/build/host-triple/test/ui/relative/testname.revision.mode/
+///   /path/to/build/host-tuple/test/ui/relative/testname.revision.mode/
 pub fn output_base_dir(config: &Config, testpaths: &TestPaths, revision: Option<&str>) -> PathBuf {
     output_relative_path(config, &testpaths.relative_dir)
         .join(output_testname_unique(config, testpaths, revision))
@@ -706,13 +830,13 @@ pub fn output_base_dir(config: &Config, testpaths: &TestPaths, revision: Option<
 
 /// Absolute path to the base filename used as output for the given
 /// test/revision. Example:
-///   /path/to/build/host-triple/test/ui/relative/testname.revision.mode/testname
+///   /path/to/build/host-tuple/test/ui/relative/testname.revision.mode/testname
 pub fn output_base_name(config: &Config, testpaths: &TestPaths, revision: Option<&str>) -> PathBuf {
     output_base_dir(config, testpaths, revision).join(testpaths.file.file_stem().unwrap())
 }
 
 /// Absolute path to the directory to use for incremental compilation. Example:
-///   /path/to/build/host-triple/test/ui/relative/testname.mode/testname.inc
+///   /path/to/build/host-tuple/test/ui/relative/testname.mode/testname.inc
 pub fn incremental_dir(config: &Config, testpaths: &TestPaths, revision: Option<&str>) -> PathBuf {
     output_base_name(config, testpaths, revision).with_extension("inc")
 }

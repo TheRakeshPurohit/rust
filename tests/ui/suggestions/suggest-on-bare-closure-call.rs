@@ -1,6 +1,4 @@
-// edition:2021
-
-#![feature(async_closure)]
+//@ edition:2021
 
 fn main() {
     let _ = ||{}();

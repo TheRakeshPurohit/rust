@@ -1,4 +1,8 @@
-use super::{BorrowedBuf, BufReader, BufWriter, ErrorKind, Read, Result, Write, DEFAULT_BUF_SIZE};
+use super::{BorrowedBuf, BufReader, BufWriter, DEFAULT_BUF_SIZE, Read, Result, Write};
+use crate::alloc::Allocator;
+use crate::cmp;
+use crate::collections::VecDeque;
+use crate::io::IoSlice;
 use crate::mem::MaybeUninit;
 
 #[cfg(test)]
@@ -26,6 +30,7 @@ mod tests;
 ///
 /// [`read`]: Read::read
 /// [`write`]: Write::write
+/// [`ErrorKind::Interrupted`]: crate::io::ErrorKind::Interrupted
 ///
 /// # Examples
 ///
@@ -86,7 +91,7 @@ where
 
 /// Specialization of the read-write loop that reuses the internal
 /// buffer of a BufReader. If there's no buffer then the writer side
-/// should be used intead.
+/// should be used instead.
 trait BufferedReaderSpec {
     fn buffer_size(&self) -> usize;
 
@@ -104,7 +109,39 @@ where
     }
 
     default fn copy_to(&mut self, _to: &mut (impl Write + ?Sized)) -> Result<u64> {
-        unimplemented!("only called from specializations");
+        unreachable!("only called from specializations")
+    }
+}
+
+impl BufferedReaderSpec for &[u8] {
+    fn buffer_size(&self) -> usize {
+        // prefer this specialization since the source "buffer" is all we'll ever need,
+        // even if it's small
+        usize::MAX
+    }
+
+    fn copy_to(&mut self, to: &mut (impl Write + ?Sized)) -> Result<u64> {
+        let len = self.len();
+        to.write_all(self)?;
+        *self = &self[len..];
+        Ok(len as u64)
+    }
+}
+
+impl<A: Allocator> BufferedReaderSpec for VecDeque<u8, A> {
+    fn buffer_size(&self) -> usize {
+        // prefer this specialization since the source "buffer" is all we'll ever need,
+        // even if it's small
+        usize::MAX
+    }
+
+    fn copy_to(&mut self, to: &mut (impl Write + ?Sized)) -> Result<u64> {
+        let len = self.len();
+        let (front, back) = self.as_slices();
+        let bufs = &mut [IoSlice::new(front), IoSlice::new(back)];
+        to.write_all_vectored(bufs)?;
+        self.clear();
+        Ok(len as u64)
     }
 }
 
@@ -127,7 +164,7 @@ where
             // from adding I: Read
             match self.read(&mut []) {
                 Ok(_) => {}
-                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) if e.is_interrupted() => continue,
                 Err(e) => return Err(e),
             }
             let buf = self.buffer();
@@ -207,7 +244,7 @@ impl<I: Write + ?Sized> BufferedWriterSpec for BufWriter<I> {
                         // Read again if the buffer still has enough capacity, as BufWriter itself would do
                         // This will occur if the reader returns short reads
                     }
-                    Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
+                    Err(ref e) if e.is_interrupted() => {}
                     Err(e) => return Err(e),
                 }
             } else {
@@ -218,7 +255,17 @@ impl<I: Write + ?Sized> BufferedWriterSpec for BufWriter<I> {
     }
 }
 
-fn stack_buffer_copy<R: Read + ?Sized, W: Write + ?Sized>(
+impl BufferedWriterSpec for Vec<u8> {
+    fn buffer_size(&self) -> usize {
+        cmp::max(DEFAULT_BUF_SIZE, self.capacity() - self.len())
+    }
+
+    fn copy_from<R: Read + ?Sized>(&mut self, reader: &mut R) -> Result<u64> {
+        reader.read_to_end(self).map(|bytes| u64::try_from(bytes).expect("usize overflowed u64"))
+    }
+}
+
+pub fn stack_buffer_copy<R: Read + ?Sized, W: Write + ?Sized>(
     reader: &mut R,
     writer: &mut W,
 ) -> Result<u64> {
@@ -230,7 +277,7 @@ fn stack_buffer_copy<R: Read + ?Sized, W: Write + ?Sized>(
     loop {
         match reader.read_buf(buf.unfilled()) {
             Ok(()) => {}
-            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) if e.is_interrupted() => continue,
             Err(e) => return Err(e),
         };
 

@@ -1,3 +1,4 @@
+//@ edition:2015
 #![feature(decl_macro)]
 
 macro a() {
@@ -9,7 +10,7 @@ macro a() {
     mod u {
         // Late resolution.
         fn f() { my_core::mem::drop(0); }
-        //~^ ERROR failed to resolve: use of undeclared crate or module `my_core`
+        //~^ ERROR failed to resolve: use of unresolved module or unlinked crate `my_core`
     }
 }
 
@@ -22,7 +23,7 @@ mod v {
 mod u {
     // Late resolution.
     fn f() { my_core::mem::drop(0); }
-    //~^ ERROR failed to resolve: use of undeclared crate or module `my_core`
+    //~^ ERROR failed to resolve: use of unresolved module or unlinked crate `my_core`
 }
 
 fn main() {}

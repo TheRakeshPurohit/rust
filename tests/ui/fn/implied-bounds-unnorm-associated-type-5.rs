@@ -5,6 +5,7 @@ trait Trait<'a>: 'a {
 // if the `T: 'a` bound gets implied we would probably get ub here again
 impl<'a, T> Trait<'a> for T {
     //~^ ERROR the parameter type `T` may not live long enough
+    //~| ERROR the parameter type `T` may not live long enough
     type Type = ();
 }
 
@@ -18,6 +19,6 @@ where
 fn main() {
     let x = String::from("Hello World!");
     let y = f(&x, ());
-    drop(x);
+    drop(x); //~ ERROR cannot move out of `x`
     println!("{}", y);
 }

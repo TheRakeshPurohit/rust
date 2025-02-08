@@ -1,5 +1,3 @@
-//@run-rustfix
-
 #![warn(clippy::manual_bits)]
 #![allow(
     clippy::no_effect,
@@ -57,4 +55,15 @@ fn main() {
     let _: u32 = u128::BITS.try_into().unwrap();
     let _ = (u128::BITS as usize).pow(5);
     let _ = &(u128::BITS as usize);
+}
+
+fn should_not_lint() {
+    macro_rules! bits_via_macro {
+        ($T: ty) => {
+            size_of::<$T>() * 8;
+        };
+    }
+
+    bits_via_macro!(u8);
+    bits_via_macro!(String);
 }

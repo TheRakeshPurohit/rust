@@ -13,7 +13,7 @@
 //! Code in this module also contains inline tests, which start with
 //! `// test name-of-the-test` comment and look like this:
 //!
-//! ```
+//! ```text
 //! // test function_with_zero_parameters
 //! // fn foo() {}
 //! ```
@@ -30,12 +30,12 @@
 
 mod attributes;
 mod expressions;
+mod generic_args;
+mod generic_params;
 mod items;
 mod params;
 mod paths;
 mod patterns;
-mod generic_args;
-mod generic_params;
 mod types;
 
 use crate::{
@@ -67,7 +67,7 @@ pub(crate) mod entry {
         }
 
         pub(crate) fn pat_top(p: &mut Parser<'_>) {
-            patterns::pattern_top(p);
+            patterns::pattern(p);
         }
 
         pub(crate) fn ty(p: &mut Parser<'_>) {
@@ -80,7 +80,8 @@ pub(crate) mod entry {
             paths::type_path(p);
         }
         pub(crate) fn item(p: &mut Parser<'_>) {
-            items::item_or_macro(p, true);
+            // We can set `is_in_extern=true`, because it only allows `safe fn`, and there is no ambiguity here.
+            items::item_or_macro(p, true, true);
         }
         // Parse a meta item , which excluded [], e.g : #[ MetaItem ]
         pub(crate) fn meta_item(p: &mut Parser<'_>) {
@@ -116,7 +117,7 @@ pub(crate) mod entry {
 
         pub(crate) fn pattern(p: &mut Parser<'_>) {
             let m = p.start();
-            patterns::pattern_top(p);
+            patterns::pattern(p);
             if p.at(EOF) {
                 m.abandon(p);
                 return;
@@ -208,73 +209,57 @@ impl BlockLike {
     }
 }
 
-const VISIBILITY_FIRST: TokenSet = TokenSet::new(&[T![pub], T![crate]]);
+const VISIBILITY_FIRST: TokenSet = TokenSet::new(&[T![pub]]);
 
 fn opt_visibility(p: &mut Parser<'_>, in_tuple_field: bool) -> bool {
-    match p.current() {
-        T![pub] => {
-            let m = p.start();
-            p.bump(T![pub]);
-            if p.at(T!['(']) {
-                match p.nth(1) {
-                    // test crate_visibility
-                    // pub(crate) struct S;
-                    // pub(self) struct S;
-                    // pub(super) struct S;
+    if !p.at(T![pub]) {
+        return false;
+    }
 
-                    // test_err crate_visibility_empty_recover
-                    // pub() struct S;
+    let m = p.start();
+    p.bump(T![pub]);
+    if p.at(T!['(']) {
+        match p.nth(1) {
+            // test crate_visibility
+            // pub(crate) struct S;
+            // pub(self) struct S;
+            // pub(super) struct S;
 
-                    // test pub_parens_typepath
-                    // struct B(pub (super::A));
-                    // struct B(pub (crate::A,));
-                    T![crate] | T![self] | T![super] | T![ident] | T![')'] if p.nth(2) != T![:] => {
-                        // If we are in a tuple struct, then the parens following `pub`
-                        // might be an tuple field, not part of the visibility. So in that
-                        // case we don't want to consume an identifier.
+            // test_err crate_visibility_empty_recover
+            // pub() struct S;
 
-                        // test pub_tuple_field
-                        // struct MyStruct(pub (u32, u32));
-                        // struct MyStruct(pub (u32));
-                        // struct MyStruct(pub ());
-                        if !(in_tuple_field && matches!(p.nth(1), T![ident] | T![')'])) {
-                            p.bump(T!['(']);
-                            paths::use_path(p);
-                            p.expect(T![')']);
-                        }
-                    }
-                    // test crate_visibility_in
-                    // pub(in super::A) struct S;
-                    // pub(in crate) struct S;
-                    T![in] => {
-                        p.bump(T!['(']);
-                        p.bump(T![in]);
-                        paths::use_path(p);
-                        p.expect(T![')']);
-                    }
-                    _ => {}
+            // test pub_parens_typepath
+            // struct B(pub (super::A));
+            // struct B(pub (crate::A,));
+            T![crate] | T![self] | T![super] | T![ident] | T![')'] if p.nth(2) != T![:] => {
+                // If we are in a tuple struct, then the parens following `pub`
+                // might be an tuple field, not part of the visibility. So in that
+                // case we don't want to consume an identifier.
+
+                // test pub_tuple_field
+                // struct MyStruct(pub (u32, u32));
+                // struct MyStruct(pub (u32));
+                // struct MyStruct(pub ());
+                if !(in_tuple_field && matches!(p.nth(1), T![ident] | T![')'])) {
+                    p.bump(T!['(']);
+                    paths::vis_path(p);
+                    p.expect(T![')']);
                 }
             }
-            m.complete(p, VISIBILITY);
-            true
-        }
-        // test crate_keyword_vis
-        // crate fn main() { }
-        // struct S { crate field: u32 }
-        // struct T(crate u32);
-        T![crate] => {
-            if p.nth_at(1, T![::]) {
-                // test crate_keyword_path
-                // fn foo() { crate::foo(); }
-                return false;
+            // test crate_visibility_in
+            // pub(in super::A) struct S;
+            // pub(in crate) struct S;
+            T![in] => {
+                p.bump(T!['(']);
+                p.bump(T![in]);
+                paths::vis_path(p);
+                p.expect(T![')']);
             }
-            let m = p.start();
-            p.bump(T![crate]);
-            m.complete(p, VISIBILITY);
-            true
+            _ => {}
         }
-        _ => false,
     }
+    m.complete(p, VISIBILITY);
+    true
 }
 
 fn opt_rename(p: &mut Parser<'_>) {
@@ -322,13 +307,49 @@ fn name(p: &mut Parser<'_>) {
     name_r(p, TokenSet::EMPTY);
 }
 
-fn name_ref(p: &mut Parser<'_>) {
-    if p.at(IDENT) {
+fn name_ref_or_self(p: &mut Parser<'_>) {
+    if matches!(p.current(), T![ident] | T![self]) {
         let m = p.start();
-        p.bump(IDENT);
+        p.bump_any();
         m.complete(p, NAME_REF);
     } else {
-        p.err_and_bump("expected identifier");
+        p.err_and_bump("expected identifier or `self`");
+    }
+}
+
+fn name_ref_or_upper_self(p: &mut Parser<'_>) {
+    if matches!(p.current(), T![ident] | T![Self]) {
+        let m = p.start();
+        p.bump_any();
+        m.complete(p, NAME_REF);
+    } else {
+        p.err_and_bump("expected identifier or `Self`");
+    }
+}
+
+const PATH_NAME_REF_KINDS: TokenSet =
+    TokenSet::new(&[IDENT, T![self], T![super], T![crate], T![Self]]);
+
+fn name_ref_mod_path(p: &mut Parser<'_>) {
+    if p.at_ts(PATH_NAME_REF_KINDS) {
+        let m = p.start();
+        p.bump_any();
+        m.complete(p, NAME_REF);
+    } else {
+        p.err_and_bump("expected identifier, `self`, `super`, `crate`, or `Self`");
+    }
+}
+
+const PATH_NAME_REF_OR_INDEX_KINDS: TokenSet =
+    PATH_NAME_REF_KINDS.union(TokenSet::new(&[INT_NUMBER]));
+
+fn name_ref_mod_path_or_index(p: &mut Parser<'_>) {
+    if p.at_ts(PATH_NAME_REF_OR_INDEX_KINDS) {
+        let m = p.start();
+        p.bump_any();
+        m.complete(p, NAME_REF);
+    } else {
+        p.err_and_bump("expected integer, identifier, `self`, `super`, `crate`, or `Self`");
     }
 }
 
@@ -356,6 +377,16 @@ fn error_block(p: &mut Parser<'_>, message: &str) {
     m.complete(p, ERROR);
 }
 
+// test_err top_level_let
+// let ref foo: fn() = 1 + 3;
+fn error_let_stmt(p: &mut Parser<'_>, message: &str) {
+    assert!(p.at(T![let]));
+    let m = p.start();
+    p.error(message);
+    expressions::let_stmt(p, expressions::Semicolon::Optional);
+    m.complete(p, ERROR);
+}
+
 /// The `parser` passed this is required to at least consume one token if it returns `true`.
 /// If the `parser` returns false, parsing will stop.
 fn delimited(
@@ -363,22 +394,35 @@ fn delimited(
     bra: SyntaxKind,
     ket: SyntaxKind,
     delim: SyntaxKind,
+    unexpected_delim_message: impl Fn() -> String,
     first_set: TokenSet,
     mut parser: impl FnMut(&mut Parser<'_>) -> bool,
 ) {
     p.bump(bra);
     while !p.at(ket) && !p.at(EOF) {
+        if p.at(delim) {
+            // Recover if an argument is missing and only got a delimiter,
+            // e.g. `(a, , b)`.
+
+            // Wrap the erroneous delimiter in an error node so that fixup logic gets rid of it.
+            // FIXME: Ideally this should be handled in fixup in a structured way, but our list
+            // nodes currently have no concept of a missing node between two delimiters.
+            // So doing it this way is easier.
+            let m = p.start();
+            p.error(unexpected_delim_message());
+            p.bump(delim);
+            m.complete(p, ERROR);
+            continue;
+        }
         if !parser(p) {
             break;
         }
-        if !p.at(delim) {
+        if !p.eat(delim) {
             if p.at_ts(first_set) {
-                p.error(format!("expected {:?}", delim));
+                p.error(format!("expected {delim:?}"));
             } else {
                 break;
             }
-        } else {
-            p.bump(delim);
         }
     }
     p.expect(ket);

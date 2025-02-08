@@ -1,4 +1,4 @@
-//@run-rustfix
+
 
 // The output for humans should just highlight the whole span without showing
 // the suggested replacement, but we also want to test that suggested
@@ -92,5 +92,12 @@ fn macro_expr() {
 mod issue9748 {
     fn main() {
         let _ = for<'a> |_: &'a u32| -> () {};
+    }
+}
+
+mod issue9949 {
+    fn main() {
+        #[doc = "documentation"]
+        ()
     }
 }

@@ -9,76 +9,141 @@
 //! The `cli` submodule implements some batch-processing analysis, primarily as
 //! a debugging aid.
 
-#![warn(rust_2018_idioms, unused_lifetimes, semicolon_in_expressions_from_macros)]
-
 pub mod cli;
 
-#[allow(unused)]
-macro_rules! eprintln {
-    ($($tt:tt)*) => { stdx::eprintln!($($tt)*) };
-}
-
-mod caps;
-mod cargo_target_spec;
+mod command;
 mod diagnostics;
-mod diff;
-mod dispatch;
-mod from_proto;
-mod global_state;
+mod discover;
+mod flycheck;
+mod hack_recover_crate_name;
 mod line_index;
-mod lsp_utils;
 mod main_loop;
-mod markdown;
 mod mem_docs;
 mod op_queue;
 mod reload;
-mod semantic_tokens;
+mod target_spec;
 mod task_pool;
-mod to_proto;
+mod test_runner;
 mod version;
 
 mod handlers {
+    pub(crate) mod dispatch;
     pub(crate) mod notification;
     pub(crate) mod request;
 }
 
+pub mod tracing {
+    pub mod config;
+    pub mod json;
+    pub use config::Config;
+    pub mod hprof;
+}
+
 pub mod config;
-pub mod lsp_ext;
+mod global_state;
+pub mod lsp;
+use self::lsp::ext as lsp_ext;
 
 #[cfg(test)]
 mod integrated_benchmarks;
 
-use std::fmt;
-
+use hir::Mutability;
+use ide::{CompletionItem, CompletionItemRefMode, CompletionRelevance};
 use serde::de::DeserializeOwned;
+use tenthash::TentHasher;
 
-pub use crate::{caps::server_capabilities, main_loop::main_loop, version::version};
+pub use crate::{
+    lsp::capabilities::server_capabilities, main_loop::main_loop, reload::ws_to_crate_graph,
+    version::version,
+};
 
-pub type Error = Box<dyn std::error::Error + Send + Sync>;
-pub type Result<T, E = Error> = std::result::Result<T, E>;
-
-pub fn from_json<T: DeserializeOwned>(what: &'static str, json: &serde_json::Value) -> Result<T> {
-    let res = serde_json::from_value(json.clone())
-        .map_err(|e| format!("Failed to deserialize {what}: {e}; {json}"))?;
-    Ok(res)
+pub fn from_json<T: DeserializeOwned>(
+    what: &'static str,
+    json: &serde_json::Value,
+) -> anyhow::Result<T> {
+    serde_json::from_value(json.clone())
+        .map_err(|e| anyhow::format_err!("Failed to deserialize {what}: {e}; {json}"))
 }
 
-#[derive(Debug)]
-struct LspError {
-    code: i32,
-    message: String,
-}
+fn completion_item_hash(item: &CompletionItem, is_ref_completion: bool) -> [u8; 20] {
+    fn hash_completion_relevance(hasher: &mut TentHasher, relevance: &CompletionRelevance) {
+        use ide_completion::{
+            CompletionRelevancePostfixMatch, CompletionRelevanceReturnType,
+            CompletionRelevanceTypeMatch,
+        };
 
-impl LspError {
-    fn new(code: i32, message: String) -> LspError {
-        LspError { code, message }
+        hasher.update([
+            u8::from(relevance.exact_name_match),
+            u8::from(relevance.is_local),
+            u8::from(relevance.is_name_already_imported),
+            u8::from(relevance.requires_import),
+            u8::from(relevance.is_private_editable),
+        ]);
+        if let Some(type_match) = &relevance.type_match {
+            let label = match type_match {
+                CompletionRelevanceTypeMatch::CouldUnify => "could_unify",
+                CompletionRelevanceTypeMatch::Exact => "exact",
+            };
+            hasher.update(label);
+        }
+        if let Some(trait_) = &relevance.trait_ {
+            hasher.update([u8::from(trait_.is_op_method), u8::from(trait_.notable_trait)]);
+        }
+        if let Some(postfix_match) = &relevance.postfix_match {
+            let label = match postfix_match {
+                CompletionRelevancePostfixMatch::NonExact => "non_exact",
+                CompletionRelevancePostfixMatch::Exact => "exact",
+            };
+            hasher.update(label);
+        }
+        if let Some(function) = &relevance.function {
+            hasher.update([u8::from(function.has_params), u8::from(function.has_self_param)]);
+            let label = match function.return_type {
+                CompletionRelevanceReturnType::Other => "other",
+                CompletionRelevanceReturnType::DirectConstructor => "direct_constructor",
+                CompletionRelevanceReturnType::Constructor => "constructor",
+                CompletionRelevanceReturnType::Builder => "builder",
+            };
+            hasher.update(label);
+        }
     }
-}
 
-impl fmt::Display for LspError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Language Server request failed with {}. ({})", self.code, self.message)
+    let mut hasher = TentHasher::new();
+    hasher.update([
+        u8::from(is_ref_completion),
+        u8::from(item.is_snippet),
+        u8::from(item.deprecated),
+        u8::from(item.trigger_call_info),
+    ]);
+    hasher.update(&item.label.primary);
+    if let Some(label_detail) = &item.label.detail_left {
+        hasher.update(label_detail);
     }
+    if let Some(label_detail) = &item.label.detail_right {
+        hasher.update(label_detail);
+    }
+    // NB: do not hash edits or source range, as those may change between the time the client sends the resolve request
+    // and the time it receives it: some editors do allow changing the buffer between that, leading to ranges being different.
+    //
+    // Documentation hashing is skipped too, as it's a large blob to process,
+    // while not really making completion properties more unique as they are already.
+    hasher.update(item.kind.tag());
+    hasher.update(&item.lookup);
+    if let Some(detail) = &item.detail {
+        hasher.update(detail);
+    }
+    hash_completion_relevance(&mut hasher, &item.relevance);
+    if let Some((ref_mode, text_size)) = &item.ref_match {
+        let prefix = match ref_mode {
+            CompletionItemRefMode::Reference(Mutability::Shared) => "&",
+            CompletionItemRefMode::Reference(Mutability::Mut) => "&mut ",
+            CompletionItemRefMode::Dereference => "*",
+        };
+        hasher.update(prefix);
+        hasher.update(u32::from(*text_size).to_le_bytes());
+    }
+    for import_path in &item.import_to_add {
+        hasher.update(import_path);
+    }
+    hasher.finalize()
 }
-
-impl std::error::Error for LspError {}

@@ -1,9 +1,8 @@
 #![allow(unused)]
 
-use std::env;
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::thread;
+use std::{env, fs, thread};
+
 use rand::RngCore;
 
 /// Copied from `std::test_helpers::test_rng`, since these tests rely on the
@@ -11,7 +10,7 @@ use rand::RngCore;
 #[track_caller]
 pub(crate) fn test_rng() -> rand_xorshift::XorShiftRng {
     use core::hash::{BuildHasher, Hash, Hasher};
-    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    let mut hasher = std::hash::RandomState::new().build_hasher();
     core::panic::Location::caller().hash(&mut hasher);
     let hc64 = hasher.finish();
     let seed_vec = hc64.to_le_bytes().into_iter().chain(0u8..8).collect::<Vec<u8>>();

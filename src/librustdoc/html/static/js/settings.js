@@ -1,7 +1,10 @@
 // Local js definitions:
 /* global getSettingValue, updateLocalStorage, updateTheme */
-/* global addClass, removeClass, onEach, onEachLazy, blurHandler, elemIsInParent */
-/* global MAIN_ID, getVar, getSettingsButton */
+/* global addClass, removeClass, onEach, onEachLazy */
+/* global MAIN_ID, getVar, getSettingsButton, getHelpButton */
+
+// Eventually fix this.
+// @ts-nocheck
 
 "use strict";
 
@@ -29,6 +32,33 @@
                     window.rustdoc_remove_line_numbers_from_examples();
                 }
                 break;
+            case "hide-sidebar":
+                if (value === true) {
+                    addClass(document.documentElement, "hide-sidebar");
+                } else {
+                    removeClass(document.documentElement, "hide-sidebar");
+                }
+                break;
+            case "hide-toc":
+                if (value === true) {
+                    addClass(document.documentElement, "hide-toc");
+                } else {
+                    removeClass(document.documentElement, "hide-toc");
+                }
+                break;
+            case "hide-modnav":
+                if (value === true) {
+                    addClass(document.documentElement, "hide-modnav");
+                } else {
+                    removeClass(document.documentElement, "hide-modnav");
+                }
+                break;
+            case "sans-serif-fonts":
+                if (value === true) {
+                    addClass(document.documentElement, "sans-serif");
+                } else {
+                    removeClass(document.documentElement, "sans-serif");
+                }
         }
     }
 
@@ -59,8 +89,8 @@
             if (settingValue !== null) {
                 toggle.checked = settingValue === "true";
             }
-            toggle.onchange = function() {
-                changeSetting(this.id, this.checked);
+            toggle.onchange = () => {
+                changeSetting(toggle.id, toggle.checked);
             };
         });
         onEachLazy(settingsElement.querySelectorAll("input[type=\"radio\"]"), elem => {
@@ -95,6 +125,11 @@
         let output = "";
 
         for (const setting of settings) {
+            if (setting === "hr") {
+                output += "<hr>";
+                continue;
+            }
+
             const js_data_name = setting["js_name"];
             const setting_name = setting["name"];
 
@@ -187,8 +222,28 @@
                 "default": false,
             },
             {
+                "name": "Hide persistent navigation bar",
+                "js_name": "hide-sidebar",
+                "default": false,
+            },
+            {
+                "name": "Hide table of contents",
+                "js_name": "hide-toc",
+                "default": false,
+            },
+            {
+                "name": "Hide module navigation",
+                "js_name": "hide-modnav",
+                "default": false,
+            },
+            {
                 "name": "Disable keyboard shortcuts",
                 "js_name": "disable-shortcuts",
+                "default": false,
+            },
+            {
+                "name": "Use sans serif fonts",
+                "js_name": "sans-serif-fonts",
                 "default": false,
             },
         ];
@@ -216,23 +271,31 @@
 
     function displaySettings() {
         settingsMenu.style.display = "";
+        onEachLazy(settingsMenu.querySelectorAll("input[type='checkbox']"), el => {
+            const val = getSettingValue(el.id);
+            const checked = val === "true";
+            if (checked !== el.checked && val !== null) {
+                el.checked = checked;
+            }
+        });
     }
 
     function settingsBlurHandler(event) {
-        blurHandler(event, getSettingsButton(), window.hidePopoverMenus);
+        if (!getHelpButton().contains(document.activeElement) &&
+            !getHelpButton().contains(event.relatedTarget) &&
+            !getSettingsButton().contains(document.activeElement) &&
+            !getSettingsButton().contains(event.relatedTarget)
+        ) {
+            window.hidePopoverMenus();
+        }
     }
 
-    if (isSettingsPage) {
-        // We replace the existing "onclick" callback to do nothing if clicked.
-        getSettingsButton().onclick = function(event) {
-            event.preventDefault();
-        };
-    } else {
+    if (!isSettingsPage) {
         // We replace the existing "onclick" callback.
         const settingsButton = getSettingsButton();
         const settingsMenu = document.getElementById("settings");
-        settingsButton.onclick = function(event) {
-            if (elemIsInParent(event.target, settingsMenu)) {
+        settingsButton.onclick = event => {
+            if (settingsMenu.contains(event.target)) {
                 return;
             }
             event.preventDefault();

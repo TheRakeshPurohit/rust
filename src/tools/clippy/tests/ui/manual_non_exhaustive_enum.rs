@@ -1,17 +1,17 @@
-#![feature(lint_reasons)]
 #![warn(clippy::manual_non_exhaustive)]
 #![allow(unused)]
-
-enum E {
+//@no-rustfix
+pub enum E {
+    //~^ manual_non_exhaustive
     A,
     B,
     #[doc(hidden)]
     _C,
 }
 
-// user forgot to remove the marker
+// if the user explicitly marks as nonexhaustive we shouldn't warn them
 #[non_exhaustive]
-enum Ep {
+pub enum Ep {
     A,
     B,
     #[doc(hidden)]
@@ -19,14 +19,14 @@ enum Ep {
 }
 
 // marker variant does not have doc hidden attribute, should be ignored
-enum NoDocHidden {
+pub enum NoDocHidden {
     A,
     B,
     _C,
 }
 
-// name of variant with doc hidden does not start with underscore, should be ignored
-enum NoUnderscore {
+// name of variant with doc hidden does not start with underscore
+pub enum NoUnderscore {
     A,
     B,
     #[doc(hidden)]
@@ -34,7 +34,7 @@ enum NoUnderscore {
 }
 
 // variant with doc hidden is not unit, should be ignored
-enum NotUnit {
+pub enum NotUnit {
     A,
     B,
     #[doc(hidden)]
@@ -42,13 +42,13 @@ enum NotUnit {
 }
 
 // variant with doc hidden is the only one, should be ignored
-enum OnlyMarker {
+pub enum OnlyMarker {
     #[doc(hidden)]
     _A,
 }
 
 // variant with multiple markers, should be ignored
-enum MultipleMarkers {
+pub enum MultipleMarkers {
     A,
     #[doc(hidden)]
     _B,
@@ -58,13 +58,13 @@ enum MultipleMarkers {
 
 // already non_exhaustive and no markers, should be ignored
 #[non_exhaustive]
-enum NonExhaustive {
+pub enum NonExhaustive {
     A,
     B,
 }
 
 // marked is used, don't lint
-enum UsedHidden {
+pub enum UsedHidden {
     #[doc(hidden)]
     _A,
     B,
@@ -77,11 +77,9 @@ fn foo(x: &mut UsedHidden) {
 }
 
 #[expect(clippy::manual_non_exhaustive)]
-enum ExpectLint {
+pub enum ExpectLint {
     A,
     B,
     #[doc(hidden)]
     _C,
 }
-
-fn main() {}

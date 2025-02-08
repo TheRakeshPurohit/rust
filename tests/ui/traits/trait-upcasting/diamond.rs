@@ -1,6 +1,4 @@
-// run-pass
-
-#![feature(trait_upcasting)]
+//@ run-pass
 
 trait Foo: PartialEq<i32> + std::fmt::Debug + Send + Sync {
     fn a(&self) -> i32 {

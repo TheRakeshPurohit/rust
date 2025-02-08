@@ -1,12 +1,11 @@
-// known-bug: #110395
+//@ known-bug: #110395
 
 #![feature(const_fn_trait_ref_impls)]
 #![feature(fn_traits)]
 #![feature(unboxed_closures)]
 #![feature(const_trait_impl)]
-#![feature(const_mut_refs)]
 #![feature(const_cmp)]
-#![feature(const_refs_to_cell)]
+#![feature(const_destruct)]
 
 use std::marker::Destruct;
 

@@ -1,6 +1,4 @@
-// check-pass
-
-#![feature(exclusive_range_pattern)]
+//@ check-pass
 
 fn main() {
     const PAT: u8 = 1;

@@ -1,7 +1,7 @@
-// compile-flags: -O --crate-type=rlib
-#![feature(platform_intrinsics, repr_simd)]
+//@ compile-flags: -O --crate-type=rlib
+#![feature(intrinsics, repr_simd)]
 
-extern "platform-intrinsic" {
+extern "rust-intrinsic" {
     fn simd_fabs<T>(x: T) -> T;
     fn simd_eq<T, U>(x: T, y: T) -> U;
 }
@@ -17,7 +17,5 @@ pub struct M([i32; 4]);
 pub fn is_infinite(v: V) -> M {
     // CHECK: fabs
     // CHECK: cmp oeq
-    unsafe {
-        simd_eq(simd_fabs(v), V([f32::INFINITY; 4]))
-    }
+    unsafe { simd_eq(simd_fabs(v), V([f32::INFINITY; 4])) }
 }

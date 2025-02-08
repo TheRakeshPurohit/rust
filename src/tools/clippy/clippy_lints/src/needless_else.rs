@@ -1,9 +1,9 @@
-use clippy_utils::source::snippet_opt;
-use clippy_utils::{diagnostics::span_lint_and_sugg, source::trim_span};
+use clippy_utils::diagnostics::span_lint_and_sugg;
+use clippy_utils::source::{IntoSpan, SpanRangeExt};
 use rustc_ast::ast::{Expr, ExprKind};
 use rustc_errors::Applicability;
-use rustc_lint::{EarlyContext, EarlyLintPass, LintContext};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_lint::{EarlyContext, EarlyLintPass};
+use rustc_session::declare_lint_pass;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -13,7 +13,7 @@ declare_clippy_lint! {
     /// An empty else branch does nothing and can be removed.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     ///# fn check() -> bool { true }
     /// if check() {
     ///     println!("Check successful!");
@@ -21,13 +21,13 @@ declare_clippy_lint! {
     /// }
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     ///# fn check() -> bool { true }
     /// if check() {
     ///     println!("Check successful!");
     /// }
     /// ```
-    #[clippy::version = "1.71.0"]
+    #[clippy::version = "1.72.0"]
     pub NEEDLESS_ELSE,
     style,
     "empty else branch"
@@ -41,17 +41,17 @@ impl EarlyLintPass for NeedlessElse {
             && !expr.span.from_expansion()
             && !else_clause.span.from_expansion()
             && block.stmts.is_empty()
-            && let Some(trimmed) = expr.span.trim_start(then_block.span)
-            && let span = trim_span(cx.sess().source_map(), trimmed)
-            && let Some(else_snippet) = snippet_opt(cx, span)
-            // Ignore else blocks that contain comments or #[cfg]s
-            && !else_snippet.contains(['/', '#'])
+            && let range = (then_block.span.hi()..expr.span.hi()).trim_start(cx)
+            && range.clone().check_source_text(cx, |src| {
+                // Ignore else blocks that contain comments or #[cfg]s
+                !src.contains(['/', '#'])
+            })
         {
             span_lint_and_sugg(
                 cx,
                 NEEDLESS_ELSE,
-                span,
-                "this else branch is empty",
+                range.with_ctxt(expr.span.ctxt()),
+                "this `else` branch is empty",
                 "you can remove it",
                 String::new(),
                 Applicability::MachineApplicable,

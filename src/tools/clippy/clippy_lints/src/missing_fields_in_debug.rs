@@ -1,25 +1,19 @@
 use std::ops::ControlFlow;
 
-use clippy_utils::{
-    diagnostics::span_lint_and_then,
-    is_path_lang_item, paths,
-    ty::match_type,
-    visitors::{for_each_expr, Visitable},
-};
+use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::is_path_lang_item;
+use clippy_utils::ty::is_type_diagnostic_item;
+use clippy_utils::visitors::{Visitable, for_each_expr};
 use rustc_ast::LitKind;
 use rustc_data_structures::fx::FxHashSet;
-use rustc_hir::Block;
+use rustc_hir::def::{DefKind, Res};
 use rustc_hir::{
-    def::{DefKind, Res},
-    Expr, ImplItemKind, LangItem, Node,
+    Block, Expr, ExprKind, Impl, ImplItem, ImplItemKind, Item, ItemKind, LangItem, Node, QPath, TyKind, VariantData,
 };
-use rustc_hir::{ExprKind, Impl, ItemKind, QPath, TyKind};
-use rustc_hir::{ImplItem, Item, VariantData};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_middle::ty::Ty;
-use rustc_middle::ty::TypeckResults;
-use rustc_session::{declare_lint_pass, declare_tool_lint};
-use rustc_span::{sym, Span, Symbol};
+use rustc_middle::ty::{Ty, TypeckResults};
+use rustc_session::declare_lint_pass;
+use rustc_span::{Span, Symbol, sym};
 
 declare_clippy_lint! {
     /// ### What it does
@@ -46,7 +40,7 @@ declare_clippy_lint! {
     /// making it much less likely to accidentally forget to update the `Debug` impl when adding a new variant.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// use std::fmt;
     /// struct Foo {
     ///     data: String,
@@ -63,7 +57,7 @@ declare_clippy_lint! {
     /// }
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// use std::fmt;
     /// struct Foo {
     ///     data: String,
@@ -116,13 +110,15 @@ fn should_lint<'tcx>(
     // Is there a call to `DebugStruct::debug_struct`? Do lint if there is.
     let mut has_debug_struct = false;
 
-    for_each_expr(block, |expr| {
+    for_each_expr(cx, block, |expr| {
         if let ExprKind::MethodCall(path, recv, ..) = &expr.kind {
             let recv_ty = typeck_results.expr_ty(recv).peel_refs();
 
-            if path.ident.name == sym::debug_struct && match_type(cx, recv_ty, &paths::FORMATTER) {
+            if path.ident.name == sym::debug_struct && is_type_diagnostic_item(cx, recv_ty, sym::Formatter) {
                 has_debug_struct = true;
-            } else if path.ident.name == sym!(finish_non_exhaustive) && match_type(cx, recv_ty, &paths::DEBUG_STRUCT) {
+            } else if path.ident.name.as_str() == "finish_non_exhaustive"
+                && is_type_diagnostic_item(cx, recv_ty, sym::DebugStruct)
+            {
                 has_finish_non_exhaustive = true;
             }
         }
@@ -143,7 +139,7 @@ fn as_field_call<'tcx>(
 ) -> Option<Symbol> {
     if let ExprKind::MethodCall(path, recv, [debug_field, _], _) = &expr.kind
         && let recv_ty = typeck_results.expr_ty(recv).peel_refs()
-        && match_type(cx, recv_ty, &paths::DEBUG_STRUCT)
+        && is_type_diagnostic_item(cx, recv_ty, sym::DebugStruct)
         && path.ident.name == sym::field
         && let ExprKind::Lit(lit) = &debug_field.kind
         && let LitKind::Str(sym, ..) = lit.node
@@ -169,7 +165,7 @@ fn check_struct<'tcx>(
     let mut has_direct_field_access = false;
     let mut field_accesses = FxHashSet::default();
 
-    for_each_expr(block, |expr| {
+    for_each_expr(cx, block, |expr| {
         if let ExprKind::Field(target, ident) = expr.kind
             && let target_ty = typeck_results.expr_ty_adjusted(target).peel_refs()
             && target_ty == self_ty
@@ -202,12 +198,16 @@ fn check_struct<'tcx>(
 }
 
 impl<'tcx> LateLintPass<'tcx> for MissingFieldsInDebug {
-    fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx rustc_hir::Item<'tcx>) {
+    fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
         // is this an `impl Debug for X` block?
         if let ItemKind::Impl(Impl { of_trait: Some(trait_ref), self_ty, items, .. }) = item.kind
             && let Res::Def(DefKind::Trait, trait_def_id) = trait_ref.path.res
             && let TyKind::Path(QPath::Resolved(_, self_path)) = &self_ty.kind
-            && cx.match_def_path(trait_def_id, &[sym::core, sym::fmt, sym::Debug])
+            // make sure that the self type is either a struct, an enum or a union
+            // this prevents ICEs such as when self is a type parameter or a primitive type
+            // (see #10887, #11063)
+            && let Res::Def(DefKind::Struct | DefKind::Enum | DefKind::Union, self_path_did) = self_path.res
+            && cx.tcx.is_diagnostic_item(sym::Debug, trait_def_id)
             // don't trigger if this impl was derived
             && !cx.tcx.has_attr(item.owner_id, sym::automatically_derived)
             && !item.span.from_expansion()
@@ -217,10 +217,10 @@ impl<'tcx> LateLintPass<'tcx> for MissingFieldsInDebug {
             && let body = cx.tcx.hir().body(*body_id)
             && let ExprKind::Block(block, _) = body.value.kind
             // inspect `self`
-            && let self_ty = cx.tcx.type_of(self_path.res.def_id()).skip_binder().peel_refs()
+            && let self_ty = cx.tcx.type_of(self_path_did).skip_binder().peel_refs()
             && let Some(self_adt) = self_ty.ty_adt_def()
             && let Some(self_def_id) = self_adt.did().as_local()
-            && let Some(Node::Item(self_item)) = cx.tcx.hir().find_by_def_id(self_def_id)
+            && let Node::Item(self_item) = cx.tcx.hir_node_by_def_id(self_def_id)
             // NB: can't call cx.typeck_results() as we are not in a body
             && let typeck_results = cx.tcx.typeck_body(*body_id)
             && should_lint(cx, typeck_results, block)

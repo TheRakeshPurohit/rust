@@ -1,8 +1,9 @@
 // Make sure that underscore imports have the same hygiene considerations as other imports.
 
-// check-pass
+//@ check-pass
 
 #![feature(decl_macro)]
+#![allow(noop_method_call)]
 
 mod x {
     pub use std::ops::Deref as _;

@@ -7,8 +7,9 @@ extern crate proc_macros;
 use proc_macros::with_span;
 
 use clippy_utils::is_from_proc_macro;
+use std::boxed::Box;
+use std::fmt::Display;
 use std::future::Future;
-use std::{boxed::Box, fmt::Display};
 
 fn a() -> u32 {
     1
@@ -72,3 +73,5 @@ fn main() {
     #[allow(clippy::let_underscore_untyped)]
     let _ = a();
 }
+
+async fn dont_lint_async_prototype(_: u8) {}

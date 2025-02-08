@@ -1,7 +1,7 @@
-//@run-rustfix
-
 #![allow(dead_code)]
 #![warn(clippy::cast_lossless)]
+
+type U8 = u8;
 
 fn main() {
     // Test clippy::cast_lossless with casts to integer types
@@ -21,6 +21,8 @@ fn main() {
 
     // Test with an expression wrapped in parens
     let _ = (true | false) as u16;
+
+    let _ = true as U8;
 }
 
 // The lint would suggest using `u32::from(input)` here but the `XX::from` function is not const,

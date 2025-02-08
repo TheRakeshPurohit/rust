@@ -7,11 +7,11 @@ LL |     async fn f(self: Pin<&Self>) -> impl Clone { self }
    |                          |          opaque type defined here
    |                          hidden type `Pin<&Foo>` captures the anonymous lifetime defined here
    |
-help: to declare that `impl Clone` captures `'_`, you can add an explicit `'_` lifetime bound
+help: add a `use<...>` bound to explicitly capture `'_`
    |
-LL |     async fn f(self: Pin<&Self>) -> impl Clone + '_ { self }
-   |                                                ++++
+LL |     async fn f(self: Pin<&Self>) -> impl Clone + use<'_> { self }
+   |                                                +++++++++
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0700`.

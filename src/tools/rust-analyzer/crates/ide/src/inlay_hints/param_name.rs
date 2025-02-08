@@ -3,19 +3,25 @@
 //! fn max(x: i32, y: i32) -> i32 { x + y }
 //! _ = max(/*x*/4, /*y*/4);
 //! ```
+
 use either::Either;
 use hir::{Callable, Semantics};
-use ide_db::{base_db::FileRange, RootDatabase};
+use ide_db::{famous_defs::FamousDefs, RootDatabase};
 
+use span::EditionedFileId;
 use stdx::to_lower_snake_case;
-use syntax::ast::{self, AstNode, HasArgList, HasName, UnaryOp};
+use syntax::{
+    ast::{self, AstNode, HasArgList, HasName, UnaryOp},
+    ToSmolStr,
+};
 
 use crate::{InlayHint, InlayHintLabel, InlayHintPosition, InlayHintsConfig, InlayKind};
 
 pub(super) fn hints(
     acc: &mut Vec<InlayHint>,
-    sema: &Semantics<'_, RootDatabase>,
+    FamousDefs(sema, krate): &FamousDefs<'_, '_>,
     config: &InlayHintsConfig,
+    _file_id: EditionedFileId,
     expr: ast::Expr,
 ) -> Option<()> {
     if !config.parameter_hints {
@@ -24,38 +30,35 @@ pub(super) fn hints(
 
     let (callable, arg_list) = get_callable(sema, &expr)?;
     let hints = callable
-        .params(sema.db)
+        .params()
         .into_iter()
         .zip(arg_list.args())
-        .filter_map(|((param, _ty), arg)| {
+        .filter_map(|(p, arg)| {
             // Only annotate hints for expressions that exist in the original file
             let range = sema.original_range_opt(arg.syntax())?;
-            let (param_name, name_syntax) = match param.as_ref()? {
-                Either::Left(pat) => (pat.name()?, pat.name()),
-                Either::Right(pat) => match pat {
-                    ast::Pat::IdentPat(it) => (it.name()?, it.name()),
-                    _ => return None,
-                },
-            };
-            Some((name_syntax, param_name, arg, range))
+            let param_name = p.name(sema.db)?;
+            Some((p, param_name, arg, range))
         })
         .filter(|(_, param_name, arg, _)| {
-            !should_hide_param_name_hint(sema, &callable, &param_name.text(), arg)
+            !should_hide_param_name_hint(sema, &callable, param_name.as_str(), arg)
         })
-        .map(|(param, param_name, _, FileRange { range, .. })| {
-            let mut linked_location = None;
-            if let Some(name) = param {
-                if let hir::CallableKind::Function(f) = callable.kind() {
-                    // assert the file is cached so we can map out of macros
-                    if let Some(_) = sema.source(f) {
-                        linked_location = sema.original_range_opt(name.syntax());
-                    }
-                }
-            }
-
+        .map(|(param, param_name, _, hir::FileRange { range, .. })| {
             let colon = if config.render_colons { ":" } else { "" };
-            let label =
-                InlayHintLabel::simple(format!("{param_name}{colon}"), None, linked_location);
+            let label = InlayHintLabel::simple(
+                format!("{}{colon}", param_name.display(sema.db, krate.edition(sema.db))),
+                None,
+                config.lazy_location_opt(|| {
+                    let source = sema.source(param)?;
+                    let name_syntax = match source.value.as_ref() {
+                        Either::Left(pat) => pat.name(),
+                        Either::Right(param) => match param.pat()? {
+                            ast::Pat::IdentPat(it) => it.name(),
+                            _ => None,
+                        },
+                    }?;
+                    sema.original_range_opt(name_syntax.syntax()).map(Into::into)
+                }),
+            );
             InlayHint {
                 range,
                 kind: InlayKind::Parameter,
@@ -64,6 +67,7 @@ pub(super) fn hints(
                 position: InlayHintPosition::Before,
                 pad_left: false,
                 pad_right: true,
+                resolve_parent: Some(expr.syntax().text_range()),
             }
         });
 
@@ -115,12 +119,12 @@ fn should_hide_param_name_hint(
     }
 
     let fn_name = match callable.kind() {
-        hir::CallableKind::Function(it) => Some(it.name(sema.db).to_smol_str()),
+        hir::CallableKind::Function(it) => Some(it.name(sema.db).as_str().to_smolstr()),
         _ => None,
     };
     let fn_name = fn_name.as_deref();
     is_param_name_suffix_of_fn_name(param_name, callable, fn_name)
-        || is_argument_similar_to_param_name(argument, param_name)
+        || is_argument_expr_similar_to_param_name(argument, param_name)
         || param_name.starts_with("ra_fixture")
         || (callable.n_params() == 1 && is_obvious_param(param_name))
         || is_adt_constructor_similar_to_param_name(sema, argument, param_name)
@@ -142,7 +146,7 @@ fn is_param_name_suffix_of_fn_name(
                     .len()
                     .checked_sub(param_name.len())
                     .and_then(|at| function.is_char_boundary(at).then(|| function.split_at(at)))
-                    .map_or(false, |(prefix, suffix)| {
+                    .is_some_and(|(prefix, suffix)| {
                         suffix.eq_ignore_ascii_case(param_name) && prefix.ends_with('_')
                     })
         }
@@ -150,14 +154,17 @@ fn is_param_name_suffix_of_fn_name(
     }
 }
 
-fn is_argument_similar_to_param_name(argument: &ast::Expr, param_name: &str) -> bool {
-    // check whether param_name and argument are the same or
-    // whether param_name is a prefix/suffix of argument(split at `_`)
+fn is_argument_expr_similar_to_param_name(argument: &ast::Expr, param_name: &str) -> bool {
     let argument = match get_string_representation(argument) {
         Some(argument) => argument,
         None => return false,
     };
+    is_argument_similar_to_param_name(&argument, param_name)
+}
 
+/// Check whether param_name and argument are the same or
+/// whether param_name is a prefix/suffix of argument(split at `_`).
+pub(super) fn is_argument_similar_to_param_name(argument: &str, param_name: &str) -> bool {
     // std is honestly too panic happy...
     let str_split_at = |str: &str, at| str.is_char_boundary(at).then(|| argument.split_at(at));
 
@@ -255,7 +262,7 @@ mod tests {
     };
 
     #[track_caller]
-    fn check_params(ra_fixture: &str) {
+    fn check_params(#[rust_analyzer::rust_fixture] ra_fixture: &str) {
         check_with_config(
             InlayHintsConfig { parameter_hints: true, ..DISABLED_CONFIG },
             ra_fixture,

@@ -5,36 +5,76 @@ const EXPECTED = [
         'query': 'Result<SomeTrait>',
         'correction': null,
         'in_args': [
-            { 'path': 'generics_trait', 'name': 'beta' },
+            {
+                'path': 'generics_trait',
+                'name': 'beta',
+                'displayType': '`Result`<`T`, ()> -> ()',
+                'displayMappedNames': '',
+                'displayWhereClause': 'T: `SomeTrait`',
+            },
         ],
         'returned': [
-            { 'path': 'generics_trait', 'name': 'bet' },
+            {
+                'path': 'generics_trait',
+                'name': 'bet',
+                'displayType': ' -> `Result`<`T`, ()>',
+                'displayMappedNames': '',
+                'displayWhereClause': 'T: `SomeTrait`',
+            },
         ],
     },
     {
-        'query': 'Result<SomeTraiz>',
-        'correction': null,
+        'query': 'Resulx<SomeTrait>',
         'in_args': [],
         'returned': [],
+    },
+    {
+        'query': 'Result<SomeTraiz>',
+        'proposeCorrectionFrom': 'SomeTraiz',
+        'proposeCorrectionTo': 'SomeTrait',
     },
     {
         'query': 'OtherThingxxxxxxxx',
         'correction': null,
         'in_args': [
-            { 'path': 'generics_trait', 'name': 'alpha' },
+            {
+                'path': 'generics_trait',
+                'name': 'alpha',
+                'displayType': 'Result<`T`, ()> -> ()',
+                'displayMappedNames': '',
+                'displayWhereClause': 'T: `OtherThingxxxxxxxx`',
+            },
         ],
         'returned': [
-            { 'path': 'generics_trait', 'name': 'alef' },
+            {
+                'path': 'generics_trait',
+                'name': 'alef',
+                'displayType': ' -> Result<`T`, ()>',
+                'displayMappedNames': '',
+                'displayWhereClause': 'T: `OtherThingxxxxxxxx`',
+            },
         ],
     },
     {
         'query': 'OtherThingxxxxxxxy',
         'correction': 'OtherThingxxxxxxxx',
         'in_args': [
-            { 'path': 'generics_trait', 'name': 'alpha' },
+            {
+                'path': 'generics_trait',
+                'name': 'alpha',
+                'displayType': 'Result<`T`, ()> -> ()',
+                'displayMappedNames': '',
+                'displayWhereClause': 'T: `OtherThingxxxxxxxx`',
+            },
         ],
         'returned': [
-            { 'path': 'generics_trait', 'name': 'alef' },
+            {
+                'path': 'generics_trait',
+                'name': 'alef',
+                'displayType': ' -> Result<`T`, ()>',
+                'displayMappedNames': '',
+                'displayWhereClause': 'T: `OtherThingxxxxxxxx`',
+            },
         ],
     },
 ];

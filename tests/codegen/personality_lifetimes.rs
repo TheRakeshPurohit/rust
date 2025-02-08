@@ -1,20 +1,19 @@
-// ignore-msvc
-// ignore-wasm32-bare compiled with panic=abort by default
-// needs-unwind
+//@ ignore-msvc
+//@ needs-unwind
 
-// compile-flags: -O -C no-prepopulate-passes
+//@ compile-flags: -O -C no-prepopulate-passes
 
-#![crate_type="lib"]
+#![crate_type = "lib"]
 
 struct S;
 
 impl Drop for S {
-    fn drop(&mut self) {
-    }
+    #[inline(never)]
+    fn drop(&mut self) {}
 }
 
-fn might_unwind() {
-}
+#[inline(never)]
+fn might_unwind() {}
 
 // CHECK-LABEL: @test
 #[no_mangle]
@@ -22,7 +21,7 @@ pub fn test() {
     let _s = S;
     // Check that the personality slot alloca gets a lifetime start in each cleanup block, not just
     // in the first one.
-    // CHECK: [[SLOT:%[0-9]+]] = alloca { {{i8\*|ptr}}, i32 }
+    // CHECK: [[SLOT:%[0-9]+]] = alloca [{{[0-9]+}} x i8]
     // CHECK-LABEL: cleanup:
     // CHECK: call void @llvm.lifetime.start.{{.*}}({{.*}})
     // CHECK-LABEL: cleanup1:

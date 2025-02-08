@@ -1,18 +1,22 @@
-use crate::leb128;
-use crate::serialize::{Decodable, Decoder, Encodable, Encoder};
 use std::fs::File;
 use std::io::{self, Write};
 use std::marker::PhantomData;
-use std::mem::MaybeUninit;
 use std::ops::Range;
-use std::path::Path;
-use std::ptr;
+use std::path::{Path, PathBuf};
+
+// This code is very hot and uses lots of arithmetic, avoid overflow checks for performance.
+// See https://github.com/rust-lang/rust/pull/119440#issuecomment-1874255727
+use crate::int_overflow::DebugStrictAdd;
+use crate::leb128;
+use crate::serialize::{Decodable, Decoder, Encodable, Encoder};
 
 // -----------------------------------------------------------------------------
 // Encoder
 // -----------------------------------------------------------------------------
 
-pub type FileEncodeResult = Result<usize, io::Error>;
+pub type FileEncodeResult = Result<usize, (PathBuf, io::Error)>;
+
+pub const MAGIC_END_BYTES: &[u8] = b"rust-end-file";
 
 /// The size of the buffer in `FileEncoder`.
 const BUF_SIZE: usize = 8192;
@@ -24,224 +28,179 @@ const BUF_SIZE: usize = 8192;
 /// size of the buffer, rather than the full length of the encoded data, and
 /// because it doesn't need to reallocate memory along the way.
 pub struct FileEncoder {
-    /// The input buffer. For adequate performance, we need more control over
-    /// buffering than `BufWriter` offers. If `BufWriter` ever offers a raw
-    /// buffer access API, we can use it, and remove `buf` and `buffered`.
-    buf: Box<[MaybeUninit<u8>]>,
+    // The input buffer. For adequate performance, we need to be able to write
+    // directly to the unwritten region of the buffer, without calling copy_from_slice.
+    // Note that our buffer is always initialized so that we can do that direct access
+    // without unsafe code. Users of this type write many more than BUF_SIZE bytes, so the
+    // initialization is approximately free.
+    buf: Box<[u8; BUF_SIZE]>,
     buffered: usize,
     flushed: usize,
     file: File,
     // This is used to implement delayed error handling, as described in the
     // comment on `trait Encoder`.
     res: Result<(), io::Error>,
+    path: PathBuf,
+    #[cfg(debug_assertions)]
+    finished: bool,
 }
 
 impl FileEncoder {
     pub fn new<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        // Create the file for reading and writing, because some encoders do both
-        // (e.g. the metadata encoder when -Zmeta-stats is enabled)
-        let file = File::options().read(true).write(true).create(true).truncate(true).open(path)?;
+        // File::create opens the file for writing only. When -Zmeta-stats is enabled, the metadata
+        // encoder rewinds the file to inspect what was written. So we need to always open the file
+        // for reading and writing.
+        let file =
+            File::options().read(true).write(true).create(true).truncate(true).open(&path)?;
 
         Ok(FileEncoder {
-            buf: Box::new_uninit_slice(BUF_SIZE),
+            buf: vec![0u8; BUF_SIZE].into_boxed_slice().try_into().unwrap(),
+            path: path.as_ref().into(),
             buffered: 0,
             flushed: 0,
             file,
             res: Ok(()),
+            #[cfg(debug_assertions)]
+            finished: false,
         })
     }
 
     #[inline]
     pub fn position(&self) -> usize {
         // Tracking position this way instead of having a `self.position` field
-        // means that we don't have to update the position on every write call.
-        self.flushed + self.buffered
+        // means that we only need to update `self.buffered` on a write call,
+        // as opposed to updating `self.position` and `self.buffered`.
+        self.flushed.debug_strict_add(self.buffered)
     }
 
+    #[cold]
+    #[inline(never)]
     pub fn flush(&mut self) {
-        // This is basically a copy of `BufWriter::flush`. If `BufWriter` ever
-        // offers a raw buffer access API, we can use it, and remove this.
-
-        /// Helper struct to ensure the buffer is updated after all the writes
-        /// are complete. It tracks the number of written bytes and drains them
-        /// all from the front of the buffer when dropped.
-        struct BufGuard<'a> {
-            buffer: &'a mut [u8],
-            encoder_buffered: &'a mut usize,
-            encoder_flushed: &'a mut usize,
-            flushed: usize,
+        #[cfg(debug_assertions)]
+        {
+            self.finished = false;
         }
-
-        impl<'a> BufGuard<'a> {
-            fn new(
-                buffer: &'a mut [u8],
-                encoder_buffered: &'a mut usize,
-                encoder_flushed: &'a mut usize,
-            ) -> Self {
-                assert_eq!(buffer.len(), *encoder_buffered);
-                Self { buffer, encoder_buffered, encoder_flushed, flushed: 0 }
-            }
-
-            /// The unwritten part of the buffer
-            fn remaining(&self) -> &[u8] {
-                &self.buffer[self.flushed..]
-            }
-
-            /// Flag some bytes as removed from the front of the buffer
-            fn consume(&mut self, amt: usize) {
-                self.flushed += amt;
-            }
-
-            /// true if all of the bytes have been written
-            fn done(&self) -> bool {
-                self.flushed >= *self.encoder_buffered
-            }
+        if self.res.is_ok() {
+            self.res = self.file.write_all(&self.buf[..self.buffered]);
         }
-
-        impl Drop for BufGuard<'_> {
-            fn drop(&mut self) {
-                if self.flushed > 0 {
-                    if self.done() {
-                        *self.encoder_flushed += *self.encoder_buffered;
-                        *self.encoder_buffered = 0;
-                    } else {
-                        self.buffer.copy_within(self.flushed.., 0);
-                        *self.encoder_flushed += self.flushed;
-                        *self.encoder_buffered -= self.flushed;
-                    }
-                }
-            }
-        }
-
-        // If we've already had an error, do nothing. It'll get reported after
-        // `finish` is called.
-        if self.res.is_err() {
-            return;
-        }
-
-        let mut guard = BufGuard::new(
-            unsafe { MaybeUninit::slice_assume_init_mut(&mut self.buf[..self.buffered]) },
-            &mut self.buffered,
-            &mut self.flushed,
-        );
-
-        while !guard.done() {
-            match self.file.write(guard.remaining()) {
-                Ok(0) => {
-                    self.res = Err(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "failed to write the buffered data",
-                    ));
-                    return;
-                }
-                Ok(n) => guard.consume(n),
-                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => {
-                    self.res = Err(e);
-                    return;
-                }
-            }
-        }
+        self.flushed += self.buffered;
+        self.buffered = 0;
     }
 
     pub fn file(&self) -> &File {
         &self.file
     }
 
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     #[inline]
-    fn write_one(&mut self, value: u8) {
-        let mut buffered = self.buffered;
+    fn buffer_empty(&mut self) -> &mut [u8] {
+        // SAFETY: self.buffered is inbounds as an invariant of the type
+        unsafe { self.buf.get_unchecked_mut(self.buffered..) }
+    }
 
-        if std::intrinsics::unlikely(buffered + 1 > BUF_SIZE) {
-            self.flush();
-            buffered = 0;
+    #[cold]
+    #[inline(never)]
+    fn write_all_cold_path(&mut self, buf: &[u8]) {
+        self.flush();
+        if let Some(dest) = self.buf.get_mut(..buf.len()) {
+            dest.copy_from_slice(buf);
+            self.buffered += buf.len();
+        } else {
+            if self.res.is_ok() {
+                self.res = self.file.write_all(buf);
+            }
+            self.flushed += buf.len();
         }
-
-        // SAFETY: The above check and `flush` ensures that there is enough
-        // room to write the input to the buffer.
-        unsafe {
-            *MaybeUninit::slice_as_mut_ptr(&mut self.buf).add(buffered) = value;
-        }
-
-        self.buffered = buffered + 1;
     }
 
     #[inline]
     fn write_all(&mut self, buf: &[u8]) {
-        let buf_len = buf.len();
-
-        if std::intrinsics::likely(buf_len <= BUF_SIZE) {
-            let mut buffered = self.buffered;
-
-            if std::intrinsics::unlikely(buffered + buf_len > BUF_SIZE) {
-                self.flush();
-                buffered = 0;
-            }
-
-            // SAFETY: The above check and `flush` ensures that there is enough
-            // room to write the input to the buffer.
-            unsafe {
-                let src = buf.as_ptr();
-                let dst = MaybeUninit::slice_as_mut_ptr(&mut self.buf).add(buffered);
-                ptr::copy_nonoverlapping(src, dst, buf_len);
-            }
-
-            self.buffered = buffered + buf_len;
+        #[cfg(debug_assertions)]
+        {
+            self.finished = false;
+        }
+        if let Some(dest) = self.buffer_empty().get_mut(..buf.len()) {
+            dest.copy_from_slice(buf);
+            self.buffered = self.buffered.debug_strict_add(buf.len());
         } else {
-            self.write_all_unbuffered(buf);
+            self.write_all_cold_path(buf);
         }
     }
 
-    fn write_all_unbuffered(&mut self, mut buf: &[u8]) {
-        // If we've already had an error, do nothing. It'll get reported after
-        // `finish` is called.
-        if self.res.is_err() {
-            return;
+    /// Write up to `N` bytes to this encoder.
+    ///
+    /// This function can be used to avoid the overhead of calling memcpy for writes that
+    /// have runtime-variable length, but are small and have a small fixed upper bound.
+    ///
+    /// This can be used to do in-place encoding as is done for leb128 (without this function
+    /// we would need to write to a temporary buffer then memcpy into the encoder), and it can
+    /// also be used to implement the varint scheme we use for rmeta and dep graph encoding,
+    /// where we only want to encode the first few bytes of an integer. Copying in the whole
+    /// integer then only advancing the encoder state for the few bytes we care about is more
+    /// efficient than calling [`FileEncoder::write_all`], because variable-size copies are
+    /// always lowered to `memcpy`, which has overhead and contains a lot of logic we can bypass
+    /// with this function. Note that common architectures support fixed-size writes up to 8 bytes
+    /// with one instruction, so while this does in some sense do wasted work, we come out ahead.
+    #[inline]
+    pub fn write_with<const N: usize>(&mut self, visitor: impl FnOnce(&mut [u8; N]) -> usize) {
+        #[cfg(debug_assertions)]
+        {
+            self.finished = false;
         }
-
-        if self.buffered > 0 {
+        let flush_threshold = const { BUF_SIZE.checked_sub(N).unwrap() };
+        if std::intrinsics::unlikely(self.buffered > flush_threshold) {
             self.flush();
         }
-
-        // This is basically a copy of `Write::write_all` but also updates our
-        // `self.flushed`. It's necessary because `Write::write_all` does not
-        // return the number of bytes written when an error is encountered, and
-        // without that, we cannot accurately update `self.flushed` on error.
-        while !buf.is_empty() {
-            match self.file.write(buf) {
-                Ok(0) => {
-                    self.res = Err(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "failed to write whole buffer",
-                    ));
-                    return;
-                }
-                Ok(n) => {
-                    buf = &buf[n..];
-                    self.flushed += n;
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => {
-                    self.res = Err(e);
-                    return;
-                }
-            }
+        // SAFETY: We checked above that N < self.buffer_empty().len(),
+        // and if isn't, flush ensures that our empty buffer is now BUF_SIZE.
+        // We produce a post-mono error if N > BUF_SIZE.
+        let buf = unsafe { self.buffer_empty().first_chunk_mut::<N>().unwrap_unchecked() };
+        let written = visitor(buf);
+        // We have to ensure that an errant visitor cannot cause self.buffered to exceed BUF_SIZE.
+        if written > N {
+            Self::panic_invalid_write::<N>(written);
         }
+        self.buffered = self.buffered.debug_strict_add(written);
     }
 
-    pub fn finish(mut self) -> Result<usize, io::Error> {
-        self.flush();
+    #[cold]
+    #[inline(never)]
+    fn panic_invalid_write<const N: usize>(written: usize) {
+        panic!("FileEncoder::write_with::<{N}> cannot be used to write {written} bytes");
+    }
 
-        let res = std::mem::replace(&mut self.res, Ok(()));
-        res.map(|()| self.position())
+    /// Helper for calls where [`FileEncoder::write_with`] always writes the whole array.
+    #[inline]
+    pub fn write_array<const N: usize>(&mut self, buf: [u8; N]) {
+        self.write_with(|dest| {
+            *dest = buf;
+            N
+        })
+    }
+
+    pub fn finish(&mut self) -> FileEncodeResult {
+        self.write_all(MAGIC_END_BYTES);
+        self.flush();
+        #[cfg(debug_assertions)]
+        {
+            self.finished = true;
+        }
+        match std::mem::replace(&mut self.res, Ok(())) {
+            Ok(()) => Ok(self.position()),
+            Err(e) => Err((self.path.clone(), e)),
+        }
     }
 }
 
+#[cfg(debug_assertions)]
 impl Drop for FileEncoder {
     fn drop(&mut self) {
-        // Likely to be a no-op, because `finish` should have been called and
-        // it also flushes. But do it just in case.
-        let _result = self.flush();
+        if !std::thread::panicking() {
+            assert!(self.finished);
+        }
     }
 }
 
@@ -249,26 +208,7 @@ macro_rules! write_leb128 {
     ($this_fn:ident, $int_ty:ty, $write_leb_fn:ident) => {
         #[inline]
         fn $this_fn(&mut self, v: $int_ty) {
-            const MAX_ENCODED_LEN: usize = $crate::leb128::max_leb128_len::<$int_ty>();
-
-            let mut buffered = self.buffered;
-
-            // This can't overflow because BUF_SIZE and MAX_ENCODED_LEN are both
-            // quite small.
-            if std::intrinsics::unlikely(buffered + MAX_ENCODED_LEN > BUF_SIZE) {
-                self.flush();
-                buffered = 0;
-            }
-
-            // SAFETY: The above check and flush ensures that there is enough
-            // room to write the encoded value to the buffer.
-            let buf = unsafe {
-                &mut *(self.buf.as_mut_ptr().add(buffered)
-                    as *mut [MaybeUninit<u8>; MAX_ENCODED_LEN])
-            };
-
-            let encoded = leb128::$write_leb_fn(buf, v);
-            self.buffered = buffered + encoded.len();
+            self.write_with(|buf| leb128::$write_leb_fn(buf, v))
         }
     };
 }
@@ -281,12 +221,12 @@ impl Encoder for FileEncoder {
 
     #[inline]
     fn emit_u16(&mut self, v: u16) {
-        self.write_all(&v.to_le_bytes());
+        self.write_array(v.to_le_bytes());
     }
 
     #[inline]
     fn emit_u8(&mut self, v: u8) {
-        self.write_one(v);
+        self.write_array([v]);
     }
 
     write_leb128!(emit_isize, isize, write_isize_leb128);
@@ -296,7 +236,7 @@ impl Encoder for FileEncoder {
 
     #[inline]
     fn emit_i16(&mut self, v: i16) {
-        self.write_all(&v.to_le_bytes());
+        self.write_array(v.to_le_bytes());
     }
 
     #[inline]
@@ -323,15 +263,18 @@ pub struct MemDecoder<'a> {
 
 impl<'a> MemDecoder<'a> {
     #[inline]
-    pub fn new(data: &'a [u8], position: usize) -> MemDecoder<'a> {
+    pub fn new(data: &'a [u8], position: usize) -> Result<MemDecoder<'a>, ()> {
+        let data = data.strip_suffix(MAGIC_END_BYTES).ok_or(())?;
         let Range { start, end } = data.as_ptr_range();
-        MemDecoder { start, current: data[position..].as_ptr(), end, _marker: PhantomData }
+        Ok(MemDecoder { start, current: data[position..].as_ptr(), end, _marker: PhantomData })
     }
 
     #[inline]
-    pub fn data(&self) -> &'a [u8] {
-        // SAFETY: This recovers the original slice, only using members we never modify.
-        unsafe { std::slice::from_raw_parts(self.start, self.len()) }
+    pub fn split_at(&self, position: usize) -> MemDecoder<'a> {
+        assert!(position <= self.len());
+        // SAFETY: We checked above that this offset is within the original slice
+        let current = unsafe { self.start.add(position) };
+        MemDecoder { start: self.start, current, end: self.end, _marker: PhantomData }
     }
 
     #[inline]
@@ -353,7 +296,7 @@ impl<'a> MemDecoder<'a> {
     }
 
     #[inline]
-    fn read_array<const N: usize>(&mut self) -> [u8; N] {
+    pub fn read_array<const N: usize>(&mut self) -> [u8; N] {
         self.read_raw_bytes(N).try_into().unwrap()
     }
 
@@ -494,10 +437,10 @@ impl IntEncodedWithFixedSize {
 impl Encodable<FileEncoder> for IntEncodedWithFixedSize {
     #[inline]
     fn encode(&self, e: &mut FileEncoder) {
-        let _start_pos = e.position();
-        e.emit_raw_bytes(&self.0.to_le_bytes());
-        let _end_pos = e.position();
-        debug_assert_eq!((_end_pos - _start_pos), IntEncodedWithFixedSize::ENCODED_SIZE);
+        let start_pos = e.position();
+        e.write_array(self.0.to_le_bytes());
+        let end_pos = e.position();
+        debug_assert_eq!((end_pos - start_pos), IntEncodedWithFixedSize::ENCODED_SIZE);
     }
 }
 

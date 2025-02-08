@@ -1,10 +1,10 @@
-#![cfg(all(test, not(any(target_os = "emscripten", target_env = "sgx"))))]
+#![cfg(all(test, not(any(target_os = "emscripten", target_os = "wasi", target_env = "sgx"))))]
 
 //! Note that this test changes the current directory so
 //! should not be in the same process as other tests.
-use std::env;
-use std::fs;
+
 use std::path::{Path, PathBuf};
+use std::{env, fs};
 
 mod common;
 
@@ -31,6 +31,7 @@ impl Drop for CurrentDir {
 }
 
 #[test]
+#[cfg_attr(all(miri, windows), ignore)] // File system access on Windows not supported by Miri
 fn create_dir_all_bare() {
     let tmpdir = common::tmpdir();
     CurrentDir::with(tmpdir.path(), || {

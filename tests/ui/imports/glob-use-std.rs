@@ -1,8 +1,8 @@
 // Issue #7580
 
-// run-fail
-// error-pattern:panic works
-// ignore-emscripten no processes
+//@ run-fail
+//@ error-pattern:panic works
+//@ needs-subprocess
 
 use std::*;
 

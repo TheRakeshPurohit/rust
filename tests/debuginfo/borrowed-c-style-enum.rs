@@ -1,38 +1,31 @@
-// compile-flags:-g
-// min-lldb-version: 310
+//@ compile-flags:-g
 
 // === GDB TESTS ===================================================================================
 
 // gdb-command:run
 
 // gdb-command:print *the_a_ref
-// gdbg-check:$1 = TheA
-// gdbr-check:$1 = borrowed_c_style_enum::ABC::TheA
+// gdb-check:$1 = borrowed_c_style_enum::ABC::TheA
 
 // gdb-command:print *the_b_ref
-// gdbg-check:$2 = TheB
-// gdbr-check:$2 = borrowed_c_style_enum::ABC::TheB
+// gdb-check:$2 = borrowed_c_style_enum::ABC::TheB
 
 // gdb-command:print *the_c_ref
-// gdbg-check:$3 = TheC
-// gdbr-check:$3 = borrowed_c_style_enum::ABC::TheC
+// gdb-check:$3 = borrowed_c_style_enum::ABC::TheC
 
 
 // === LLDB TESTS ==================================================================================
 
 // lldb-command:run
 
-// lldb-command:print *the_a_ref
-// lldbg-check:[...]$0 = TheA
-// lldbr-check:(borrowed_c_style_enum::ABC) *the_a_ref = borrowed_c_style_enum::ABC::TheA
+// lldb-command:v *the_a_ref
+// lldb-check:[...] TheA
 
-// lldb-command:print *the_b_ref
-// lldbg-check:[...]$1 = TheB
-// lldbr-check:(borrowed_c_style_enum::ABC) *the_b_ref = borrowed_c_style_enum::ABC::TheB
+// lldb-command:v *the_b_ref
+// lldb-check:[...] TheB
 
-// lldb-command:print *the_c_ref
-// lldbg-check:[...]$2 = TheC
-// lldbr-check:(borrowed_c_style_enum::ABC) *the_c_ref = borrowed_c_style_enum::ABC::TheC
+// lldb-command:v *the_c_ref
+// lldb-check:[...] TheC
 
 #![allow(unused_variables)]
 #![feature(omit_gdb_pretty_printer_section)]

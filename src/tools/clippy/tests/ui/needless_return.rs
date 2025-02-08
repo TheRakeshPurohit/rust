@@ -1,6 +1,4 @@
-//@run-rustfix
-
-#![feature(lint_reasons)]
+//@aux-build:proc_macros.rs
 #![feature(yeet_expr)]
 #![allow(unused)]
 #![allow(
@@ -11,6 +9,9 @@
     clippy::needless_else
 )]
 #![warn(clippy::needless_return)]
+
+extern crate proc_macros;
+use proc_macros::with_span;
 
 use std::cell::RefCell;
 
@@ -239,10 +240,39 @@ fn needless_return_macro() -> String {
     return format!("Hello {}", "world!");
 }
 
-fn issue_9361() -> i32 {
-    let n = 1;
-    #[allow(clippy::arithmetic_side_effects)]
+fn issue_9361(n: i32) -> i32 {
+    #[expect(clippy::arithmetic_side_effects)]
     return n + n;
+}
+
+mod issue_12998 {
+    fn expect_lint() -> i32 {
+        let x = 1;
+
+        #[expect(clippy::needless_return)]
+        return x;
+    }
+
+    fn expect_group() -> i32 {
+        let x = 1;
+
+        #[expect(clippy::style)]
+        return x;
+    }
+
+    fn expect_all() -> i32 {
+        let x = 1;
+
+        #[expect(clippy::all)]
+        return x;
+    }
+
+    fn expect_warnings() -> i32 {
+        let x = 1;
+
+        #[expect(warnings)]
+        return x;
+    }
 }
 
 fn issue8336(x: i32) -> bool {
@@ -328,4 +358,43 @@ fn test_match_as_stmt() {
     };
 }
 
+fn allow_works() -> i32 {
+    #[allow(clippy::needless_return, clippy::match_single_binding)]
+    match () {
+        () => return 42,
+    }
+}
+
+fn conjunctive_blocks() -> String {
+    return { "a".to_string() } + "b" + { "c" };
+}
+
+fn issue12907() -> String {
+    return "".split("").next().unwrap().to_string();
+}
+
+fn issue13458() {
+    with_span!(span return);
+}
+
 fn main() {}
+
+fn a(x: Option<u8>) -> Option<u8> {
+    match x {
+        Some(_) => None,
+        None => {
+            #[expect(clippy::needless_return, reason = "Use early return for errors.")]
+            return None;
+        },
+    }
+}
+
+fn b(x: Option<u8>) -> Option<u8> {
+    match x {
+        Some(_) => None,
+        None => {
+            #[expect(clippy::needless_return)]
+            return None;
+        },
+    }
+}

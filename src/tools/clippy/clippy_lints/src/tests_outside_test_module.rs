@@ -1,18 +1,23 @@
-use clippy_utils::{diagnostics::span_lint_and_note, is_in_cfg_test, is_in_test_function};
-use rustc_hir::{intravisit::FnKind, Body, FnDecl};
+use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::{is_in_cfg_test, is_in_test_function};
+use rustc_hir::intravisit::FnKind;
+use rustc_hir::{Body, FnDecl};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
-use rustc_span::{def_id::LocalDefId, Span};
+use rustc_session::declare_lint_pass;
+use rustc_span::Span;
+use rustc_span::def_id::LocalDefId;
 
 declare_clippy_lint! {
     /// ### What it does
     /// Triggers when a testing function (marked with the `#[test]` attribute) isn't inside a testing module
     /// (marked with `#[cfg(test)]`).
-    /// ### Why is this bad?
+    ///
+    /// ### Why restrict this?
     /// The idiomatic (and more performant) way of writing tests is inside a testing module (flagged with `#[cfg(test)]`),
     /// having test functions outside of this module is confusing and may lead to them being "hidden".
+    ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// #[test]
     /// fn my_cool_test() {
     ///     // [...]
@@ -25,7 +30,7 @@ declare_clippy_lint! {
     ///
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// #[cfg(test)]
     /// mod tests {
     ///     #[test]
@@ -52,20 +57,20 @@ impl LateLintPass<'_> for TestsOutsideTestModule {
         sp: Span,
         _: LocalDefId,
     ) {
-        if_chain! {
-            if !matches!(kind, FnKind::Closure);
-            if is_in_test_function(cx.tcx, body.id().hir_id);
-            if !is_in_cfg_test(cx.tcx, body.id().hir_id);
-            then {
-                span_lint_and_note(
-                    cx,
-                    TESTS_OUTSIDE_TEST_MODULE,
-                    sp,
-                    "this function marked with #[test] is outside a #[cfg(test)] module",
-                    None,
-                    "move it to a testing module marked with #[cfg(test)]",
-                );
-            }
+        if !matches!(kind, FnKind::Closure)
+            && is_in_test_function(cx.tcx, body.id().hir_id)
+            && !is_in_cfg_test(cx.tcx, body.id().hir_id)
+        {
+            #[expect(clippy::collapsible_span_lint_calls, reason = "rust-clippy#7797")]
+            span_lint_and_then(
+                cx,
+                TESTS_OUTSIDE_TEST_MODULE,
+                sp,
+                "this function marked with #[test] is outside a #[cfg(test)] module",
+                |diag| {
+                    diag.note("move it to a testing module marked with #[cfg(test)]");
+                },
+            );
         }
     }
 }

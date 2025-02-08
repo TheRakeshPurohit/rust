@@ -1,10 +1,11 @@
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher, ToStableHashKey};
+use rustc_span::def_id::DefPathHash;
 
 use crate::hir::{
-    AttributeMap, BodyId, Crate, ForeignItemId, ImplItemId, ItemId, OwnerNodes, TraitItemId,
+    Attribute, AttributeMap, BodyId, Crate, ForeignItemId, ImplItemId, ItemId, OwnerNodes,
+    TraitItemId,
 };
 use crate::hir_id::{HirId, ItemLocalId};
-use rustc_span::def_id::DefPathHash;
 
 /// Requirements for a `StableHashingContext` to be used in this crate.
 /// This is a hack to allow using the `HashStable_Generic` derive macro
@@ -12,7 +13,7 @@ use rustc_span::def_id::DefPathHash;
 pub trait HashStableContext:
     rustc_ast::HashStableContext + rustc_target::HashStableContext
 {
-    fn hash_body_id(&mut self, _: BodyId, hasher: &mut StableHasher);
+    fn hash_attr(&mut self, _: &Attribute, hasher: &mut StableHasher);
 }
 
 impl<HirCtx: crate::HashStableContext> ToStableHashKey<HirCtx> for HirId {
@@ -80,12 +81,6 @@ impl<HirCtx: crate::HashStableContext> ToStableHashKey<HirCtx> for ForeignItemId
     }
 }
 
-impl<HirCtx: crate::HashStableContext> HashStable<HirCtx> for BodyId {
-    fn hash_stable(&self, hcx: &mut HirCtx, hasher: &mut StableHasher) {
-        hcx.hash_body_id(*self, hasher)
-    }
-}
-
 // The following implementations of HashStable for `ItemId`, `TraitItemId`, and
 // `ImplItemId` deserve special attention. Normally we do not hash `NodeId`s within
 // the HIR, since they just signify a HIR nodes own path. But `ItemId` et al
@@ -118,5 +113,11 @@ impl<HirCtx: crate::HashStableContext> HashStable<HirCtx> for Crate<'_> {
     fn hash_stable(&self, hcx: &mut HirCtx, hasher: &mut StableHasher) {
         let Crate { owners: _, opt_hir_hash } = self;
         opt_hir_hash.unwrap().hash_stable(hcx, hasher)
+    }
+}
+
+impl<HirCtx: crate::HashStableContext> HashStable<HirCtx> for Attribute {
+    fn hash_stable(&self, hcx: &mut HirCtx, hasher: &mut StableHasher) {
+        hcx.hash_attr(self, hasher)
     }
 }

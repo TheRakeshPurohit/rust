@@ -10,7 +10,7 @@ use std::fmt::{};
 
 // Should get errors for both 'Some' and 'None'
 use std::option::Option::{Some, None};
-//~^ ERROR unused imports: `None`, `Some`
+//~^ ERROR unused imports: `None` and `Some`
 
 use test::A;       //~ ERROR unused import: `test::A`
 // Be sure that if we just bring some methods into scope that they're also
@@ -42,7 +42,7 @@ mod foo {
     pub struct Square{pub p: Point, pub h: usize, pub w: usize}
 }
 
-mod bar {
+pub mod bar {
     // Don't ignore on 'pub use' because we're not sure if it's used or not
     pub use std::cmp::PartialEq;
     pub struct Square;
@@ -66,7 +66,6 @@ mod bar {
 
 fn g() {
     use self::g; //~ ERROR unused import: `self::g`
-    //~^ ERROR the item `g` is imported redundantly
     fn f() {
         self::g();
     }
@@ -76,7 +75,6 @@ fn g() {
 #[allow(unused_variables)]
 fn h() {
     use test2::foo; //~ ERROR unused import: `test2::foo`
-    //~^ ERROR the item `foo` is imported redundantly
     let foo = 0;
 }
 

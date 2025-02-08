@@ -1,34 +1,27 @@
+// tidy-alphabetical-start
+#![allow(internal_features)]
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
+#![doc(rust_logo)]
+#![feature(coroutines)]
 #![feature(decl_macro)]
+#![feature(error_iter)]
 #![feature(extract_if)]
-#![feature(generators)]
-#![feature(iter_from_generator)]
+#![feature(file_buffered)]
+#![feature(if_let_guard)]
+#![feature(iter_from_coroutine)]
 #![feature(let_chains)]
-#![feature(proc_macro_internals)]
 #![feature(macro_metavar_expr)]
 #![feature(min_specialization)]
-#![feature(slice_as_chunks)]
-#![feature(trusted_len)]
-#![feature(try_blocks)]
 #![feature(never_type)]
-#![recursion_limit = "256"]
-#![allow(rustc::potential_query_instability)]
-#![deny(rustc::untranslatable_diagnostic)]
-#![deny(rustc::diagnostic_outside_of_impl)]
+#![feature(proc_macro_internals)]
+#![feature(rustdoc_internals)]
+#![feature(trusted_len)]
+#![warn(unreachable_pub)]
+// tidy-alphabetical-end
 
 extern crate proc_macro;
 
-#[macro_use]
-extern crate rustc_macros;
-#[macro_use]
-extern crate rustc_middle;
-
-#[macro_use]
-extern crate tracing;
-
-pub use rmeta::{provide, provide_extern};
-use rustc_errors::{DiagnosticMessage, SubdiagnosticMessage};
-use rustc_fluent_macro::fluent_messages;
+pub use rmeta::provide;
 
 mod dependency_format;
 mod foreign_modules;
@@ -40,8 +33,12 @@ pub mod errors;
 pub mod fs;
 pub mod locator;
 
-pub use fs::{emit_wrapper_file, METADATA_FILENAME};
-pub use native_libs::find_native_static_library;
-pub use rmeta::{encode_metadata, EncodedMetadata, METADATA_HEADER};
+pub use creader::{DylibError, load_symbol_from_dylib};
+pub use fs::{METADATA_FILENAME, emit_wrapper_file};
+pub use native_libs::{
+    find_native_static_library, try_find_native_dynamic_library, try_find_native_static_library,
+    walk_native_lib_search_dirs,
+};
+pub use rmeta::{EncodedMetadata, METADATA_HEADER, encode_metadata, rendered_const};
 
-fluent_messages! { "../messages.ftl" }
+rustc_fluent_macro::fluent_messages! { "../messages.ftl" }

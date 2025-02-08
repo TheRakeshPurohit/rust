@@ -1,14 +1,12 @@
-use super::{GlobalCtxt, TyCtxt};
+use std::{mem, ptr};
 
+use rustc_data_structures::sync::{self, Lock};
+use rustc_errors::DiagInner;
+use thin_vec::ThinVec;
+
+use super::{GlobalCtxt, TyCtxt};
 use crate::dep_graph::TaskDepsRef;
 use crate::query::plumbing::QueryJobId;
-use rustc_data_structures::sync::{self, Lock};
-use rustc_errors::Diagnostic;
-#[cfg(not(parallel_compiler))]
-use std::cell::Cell;
-use std::mem;
-use std::ptr;
-use thin_vec::ThinVec;
 
 /// This is the implicit state of rustc. It contains the current
 /// `TyCtxt` and query. It is updated when creating a local interner or
@@ -26,7 +24,7 @@ pub struct ImplicitCtxt<'a, 'tcx> {
 
     /// Where to store diagnostics for the current query job, if any.
     /// This is updated by `JobOwner::start` in `ty::query::plumbing` when executing a query.
-    pub diagnostics: Option<&'a Lock<ThinVec<Diagnostic>>>,
+    pub diagnostics: Option<&'a Lock<ThinVec<DiagInner>>>,
 
     /// Used to prevent queries from calling too deeply.
     pub query_depth: usize,
@@ -50,15 +48,7 @@ impl<'a, 'tcx> ImplicitCtxt<'a, 'tcx> {
 }
 
 // Import the thread-local variable from Rayon, which is preserved for Rayon jobs.
-#[cfg(parallel_compiler)]
 use rayon_core::tlv::TLV;
-
-// Otherwise define our own
-#[cfg(not(parallel_compiler))]
-thread_local! {
-    /// A thread local variable that stores a pointer to the current `ImplicitCtxt`.
-    static TLV: Cell<*const ()> = const { Cell::new(ptr::null()) };
-}
 
 #[inline]
 fn erase(context: &ImplicitCtxt<'_, '_>) -> *const () {
@@ -67,7 +57,7 @@ fn erase(context: &ImplicitCtxt<'_, '_>) -> *const () {
 
 #[inline]
 unsafe fn downcast<'a, 'tcx>(context: *const ()) -> &'a ImplicitCtxt<'a, 'tcx> {
-    &*(context as *const ImplicitCtxt<'a, 'tcx>)
+    unsafe { &*(context as *const ImplicitCtxt<'a, 'tcx>) }
 }
 
 /// Sets `context` as the new current `ImplicitCtxt` for the duration of the function `f`.
@@ -85,6 +75,7 @@ where
 
 /// Allows access to the current `ImplicitCtxt` in a closure if one is available.
 #[inline]
+#[track_caller]
 pub fn with_context_opt<F, R>(f: F) -> R
 where
     F: for<'a, 'tcx> FnOnce(Option<&ImplicitCtxt<'a, 'tcx>>) -> R,
@@ -147,9 +138,13 @@ where
 /// Allows access to the `TyCtxt` in the current `ImplicitCtxt`.
 /// The closure is passed None if there is no `ImplicitCtxt` available.
 #[inline]
+#[track_caller]
 pub fn with_opt<F, R>(f: F) -> R
 where
     F: for<'tcx> FnOnce(Option<TyCtxt<'tcx>>) -> R,
 {
-    with_context_opt(|opt_context| f(opt_context.map(|context| context.tcx)))
+    with_context_opt(
+        #[track_caller]
+        |opt_context| f(opt_context.map(|context| context.tcx)),
+    )
 }

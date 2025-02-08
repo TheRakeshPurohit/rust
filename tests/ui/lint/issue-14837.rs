@@ -1,5 +1,4 @@
-// check-pass
-// pretty-expanded FIXME #23616
+//@ check-pass
 
 #[deny(dead_code)]
 pub enum Foo {

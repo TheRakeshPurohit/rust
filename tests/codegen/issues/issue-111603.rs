@@ -1,9 +1,21 @@
-// compile-flags: -O
+//@ compile-flags: -O
 
 #![crate_type = "lib"]
 #![feature(get_mut_unchecked, new_uninit)]
 
 use std::sync::Arc;
+
+// CHECK-LABEL: @new_from_array
+#[no_mangle]
+pub fn new_from_array(x: u64) -> Arc<[u64]> {
+    // Ensure that we only generate one alloca for the array.
+
+    // CHECK: alloca
+    // CHECK-SAME: [8000 x i8]
+    // CHECK-NOT: alloca
+    let array = [x; 1000];
+    Arc::new(array)
+}
 
 // CHECK-LABEL: @new_uninit
 #[no_mangle]

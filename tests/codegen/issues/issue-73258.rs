@@ -1,5 +1,4 @@
-// compile-flags: -O
-// ignore-debug (the extra assertions get in the way)
+//@ compile-flags: -O
 
 #![crate_type = "lib"]
 
@@ -8,7 +7,10 @@
 #[derive(Clone, Copy)]
 #[repr(u8)]
 pub enum Foo {
-    A, B, C, D,
+    A,
+    B,
+    C,
+    D,
 }
 
 // CHECK-LABEL: @issue_73258(

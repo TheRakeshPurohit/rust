@@ -1,36 +1,38 @@
-use crate::{
-    fluent_generated as fluent,
-    lints::{
-        AtomicOrderingFence, AtomicOrderingLoad, AtomicOrderingStore, ImproperCTypes,
-        InvalidAtomicOrderingDiag, InvalidNanComparisons, InvalidNanComparisonsSuggestion,
-        OnlyCastu8ToChar, OverflowingBinHex, OverflowingBinHexSign, OverflowingBinHexSignBitSub,
-        OverflowingBinHexSub, OverflowingInt, OverflowingIntHelp, OverflowingLiteral,
-        OverflowingUInt, RangeEndpointOutOfRange, UnusedComparisons, UseInclusiveRange,
-        VariantSizeDifferencesDiag,
-    },
-};
-use crate::{LateContext, LateLintPass, LintContext};
-use rustc_ast as ast;
-use rustc_attr as attr;
-use rustc_data_structures::fx::FxHashSet;
-use rustc_errors::DiagnosticMessage;
-use rustc_hir as hir;
-use rustc_hir::{is_range_literal, Expr, ExprKind, Node};
-use rustc_middle::ty::layout::{IntegerExt, LayoutOf, SizeSkeleton};
-use rustc_middle::ty::subst::SubstsRef;
-use rustc_middle::ty::{
-    self, AdtKind, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable, TypeVisitableExt,
-};
-use rustc_span::def_id::LocalDefId;
-use rustc_span::source_map;
-use rustc_span::symbol::sym;
-use rustc_span::{Span, Symbol};
-use rustc_target::abi::{Abi, Size, WrappingRange};
-use rustc_target::abi::{Integer, TagEncoding, Variants};
-use rustc_target::spec::abi::Abi as SpecAbi;
-
 use std::iter;
 use std::ops::ControlFlow;
+
+use rustc_abi::{BackendRepr, ExternAbi, TagEncoding, VariantIdx, Variants, WrappingRange};
+use rustc_data_structures::fx::FxHashSet;
+use rustc_errors::DiagMessage;
+use rustc_hir::intravisit::VisitorExt;
+use rustc_hir::{AmbigArg, Expr, ExprKind, HirId, LangItem};
+use rustc_middle::bug;
+use rustc_middle::ty::layout::{LayoutOf, SizeSkeleton};
+use rustc_middle::ty::{
+    self, Adt, AdtKind, GenericArgsRef, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable,
+    TypeVisitableExt,
+};
+use rustc_session::{declare_lint, declare_lint_pass, impl_lint_pass};
+use rustc_span::def_id::LocalDefId;
+use rustc_span::{Span, Symbol, source_map, sym};
+use tracing::debug;
+use {rustc_ast as ast, rustc_hir as hir};
+
+mod improper_ctypes;
+
+use crate::lints::{
+    AmbiguousWidePointerComparisons, AmbiguousWidePointerComparisonsAddrMetadataSuggestion,
+    AmbiguousWidePointerComparisonsAddrSuggestion, AtomicOrderingFence, AtomicOrderingLoad,
+    AtomicOrderingStore, ImproperCTypes, InvalidAtomicOrderingDiag, InvalidNanComparisons,
+    InvalidNanComparisonsSuggestion, UnpredictableFunctionPointerComparisons,
+    UnpredictableFunctionPointerComparisonsSuggestion, UnusedComparisons, UsesPowerAlignment,
+    VariantSizeDifferencesDiag,
+};
+use crate::{LateContext, LateLintPass, LintContext, fluent_generated as fluent};
+
+mod literal;
+
+use literal::{int_ty_range, lint_literal, uint_ty_range};
 
 declare_lint! {
     /// The `unused_comparisons` lint detects comparisons made useless by
@@ -136,416 +138,85 @@ declare_lint! {
     "detects invalid floating point NaN comparisons"
 }
 
-#[derive(Copy, Clone)]
-pub struct TypeLimits {
+declare_lint! {
+    /// The `ambiguous_wide_pointer_comparisons` lint checks comparison
+    /// of `*const/*mut ?Sized` as the operands.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// # struct A;
+    /// # struct B;
+    ///
+    /// # trait T {}
+    /// # impl T for A {}
+    /// # impl T for B {}
+    ///
+    /// let ab = (A, B);
+    /// let a = &ab.0 as *const dyn T;
+    /// let b = &ab.1 as *const dyn T;
+    ///
+    /// let _ = a == b;
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// The comparison includes metadata which may not be expected.
+    AMBIGUOUS_WIDE_POINTER_COMPARISONS,
+    Warn,
+    "detects ambiguous wide pointer comparisons"
+}
+
+declare_lint! {
+    /// The `unpredictable_function_pointer_comparisons` lint checks comparison
+    /// of function pointer as the operands.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// fn a() {}
+    /// fn b() {}
+    ///
+    /// let f: fn() = a;
+    /// let g: fn() = b;
+    ///
+    /// let _ = f == g;
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// Function pointers comparisons do not produce meaningful result since
+    /// they are never guaranteed to be unique and could vary between different
+    /// code generation units. Furthermore, different functions could have the
+    /// same address after being merged together.
+    UNPREDICTABLE_FUNCTION_POINTER_COMPARISONS,
+    Warn,
+    "detects unpredictable function pointer comparisons"
+}
+
+#[derive(Copy, Clone, Default)]
+pub(crate) struct TypeLimits {
     /// Id of the last visited negated expression
     negated_expr_id: Option<hir::HirId>,
+    /// Span of the last visited negated expression
+    negated_expr_span: Option<Span>,
 }
 
-impl_lint_pass!(TypeLimits => [UNUSED_COMPARISONS, OVERFLOWING_LITERALS, INVALID_NAN_COMPARISONS]);
+impl_lint_pass!(TypeLimits => [
+    UNUSED_COMPARISONS,
+    OVERFLOWING_LITERALS,
+    INVALID_NAN_COMPARISONS,
+    AMBIGUOUS_WIDE_POINTER_COMPARISONS,
+    UNPREDICTABLE_FUNCTION_POINTER_COMPARISONS
+]);
 
 impl TypeLimits {
-    pub fn new() -> TypeLimits {
-        TypeLimits { negated_expr_id: None }
-    }
-}
-
-/// Attempts to special-case the overflowing literal lint when it occurs as a range endpoint (`expr..MAX+1`).
-/// Returns `true` iff the lint was emitted.
-fn lint_overflowing_range_endpoint<'tcx>(
-    cx: &LateContext<'tcx>,
-    lit: &hir::Lit,
-    lit_val: u128,
-    max: u128,
-    expr: &'tcx hir::Expr<'tcx>,
-    ty: &str,
-) -> bool {
-    // Look past casts to support cases like `0..256 as u8`
-    let (expr, lit_span) = if let Node::Expr(par_expr) = cx.tcx.hir().get(cx.tcx.hir().parent_id(expr.hir_id))
-      && let ExprKind::Cast(_, _) = par_expr.kind {
-        (par_expr, expr.span)
-    } else {
-        (expr, expr.span)
-    };
-
-    // We only want to handle exclusive (`..`) ranges,
-    // which are represented as `ExprKind::Struct`.
-    let par_id = cx.tcx.hir().parent_id(expr.hir_id);
-    let Node::ExprField(field) = cx.tcx.hir().get(par_id) else { return false };
-    let Node::Expr(struct_expr) = cx.tcx.hir().get_parent(field.hir_id) else { return false };
-    if !is_range_literal(struct_expr) {
-        return false;
-    };
-    let ExprKind::Struct(_, eps, _) = &struct_expr.kind else { return false };
-    if eps.len() != 2 {
-        return false;
-    }
-
-    // We can suggest using an inclusive range
-    // (`..=`) instead only if it is the `end` that is
-    // overflowing and only by 1.
-    if !(eps[1].expr.hir_id == expr.hir_id && lit_val - 1 == max) {
-        return false;
-    };
-
-    use rustc_ast::{LitIntType, LitKind};
-    let suffix = match lit.node {
-        LitKind::Int(_, LitIntType::Signed(s)) => s.name_str(),
-        LitKind::Int(_, LitIntType::Unsigned(s)) => s.name_str(),
-        LitKind::Int(_, LitIntType::Unsuffixed) => "",
-        _ => bug!(),
-    };
-
-    let sub_sugg = if expr.span.lo() == lit_span.lo() {
-        let Ok(start) = cx.sess().source_map().span_to_snippet(eps[0].span) else { return false };
-        UseInclusiveRange::WithoutParen {
-            sugg: struct_expr.span.shrink_to_lo().to(lit_span.shrink_to_hi()),
-            start,
-            literal: lit_val - 1,
-            suffix,
-        }
-    } else {
-        UseInclusiveRange::WithParen {
-            eq_sugg: expr.span.shrink_to_lo(),
-            lit_sugg: lit_span,
-            literal: lit_val - 1,
-            suffix,
-        }
-    };
-
-    cx.emit_spanned_lint(
-        OVERFLOWING_LITERALS,
-        struct_expr.span,
-        RangeEndpointOutOfRange { ty, sub: sub_sugg },
-    );
-
-    // We've just emitted a lint, special cased for `(...)..MAX+1` ranges,
-    // return `true` so the callers don't also emit a lint
-    true
-}
-
-// For `isize` & `usize`, be conservative with the warnings, so that the
-// warnings are consistent between 32- and 64-bit platforms.
-fn int_ty_range(int_ty: ty::IntTy) -> (i128, i128) {
-    match int_ty {
-        ty::IntTy::Isize => (i64::MIN.into(), i64::MAX.into()),
-        ty::IntTy::I8 => (i8::MIN.into(), i8::MAX.into()),
-        ty::IntTy::I16 => (i16::MIN.into(), i16::MAX.into()),
-        ty::IntTy::I32 => (i32::MIN.into(), i32::MAX.into()),
-        ty::IntTy::I64 => (i64::MIN.into(), i64::MAX.into()),
-        ty::IntTy::I128 => (i128::MIN, i128::MAX),
-    }
-}
-
-fn uint_ty_range(uint_ty: ty::UintTy) -> (u128, u128) {
-    let max = match uint_ty {
-        ty::UintTy::Usize => u64::MAX.into(),
-        ty::UintTy::U8 => u8::MAX.into(),
-        ty::UintTy::U16 => u16::MAX.into(),
-        ty::UintTy::U32 => u32::MAX.into(),
-        ty::UintTy::U64 => u64::MAX.into(),
-        ty::UintTy::U128 => u128::MAX,
-    };
-    (0, max)
-}
-
-fn get_bin_hex_repr(cx: &LateContext<'_>, lit: &hir::Lit) -> Option<String> {
-    let src = cx.sess().source_map().span_to_snippet(lit.span).ok()?;
-    let firstch = src.chars().next()?;
-
-    if firstch == '0' {
-        match src.chars().nth(1) {
-            Some('x' | 'b') => return Some(src),
-            _ => return None,
-        }
-    }
-
-    None
-}
-
-fn report_bin_hex_error(
-    cx: &LateContext<'_>,
-    expr: &hir::Expr<'_>,
-    ty: attr::IntType,
-    size: Size,
-    repr_str: String,
-    val: u128,
-    negative: bool,
-) {
-    let (t, actually) = match ty {
-        attr::IntType::SignedInt(t) => {
-            let actually = if negative {
-                -(size.sign_extend(val) as i128)
-            } else {
-                size.sign_extend(val) as i128
-            };
-            (t.name_str(), actually.to_string())
-        }
-        attr::IntType::UnsignedInt(t) => {
-            let actually = size.truncate(val);
-            (t.name_str(), actually.to_string())
-        }
-    };
-    let sign =
-        if negative { OverflowingBinHexSign::Negative } else { OverflowingBinHexSign::Positive };
-    let sub = get_type_suggestion(cx.typeck_results().node_type(expr.hir_id), val, negative).map(
-        |suggestion_ty| {
-            if let Some(pos) = repr_str.chars().position(|c| c == 'i' || c == 'u') {
-                let (sans_suffix, _) = repr_str.split_at(pos);
-                OverflowingBinHexSub::Suggestion { span: expr.span, suggestion_ty, sans_suffix }
-            } else {
-                OverflowingBinHexSub::Help { suggestion_ty }
-            }
-        },
-    );
-    let sign_bit_sub = (!negative)
-        .then(|| {
-            let ty::Int(int_ty) = cx.typeck_results().node_type(expr.hir_id).kind() else {
-                return None;
-            };
-
-            let Some(bit_width) = int_ty.bit_width() else {
-                return None; // isize case
-            };
-
-            // Skip if sign bit is not set
-            if (val & (1 << (bit_width - 1))) == 0 {
-                return None;
-            }
-
-            let lit_no_suffix =
-                if let Some(pos) = repr_str.chars().position(|c| c == 'i' || c == 'u') {
-                    repr_str.split_at(pos).0
-                } else {
-                    &repr_str
-                };
-
-            Some(OverflowingBinHexSignBitSub {
-                span: expr.span,
-                lit_no_suffix,
-                negative_val: actually.clone(),
-                int_ty: int_ty.name_str(),
-                uint_ty: int_ty.to_unsigned().name_str(),
-            })
-        })
-        .flatten();
-
-    cx.emit_spanned_lint(
-        OVERFLOWING_LITERALS,
-        expr.span,
-        OverflowingBinHex {
-            ty: t,
-            lit: repr_str.clone(),
-            dec: val,
-            actually,
-            sign,
-            sub,
-            sign_bit_sub,
-        },
-    )
-}
-
-// This function finds the next fitting type and generates a suggestion string.
-// It searches for fitting types in the following way (`X < Y`):
-//  - `iX`: if literal fits in `uX` => `uX`, else => `iY`
-//  - `-iX` => `iY`
-//  - `uX` => `uY`
-//
-// No suggestion for: `isize`, `usize`.
-fn get_type_suggestion(t: Ty<'_>, val: u128, negative: bool) -> Option<&'static str> {
-    use ty::IntTy::*;
-    use ty::UintTy::*;
-    macro_rules! find_fit {
-        ($ty:expr, $val:expr, $negative:expr,
-         $($type:ident => [$($utypes:expr),*] => [$($itypes:expr),*]),+) => {
-            {
-                let _neg = if negative { 1 } else { 0 };
-                match $ty {
-                    $($type => {
-                        $(if !negative && val <= uint_ty_range($utypes).1 {
-                            return Some($utypes.name_str())
-                        })*
-                        $(if val <= int_ty_range($itypes).1 as u128 + _neg {
-                            return Some($itypes.name_str())
-                        })*
-                        None
-                    },)+
-                    _ => None
-                }
-            }
-        }
-    }
-    match t.kind() {
-        ty::Int(i) => find_fit!(i, val, negative,
-                      I8 => [U8] => [I16, I32, I64, I128],
-                      I16 => [U16] => [I32, I64, I128],
-                      I32 => [U32] => [I64, I128],
-                      I64 => [U64] => [I128],
-                      I128 => [U128] => []),
-        ty::Uint(u) => find_fit!(u, val, negative,
-                      U8 => [U8, U16, U32, U64, U128] => [],
-                      U16 => [U16, U32, U64, U128] => [],
-                      U32 => [U32, U64, U128] => [],
-                      U64 => [U64, U128] => [],
-                      U128 => [U128] => []),
-        _ => None,
-    }
-}
-
-fn lint_int_literal<'tcx>(
-    cx: &LateContext<'tcx>,
-    type_limits: &TypeLimits,
-    e: &'tcx hir::Expr<'tcx>,
-    lit: &hir::Lit,
-    t: ty::IntTy,
-    v: u128,
-) {
-    let int_type = t.normalize(cx.sess().target.pointer_width);
-    let (min, max) = int_ty_range(int_type);
-    let max = max as u128;
-    let negative = type_limits.negated_expr_id == Some(e.hir_id);
-
-    // Detect literal value out of range [min, max] inclusive
-    // avoiding use of -min to prevent overflow/panic
-    if (negative && v > max + 1) || (!negative && v > max) {
-        if let Some(repr_str) = get_bin_hex_repr(cx, lit) {
-            report_bin_hex_error(
-                cx,
-                e,
-                attr::IntType::SignedInt(ty::ast_int_ty(t)),
-                Integer::from_int_ty(cx, t).size(),
-                repr_str,
-                v,
-                negative,
-            );
-            return;
-        }
-
-        if lint_overflowing_range_endpoint(cx, lit, v, max, e, t.name_str()) {
-            // The overflowing literal lint was emitted by `lint_overflowing_range_endpoint`.
-            return;
-        }
-
-        let lit = cx
-            .sess()
-            .source_map()
-            .span_to_snippet(lit.span)
-            .expect("must get snippet from literal");
-        let help = get_type_suggestion(cx.typeck_results().node_type(e.hir_id), v, negative)
-            .map(|suggestion_ty| OverflowingIntHelp { suggestion_ty });
-
-        cx.emit_spanned_lint(
-            OVERFLOWING_LITERALS,
-            e.span,
-            OverflowingInt { ty: t.name_str(), lit, min, max, help },
-        );
-    }
-}
-
-fn lint_uint_literal<'tcx>(
-    cx: &LateContext<'tcx>,
-    e: &'tcx hir::Expr<'tcx>,
-    lit: &hir::Lit,
-    t: ty::UintTy,
-) {
-    let uint_type = t.normalize(cx.sess().target.pointer_width);
-    let (min, max) = uint_ty_range(uint_type);
-    let lit_val: u128 = match lit.node {
-        // _v is u8, within range by definition
-        ast::LitKind::Byte(_v) => return,
-        ast::LitKind::Int(v, _) => v,
-        _ => bug!(),
-    };
-    if lit_val < min || lit_val > max {
-        let parent_id = cx.tcx.hir().parent_id(e.hir_id);
-        if let Node::Expr(par_e) = cx.tcx.hir().get(parent_id) {
-            match par_e.kind {
-                hir::ExprKind::Cast(..) => {
-                    if let ty::Char = cx.typeck_results().expr_ty(par_e).kind() {
-                        cx.emit_spanned_lint(
-                            OVERFLOWING_LITERALS,
-                            par_e.span,
-                            OnlyCastu8ToChar { span: par_e.span, literal: lit_val },
-                        );
-                        return;
-                    }
-                }
-                _ => {}
-            }
-        }
-        if lint_overflowing_range_endpoint(cx, lit, lit_val, max, e, t.name_str()) {
-            // The overflowing literal lint was emitted by `lint_overflowing_range_endpoint`.
-            return;
-        }
-        if let Some(repr_str) = get_bin_hex_repr(cx, lit) {
-            report_bin_hex_error(
-                cx,
-                e,
-                attr::IntType::UnsignedInt(ty::ast_uint_ty(t)),
-                Integer::from_uint_ty(cx, t).size(),
-                repr_str,
-                lit_val,
-                false,
-            );
-            return;
-        }
-        cx.emit_spanned_lint(
-            OVERFLOWING_LITERALS,
-            e.span,
-            OverflowingUInt {
-                ty: t.name_str(),
-                lit: cx
-                    .sess()
-                    .source_map()
-                    .span_to_snippet(lit.span)
-                    .expect("must get snippet from literal"),
-                min,
-                max,
-            },
-        );
-    }
-}
-
-fn lint_literal<'tcx>(
-    cx: &LateContext<'tcx>,
-    type_limits: &TypeLimits,
-    e: &'tcx hir::Expr<'tcx>,
-    lit: &hir::Lit,
-) {
-    match *cx.typeck_results().node_type(e.hir_id).kind() {
-        ty::Int(t) => {
-            match lit.node {
-                ast::LitKind::Int(v, ast::LitIntType::Signed(_) | ast::LitIntType::Unsuffixed) => {
-                    lint_int_literal(cx, type_limits, e, lit, t, v)
-                }
-                _ => bug!(),
-            };
-        }
-        ty::Uint(t) => lint_uint_literal(cx, e, lit, t),
-        ty::Float(t) => {
-            let is_infinite = match lit.node {
-                ast::LitKind::Float(v, _) => match t {
-                    ty::FloatTy::F32 => v.as_str().parse().map(f32::is_infinite),
-                    ty::FloatTy::F64 => v.as_str().parse().map(f64::is_infinite),
-                },
-                _ => bug!(),
-            };
-            if is_infinite == Ok(true) {
-                cx.emit_spanned_lint(
-                    OVERFLOWING_LITERALS,
-                    e.span,
-                    OverflowingLiteral {
-                        ty: t.name_str(),
-                        lit: cx
-                            .sess()
-                            .source_map()
-                            .span_to_snippet(lit.span)
-                            .expect("must get snippet from literal"),
-                    },
-                );
-            }
-        }
-        _ => {}
+    pub(crate) fn new() -> TypeLimits {
+        TypeLimits { negated_expr_id: None, negated_expr_span: None }
     }
 }
 
@@ -560,9 +231,15 @@ fn lint_nan<'tcx>(
         let expr = expr.peel_blocks().peel_borrows();
         match expr.kind {
             ExprKind::Path(qpath) => {
-                let Some(def_id) = cx.typeck_results().qpath_res(&qpath, expr.hir_id).opt_def_id() else { return false; };
+                let Some(def_id) = cx.typeck_results().qpath_res(&qpath, expr.hir_id).opt_def_id()
+                else {
+                    return false;
+                };
 
-                matches!(cx.tcx.get_diagnostic_name(def_id), Some(sym::f32_nan | sym::f64_nan))
+                matches!(
+                    cx.tcx.get_diagnostic_name(def_id),
+                    Some(sym::f16_nan | sym::f32_nan | sym::f64_nan | sym::f128_nan)
+                )
             }
             _ => false,
         }
@@ -574,13 +251,13 @@ fn lint_nan<'tcx>(
         r: &hir::Expr<'_>,
         f: impl FnOnce(Span, Span) -> InvalidNanComparisonsSuggestion,
     ) -> InvalidNanComparisons {
-        let suggestion =
-            if let Some(l_span) = l.span.find_ancestor_inside(e.span) &&
-                let Some(r_span) = r.span.find_ancestor_inside(e.span) {
-                f(l_span, r_span)
-            } else {
-                InvalidNanComparisonsSuggestion::Spanless
-            };
+        let suggestion = if let Some(l_span) = l.span.find_ancestor_inside(e.span)
+            && let Some(r_span) = r.span.find_ancestor_inside(e.span)
+        {
+            f(l_span, r_span)
+        } else {
+            InvalidNanComparisonsSuggestion::Spanless
+        };
 
         InvalidNanComparisons::EqNe { suggestion }
     }
@@ -608,28 +285,305 @@ fn lint_nan<'tcx>(
         _ => return,
     };
 
-    cx.emit_spanned_lint(INVALID_NAN_COMPARISONS, e.span, lint);
+    cx.emit_span_lint(INVALID_NAN_COMPARISONS, e.span, lint);
+}
+
+#[derive(Debug, PartialEq, Copy, Clone)]
+enum ComparisonOp {
+    BinOp(hir::BinOpKind),
+    Other,
+}
+
+fn lint_wide_pointer<'tcx>(
+    cx: &LateContext<'tcx>,
+    e: &'tcx hir::Expr<'tcx>,
+    cmpop: ComparisonOp,
+    l: &'tcx hir::Expr<'tcx>,
+    r: &'tcx hir::Expr<'tcx>,
+) {
+    let ptr_unsized = |mut ty: Ty<'tcx>| -> Option<(
+        /* number of refs */ usize,
+        /* modifiers */ String,
+        /* is dyn */ bool,
+    )> {
+        let mut refs = 0;
+        // here we remove any "implicit" references and count the number
+        // of them to correctly suggest the right number of deref
+        while let ty::Ref(_, inner_ty, _) = ty.kind() {
+            ty = *inner_ty;
+            refs += 1;
+        }
+
+        // get the inner type of a pointer (or akin)
+        let mut modifiers = String::new();
+        ty = match ty.kind() {
+            ty::RawPtr(ty, _) => *ty,
+            ty::Adt(def, args) if cx.tcx.is_diagnostic_item(sym::NonNull, def.did()) => {
+                modifiers.push_str(".as_ptr()");
+                args.type_at(0)
+            }
+            _ => return None,
+        };
+
+        (!ty.is_sized(cx.tcx, cx.typing_env()))
+            .then(|| (refs, modifiers, matches!(ty.kind(), ty::Dynamic(_, _, ty::Dyn))))
+    };
+
+    // the left and right operands can have references, remove any explicit references
+    let l = l.peel_borrows();
+    let r = r.peel_borrows();
+
+    let Some(l_ty) = cx.typeck_results().expr_ty_opt(l) else {
+        return;
+    };
+    let Some(r_ty) = cx.typeck_results().expr_ty_opt(r) else {
+        return;
+    };
+
+    let Some((l_ty_refs, l_modifiers, l_inner_ty_is_dyn)) = ptr_unsized(l_ty) else {
+        return;
+    };
+    let Some((r_ty_refs, r_modifiers, r_inner_ty_is_dyn)) = ptr_unsized(r_ty) else {
+        return;
+    };
+
+    let (Some(l_span), Some(r_span)) =
+        (l.span.find_ancestor_inside(e.span), r.span.find_ancestor_inside(e.span))
+    else {
+        return cx.emit_span_lint(
+            AMBIGUOUS_WIDE_POINTER_COMPARISONS,
+            e.span,
+            AmbiguousWidePointerComparisons::Spanless,
+        );
+    };
+
+    let ne = if cmpop == ComparisonOp::BinOp(hir::BinOpKind::Ne) { "!" } else { "" };
+    let is_eq_ne = matches!(cmpop, ComparisonOp::BinOp(hir::BinOpKind::Eq | hir::BinOpKind::Ne));
+    let is_dyn_comparison = l_inner_ty_is_dyn && r_inner_ty_is_dyn;
+
+    let left = e.span.shrink_to_lo().until(l_span.shrink_to_lo());
+    let middle = l_span.shrink_to_hi().until(r_span.shrink_to_lo());
+    let right = r_span.shrink_to_hi().until(e.span.shrink_to_hi());
+
+    let deref_left = &*"*".repeat(l_ty_refs);
+    let deref_right = &*"*".repeat(r_ty_refs);
+
+    let l_modifiers = &*l_modifiers;
+    let r_modifiers = &*r_modifiers;
+
+    cx.emit_span_lint(
+        AMBIGUOUS_WIDE_POINTER_COMPARISONS,
+        e.span,
+        AmbiguousWidePointerComparisons::Spanful {
+            addr_metadata_suggestion: (is_eq_ne && !is_dyn_comparison).then(|| {
+                AmbiguousWidePointerComparisonsAddrMetadataSuggestion {
+                    ne,
+                    deref_left,
+                    deref_right,
+                    l_modifiers,
+                    r_modifiers,
+                    left,
+                    middle,
+                    right,
+                }
+            }),
+            addr_suggestion: if is_eq_ne {
+                AmbiguousWidePointerComparisonsAddrSuggestion::AddrEq {
+                    ne,
+                    deref_left,
+                    deref_right,
+                    l_modifiers,
+                    r_modifiers,
+                    left,
+                    middle,
+                    right,
+                }
+            } else {
+                AmbiguousWidePointerComparisonsAddrSuggestion::Cast {
+                    deref_left,
+                    deref_right,
+                    l_modifiers,
+                    r_modifiers,
+                    paren_left: if l_ty_refs != 0 { ")" } else { "" },
+                    paren_right: if r_ty_refs != 0 { ")" } else { "" },
+                    left_before: (l_ty_refs != 0).then_some(l_span.shrink_to_lo()),
+                    left_after: l_span.shrink_to_hi(),
+                    right_before: (r_ty_refs != 0).then_some(r_span.shrink_to_lo()),
+                    right_after: r_span.shrink_to_hi(),
+                }
+            },
+        },
+    );
+}
+
+fn lint_fn_pointer<'tcx>(
+    cx: &LateContext<'tcx>,
+    e: &'tcx hir::Expr<'tcx>,
+    cmpop: ComparisonOp,
+    l: &'tcx hir::Expr<'tcx>,
+    r: &'tcx hir::Expr<'tcx>,
+) {
+    let peel_refs = |mut ty: Ty<'tcx>| -> (Ty<'tcx>, usize) {
+        let mut refs = 0;
+
+        while let ty::Ref(_, inner_ty, _) = ty.kind() {
+            ty = *inner_ty;
+            refs += 1;
+        }
+
+        (ty, refs)
+    };
+
+    // Left and right operands can have borrows, remove them
+    let l = l.peel_borrows();
+    let r = r.peel_borrows();
+
+    let Some(l_ty) = cx.typeck_results().expr_ty_opt(l) else { return };
+    let Some(r_ty) = cx.typeck_results().expr_ty_opt(r) else { return };
+
+    // Remove any references as `==` will deref through them (and count the
+    // number of references removed, for latter).
+    let (l_ty, l_ty_refs) = peel_refs(l_ty);
+    let (r_ty, r_ty_refs) = peel_refs(r_ty);
+
+    if l_ty.is_fn() && r_ty.is_fn() {
+        // both operands are function pointers, fallthrough
+    } else if let ty::Adt(l_def, l_args) = l_ty.kind()
+        && let ty::Adt(r_def, r_args) = r_ty.kind()
+        && cx.tcx.is_lang_item(l_def.did(), LangItem::Option)
+        && cx.tcx.is_lang_item(r_def.did(), LangItem::Option)
+        && let Some(l_some_arg) = l_args.get(0)
+        && let Some(r_some_arg) = r_args.get(0)
+        && l_some_arg.expect_ty().is_fn()
+        && r_some_arg.expect_ty().is_fn()
+    {
+        // both operands are `Option<{function ptr}>`
+        return cx.emit_span_lint(
+            UNPREDICTABLE_FUNCTION_POINTER_COMPARISONS,
+            e.span,
+            UnpredictableFunctionPointerComparisons::Warn,
+        );
+    } else {
+        // types are not function pointers, nothing to do
+        return;
+    }
+
+    // Let's try to suggest `ptr::fn_addr_eq` if/when possible.
+
+    let is_eq_ne = matches!(cmpop, ComparisonOp::BinOp(hir::BinOpKind::Eq | hir::BinOpKind::Ne));
+
+    if !is_eq_ne {
+        // Neither `==` nor `!=`, we can't suggest `ptr::fn_addr_eq`, just show the warning.
+        return cx.emit_span_lint(
+            UNPREDICTABLE_FUNCTION_POINTER_COMPARISONS,
+            e.span,
+            UnpredictableFunctionPointerComparisons::Warn,
+        );
+    }
+
+    let (Some(l_span), Some(r_span)) =
+        (l.span.find_ancestor_inside(e.span), r.span.find_ancestor_inside(e.span))
+    else {
+        // No appropriate spans for the left and right operands, just show the warning.
+        return cx.emit_span_lint(
+            UNPREDICTABLE_FUNCTION_POINTER_COMPARISONS,
+            e.span,
+            UnpredictableFunctionPointerComparisons::Warn,
+        );
+    };
+
+    let ne = if cmpop == ComparisonOp::BinOp(hir::BinOpKind::Ne) { "!" } else { "" };
+
+    // `ptr::fn_addr_eq` only works with raw pointer, deref any references.
+    let deref_left = &*"*".repeat(l_ty_refs);
+    let deref_right = &*"*".repeat(r_ty_refs);
+
+    let left = e.span.shrink_to_lo().until(l_span.shrink_to_lo());
+    let middle = l_span.shrink_to_hi().until(r_span.shrink_to_lo());
+    let right = r_span.shrink_to_hi().until(e.span.shrink_to_hi());
+
+    let sugg =
+        // We only check for a right cast as `FnDef` == `FnPtr` is not possible,
+        // only `FnPtr == FnDef` is possible.
+        if !r_ty.is_fn_ptr() {
+            let fn_sig = r_ty.fn_sig(cx.tcx);
+
+            UnpredictableFunctionPointerComparisonsSuggestion::FnAddrEqWithCast {
+                ne,
+                fn_sig,
+                deref_left,
+                deref_right,
+                left,
+                middle,
+                right,
+            }
+        } else {
+            UnpredictableFunctionPointerComparisonsSuggestion::FnAddrEq {
+                ne,
+                deref_left,
+                deref_right,
+                left,
+                middle,
+                right,
+            }
+        };
+
+    cx.emit_span_lint(
+        UNPREDICTABLE_FUNCTION_POINTER_COMPARISONS,
+        e.span,
+        UnpredictableFunctionPointerComparisons::Suggestion { sugg },
+    );
 }
 
 impl<'tcx> LateLintPass<'tcx> for TypeLimits {
+    fn check_lit(
+        &mut self,
+        cx: &LateContext<'tcx>,
+        hir_id: HirId,
+        lit: &'tcx hir::Lit,
+        negated: bool,
+    ) {
+        lint_literal(cx, self, hir_id, lit.span, lit, negated)
+    }
+
     fn check_expr(&mut self, cx: &LateContext<'tcx>, e: &'tcx hir::Expr<'tcx>) {
         match e.kind {
-            hir::ExprKind::Unary(hir::UnOp::Neg, ref expr) => {
-                // propagate negation, if the negation itself isn't negated
+            hir::ExprKind::Unary(hir::UnOp::Neg, expr) => {
+                // Propagate negation, if the negation itself isn't negated
                 if self.negated_expr_id != Some(e.hir_id) {
                     self.negated_expr_id = Some(expr.hir_id);
+                    self.negated_expr_span = Some(e.span);
                 }
             }
             hir::ExprKind::Binary(binop, ref l, ref r) => {
                 if is_comparison(binop) {
-                    if !check_limits(cx, binop, &l, &r) {
-                        cx.emit_spanned_lint(UNUSED_COMPARISONS, e.span, UnusedComparisons);
+                    if !check_limits(cx, binop, l, r) {
+                        cx.emit_span_lint(UNUSED_COMPARISONS, e.span, UnusedComparisons);
                     } else {
                         lint_nan(cx, e, binop, l, r);
+                        let cmpop = ComparisonOp::BinOp(binop.node);
+                        lint_wide_pointer(cx, e, cmpop, l, r);
+                        lint_fn_pointer(cx, e, cmpop, l, r);
                     }
                 }
             }
-            hir::ExprKind::Lit(ref lit) => lint_literal(cx, self, e, lit),
+            hir::ExprKind::Call(path, [l, r])
+                if let ExprKind::Path(ref qpath) = path.kind
+                    && let Some(def_id) = cx.qpath_res(qpath, path.hir_id).opt_def_id()
+                    && let Some(diag_item) = cx.tcx.get_diagnostic_name(def_id)
+                    && let Some(cmpop) = diag_item_cmpop(diag_item) =>
+            {
+                lint_wide_pointer(cx, e, cmpop, l, r);
+                lint_fn_pointer(cx, e, cmpop, l, r);
+            }
+            hir::ExprKind::MethodCall(_, l, [r], _)
+                if let Some(def_id) = cx.typeck_results().type_dependent_def_id(e.hir_id)
+                    && let Some(diag_item) = cx.tcx.get_diagnostic_name(def_id)
+                    && let Some(cmpop) = diag_item_cmpop(diag_item) =>
+            {
+                lint_wide_pointer(cx, e, cmpop, l, r);
+                lint_fn_pointer(cx, e, cmpop, l, r);
+            }
             _ => {}
         };
 
@@ -645,16 +599,13 @@ impl<'tcx> LateLintPass<'tcx> for TypeLimits {
         }
 
         fn rev_binop(binop: hir::BinOp) -> hir::BinOp {
-            source_map::respan(
-                binop.span,
-                match binop.node {
-                    hir::BinOpKind::Lt => hir::BinOpKind::Gt,
-                    hir::BinOpKind::Le => hir::BinOpKind::Ge,
-                    hir::BinOpKind::Gt => hir::BinOpKind::Lt,
-                    hir::BinOpKind::Ge => hir::BinOpKind::Le,
-                    _ => return binop,
-                },
-            )
+            source_map::respan(binop.span, match binop.node {
+                hir::BinOpKind::Lt => hir::BinOpKind::Gt,
+                hir::BinOpKind::Le => hir::BinOpKind::Ge,
+                hir::BinOpKind::Gt => hir::BinOpKind::Lt,
+                hir::BinOpKind::Ge => hir::BinOpKind::Le,
+                _ => return binop,
+            })
         }
 
         fn check_limits(
@@ -675,11 +626,11 @@ impl<'tcx> LateLintPass<'tcx> for TypeLimits {
                 ty::Int(int_ty) => {
                     let (min, max) = int_ty_range(int_ty);
                     let lit_val: i128 = match lit.kind {
-                        hir::ExprKind::Lit(ref li) => match li.node {
+                        hir::ExprKind::Lit(li) => match li.node {
                             ast::LitKind::Int(
                                 v,
                                 ast::LitIntType::Signed(_) | ast::LitIntType::Unsuffixed,
-                            ) => v as i128,
+                            ) => v.get() as i128,
                             _ => return true,
                         },
                         _ => bug!(),
@@ -689,8 +640,8 @@ impl<'tcx> LateLintPass<'tcx> for TypeLimits {
                 ty::Uint(uint_ty) => {
                     let (min, max): (u128, u128) = uint_ty_range(uint_ty);
                     let lit_val: u128 = match lit.kind {
-                        hir::ExprKind::Lit(ref li) => match li.node {
-                            ast::LitKind::Int(v, _) => v,
+                        hir::ExprKind::Lit(li) => match li.node {
+                            ast::LitKind::Int(v, _) => v.get(),
                             _ => return true,
                         },
                         _ => bug!(),
@@ -711,6 +662,22 @@ impl<'tcx> LateLintPass<'tcx> for TypeLimits {
                     | hir::BinOpKind::Ge
                     | hir::BinOpKind::Gt
             )
+        }
+
+        fn diag_item_cmpop(diag_item: Symbol) -> Option<ComparisonOp> {
+            Some(match diag_item {
+                sym::cmp_ord_max => ComparisonOp::Other,
+                sym::cmp_ord_min => ComparisonOp::Other,
+                sym::ord_cmp_method => ComparisonOp::Other,
+                sym::cmp_partialeq_eq => ComparisonOp::BinOp(hir::BinOpKind::Eq),
+                sym::cmp_partialeq_ne => ComparisonOp::BinOp(hir::BinOpKind::Ne),
+                sym::cmp_partialord_cmp => ComparisonOp::Other,
+                sym::cmp_partialord_ge => ComparisonOp::BinOp(hir::BinOpKind::Ge),
+                sym::cmp_partialord_gt => ComparisonOp::BinOp(hir::BinOpKind::Gt),
+                sym::cmp_partialord_le => ComparisonOp::BinOp(hir::BinOpKind::Le),
+                sym::cmp_partialord_lt => ComparisonOp::BinOp(hir::BinOpKind::Lt),
+                _ => return None,
+            })
         }
     }
 }
@@ -771,7 +738,60 @@ declare_lint! {
     "proper use of libc types in foreign item definitions"
 }
 
-declare_lint_pass!(ImproperCTypesDefinitions => [IMPROPER_CTYPES_DEFINITIONS]);
+declare_lint! {
+    /// The `uses_power_alignment` lint detects specific `repr(C)`
+    /// aggregates on AIX.
+    /// In its platform C ABI, AIX uses the "power" (as in PowerPC) alignment
+    /// rule (detailed in https://www.ibm.com/docs/en/xl-c-and-cpp-aix/16.1?topic=data-using-alignment-modes#alignment),
+    /// which can also be set for XLC by `#pragma align(power)` or
+    /// `-qalign=power`. Aggregates with a floating-point type as the
+    /// recursively first field (as in "at offset 0") modify the layout of
+    /// *subsequent* fields of the associated structs to use an alignment value
+    /// where the floating-point type is aligned on a 4-byte boundary.
+    ///
+    /// The power alignment rule for structs needed for C compatibility is
+    /// unimplementable within `repr(C)` in the compiler without building in
+    /// handling of references to packed fields and infectious nested layouts,
+    /// so a warning is produced in these situations.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,ignore (fails on non-powerpc64-ibm-aix)
+    /// #[repr(C)]
+    /// pub struct Floats {
+    ///     a: f64,
+    ///     b: u8,
+    ///     c: f64,
+    /// }
+    /// ```
+    ///
+    /// This will produce:
+    ///
+    /// ```text
+    /// warning: repr(C) does not follow the power alignment rule. This may affect platform C ABI compatibility for this type
+    ///  --> <source>:5:3
+    ///   |
+    /// 5 |   c: f64,
+    ///   |   ^^^^^^
+    ///   |
+    ///   = note: `#[warn(uses_power_alignment)]` on by default
+    /// ```
+    ///
+    /// ### Explanation
+    ///
+    /// The power alignment rule specifies that the above struct has the
+    /// following alignment:
+    ///  - offset_of!(Floats, a) == 0
+    ///  - offset_of!(Floats, b) == 8
+    ///  - offset_of!(Floats, c) == 12
+    /// However, rust currently aligns `c` at offset_of!(Floats, c) == 16.
+    /// Thus, a warning should be produced for the above struct in this case.
+    USES_POWER_ALIGNMENT,
+    Warn,
+    "Structs do not follow the power alignment rule under repr(C)"
+}
+
+declare_lint_pass!(ImproperCTypesDefinitions => [IMPROPER_CTYPES_DEFINITIONS, USES_POWER_ALIGNMENT]);
 
 #[derive(Clone, Copy)]
 pub(crate) enum CItemKind {
@@ -784,10 +804,18 @@ struct ImproperCTypesVisitor<'a, 'tcx> {
     mode: CItemKind,
 }
 
+/// Accumulator for recursive ffi type checking
+struct CTypesVisitorState<'tcx> {
+    cache: FxHashSet<Ty<'tcx>>,
+    /// The original type being checked, before we recursed
+    /// to any other types it contains.
+    base_ty: Ty<'tcx>,
+}
+
 enum FfiResult<'tcx> {
     FfiSafe,
     FfiPhantom(Ty<'tcx>),
-    FfiUnsafe { ty: Ty<'tcx>, reason: DiagnosticMessage, help: Option<DiagnosticMessage> },
+    FfiUnsafe { ty: Ty<'tcx>, reason: DiagMessage, help: Option<DiagMessage> },
 }
 
 pub(crate) fn nonnull_optimization_guaranteed<'tcx>(
@@ -797,28 +825,35 @@ pub(crate) fn nonnull_optimization_guaranteed<'tcx>(
     tcx.has_attr(def.did(), sym::rustc_nonnull_optimization_guaranteed)
 }
 
-/// `repr(transparent)` structs can have a single non-ZST field, this function returns that
+/// `repr(transparent)` structs can have a single non-1-ZST field, this function returns that
 /// field.
-pub fn transparent_newtype_field<'a, 'tcx>(
+pub(crate) fn transparent_newtype_field<'a, 'tcx>(
     tcx: TyCtxt<'tcx>,
     variant: &'a ty::VariantDef,
 ) -> Option<&'a ty::FieldDef> {
-    let param_env = tcx.param_env(variant.def_id);
+    let typing_env = ty::TypingEnv::non_body_analysis(tcx, variant.def_id);
     variant.fields.iter().find(|field| {
-        let field_ty = tcx.type_of(field.did).subst_identity();
-        let is_zst = tcx.layout_of(param_env.and(field_ty)).is_ok_and(|layout| layout.is_zst());
-        !is_zst
+        let field_ty = tcx.type_of(field.did).instantiate_identity();
+        let is_1zst =
+            tcx.layout_of(typing_env.as_query_input(field_ty)).is_ok_and(|layout| layout.is_1zst());
+        !is_1zst
     })
 }
 
 /// Is type known to be non-null?
-fn ty_is_known_nonnull<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>, mode: CItemKind) -> bool {
-    let tcx = cx.tcx;
+fn ty_is_known_nonnull<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    typing_env: ty::TypingEnv<'tcx>,
+    ty: Ty<'tcx>,
+    mode: CItemKind,
+) -> bool {
+    let ty = tcx.try_normalize_erasing_regions(typing_env, ty).unwrap_or(ty);
+
     match ty.kind() {
-        ty::FnPtr(_) => true,
+        ty::FnPtr(..) => true,
         ty::Ref(..) => true,
         ty::Adt(def, _) if def.is_box() && matches!(mode, CItemKind::Definition) => true,
-        ty::Adt(def, substs) if def.repr().transparent() && !def.is_union() => {
+        ty::Adt(def, args) if def.repr().transparent() && !def.is_union() => {
             let marked_non_null = nonnull_optimization_guaranteed(tcx, *def);
 
             if marked_non_null {
@@ -832,8 +867,8 @@ fn ty_is_known_nonnull<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>, mode: CItemKi
 
             def.variants()
                 .iter()
-                .filter_map(|variant| transparent_newtype_field(cx.tcx, variant))
-                .any(|field| ty_is_known_nonnull(cx, field.ty(tcx, substs), mode))
+                .filter_map(|variant| transparent_newtype_field(tcx, variant))
+                .any(|field| ty_is_known_nonnull(tcx, typing_env, field.ty(tcx, args), mode))
         }
         _ => false,
     }
@@ -841,15 +876,18 @@ fn ty_is_known_nonnull<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>, mode: CItemKi
 
 /// Given a non-null scalar (or transparent) type `ty`, return the nullable version of that type.
 /// If the type passed in was not scalar, returns None.
-fn get_nullable_type<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> Option<Ty<'tcx>> {
-    let tcx = cx.tcx;
+fn get_nullable_type<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    typing_env: ty::TypingEnv<'tcx>,
+    ty: Ty<'tcx>,
+) -> Option<Ty<'tcx>> {
+    let ty = tcx.try_normalize_erasing_regions(typing_env, ty).unwrap_or(ty);
+
     Some(match *ty.kind() {
-        ty::Adt(field_def, field_substs) => {
+        ty::Adt(field_def, field_args) => {
             let inner_field_ty = {
-                let mut first_non_zst_ty = field_def
-                    .variants()
-                    .iter()
-                    .filter_map(|v| transparent_newtype_field(cx.tcx, v));
+                let mut first_non_zst_ty =
+                    field_def.variants().iter().filter_map(|v| transparent_newtype_field(tcx, v));
                 debug_assert_eq!(
                     first_non_zst_ty.clone().count(),
                     1,
@@ -858,24 +896,21 @@ fn get_nullable_type<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> Option<Ty<'t
                 first_non_zst_ty
                     .next_back()
                     .expect("No non-zst fields in transparent type.")
-                    .ty(tcx, field_substs)
+                    .ty(tcx, field_args)
             };
-            return get_nullable_type(cx, inner_field_ty);
+            return get_nullable_type(tcx, typing_env, inner_field_ty);
         }
-        ty::Int(ty) => tcx.mk_mach_int(ty),
-        ty::Uint(ty) => tcx.mk_mach_uint(ty),
-        ty::RawPtr(ty_mut) => tcx.mk_ptr(ty_mut),
+        ty::Int(ty) => Ty::new_int(tcx, ty),
+        ty::Uint(ty) => Ty::new_uint(tcx, ty),
+        ty::RawPtr(ty, mutbl) => Ty::new_ptr(tcx, ty, mutbl),
         // As these types are always non-null, the nullable equivalent of
-        // Option<T> of these types are their raw pointer counterparts.
-        ty::Ref(_region, ty, mutbl) => tcx.mk_ptr(ty::TypeAndMut { ty, mutbl }),
-        ty::FnPtr(..) => {
-            // There is no nullable equivalent for Rust's function pointers -- you
-            // must use an Option<fn(..) -> _> to represent it.
-            ty
-        }
-
-        // We should only ever reach this case if ty_is_known_nonnull is extended
-        // to other types.
+        // `Option<T>` of these types are their raw pointer counterparts.
+        ty::Ref(_region, ty, mutbl) => Ty::new_ptr(tcx, ty, mutbl),
+        // There is no nullable equivalent for Rust's function pointers,
+        // you must use an `Option<fn(..) -> _>` to represent it.
+        ty::FnPtr(..) => ty,
+        // We should only ever reach this case if `ty_is_known_nonnull` is
+        // extended to other types.
         ref unhandled => {
             debug!(
                 "get_nullable_type: Unhandled scalar kind: {:?} while checking {:?}",
@@ -886,49 +921,92 @@ fn get_nullable_type<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> Option<Ty<'t
     })
 }
 
+/// A type is niche-optimization candidate iff:
+/// - Is a zero-sized type with alignment 1 (a “1-ZST”).
+/// - Has no fields.
+/// - Does not have the `#[non_exhaustive]` attribute.
+fn is_niche_optimization_candidate<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    typing_env: ty::TypingEnv<'tcx>,
+    ty: Ty<'tcx>,
+) -> bool {
+    if tcx.layout_of(typing_env.as_query_input(ty)).is_ok_and(|layout| !layout.is_1zst()) {
+        return false;
+    }
+
+    match ty.kind() {
+        ty::Adt(ty_def, _) => {
+            let non_exhaustive = ty_def.is_variant_list_non_exhaustive();
+            let empty = (ty_def.is_struct() && ty_def.all_fields().next().is_none())
+                || (ty_def.is_enum() && ty_def.variants().is_empty());
+
+            !non_exhaustive && empty
+        }
+        ty::Tuple(tys) => tys.is_empty(),
+        _ => false,
+    }
+}
+
 /// Check if this enum can be safely exported based on the "nullable pointer optimization". If it
 /// can, return the type that `ty` can be safely converted to, otherwise return `None`.
-/// Currently restricted to function pointers, boxes, references, `core::num::NonZero*`,
+/// Currently restricted to function pointers, boxes, references, `core::num::NonZero`,
 /// `core::ptr::NonNull`, and `#[repr(transparent)]` newtypes.
-/// FIXME: This duplicates code in codegen.
 pub(crate) fn repr_nullable_ptr<'tcx>(
-    cx: &LateContext<'tcx>,
+    tcx: TyCtxt<'tcx>,
+    typing_env: ty::TypingEnv<'tcx>,
     ty: Ty<'tcx>,
     ckind: CItemKind,
 ) -> Option<Ty<'tcx>> {
-    debug!("is_repr_nullable_ptr(cx, ty = {:?})", ty);
-    if let ty::Adt(ty_def, substs) = ty.kind() {
+    debug!("is_repr_nullable_ptr(tcx, ty = {:?})", ty);
+    if let ty::Adt(ty_def, args) = ty.kind() {
         let field_ty = match &ty_def.variants().raw[..] {
             [var_one, var_two] => match (&var_one.fields.raw[..], &var_two.fields.raw[..]) {
-                ([], [field]) | ([field], []) => field.ty(cx.tcx, substs),
+                ([], [field]) | ([field], []) => field.ty(tcx, args),
+                ([field1], [field2]) => {
+                    let ty1 = field1.ty(tcx, args);
+                    let ty2 = field2.ty(tcx, args);
+
+                    if is_niche_optimization_candidate(tcx, typing_env, ty1) {
+                        ty2
+                    } else if is_niche_optimization_candidate(tcx, typing_env, ty2) {
+                        ty1
+                    } else {
+                        return None;
+                    }
+                }
                 _ => return None,
             },
             _ => return None,
         };
 
-        if !ty_is_known_nonnull(cx, field_ty, ckind) {
+        if !ty_is_known_nonnull(tcx, typing_env, field_ty, ckind) {
             return None;
         }
 
         // At this point, the field's type is known to be nonnull and the parent enum is Option-like.
         // If the computed size for the field and the enum are different, the nonnull optimization isn't
         // being applied (and we've got a problem somewhere).
-        let compute_size_skeleton = |t| SizeSkeleton::compute(t, cx.tcx, cx.param_env).unwrap();
-        if !compute_size_skeleton(ty).same_size(compute_size_skeleton(field_ty)) {
+        let compute_size_skeleton = |t| SizeSkeleton::compute(t, tcx, typing_env).ok();
+        if !compute_size_skeleton(ty)?.same_size(compute_size_skeleton(field_ty)?) {
             bug!("improper_ctypes: Option nonnull optimization not applied?");
         }
 
         // Return the nullable type this Option-like enum can be safely represented with.
-        let field_ty_abi = &cx.layout_of(field_ty).unwrap().abi;
-        if let Abi::Scalar(field_ty_scalar) = field_ty_abi {
-            match field_ty_scalar.valid_range(cx) {
+        let field_ty_layout = tcx.layout_of(typing_env.as_query_input(field_ty));
+        if field_ty_layout.is_err() && !field_ty.has_non_region_param() {
+            bug!("should be able to compute the layout of non-polymorphic type");
+        }
+
+        let field_ty_abi = &field_ty_layout.ok()?.backend_repr;
+        if let BackendRepr::Scalar(field_ty_scalar) = field_ty_abi {
+            match field_ty_scalar.valid_range(&tcx) {
                 WrappingRange { start: 0, end }
-                    if end == field_ty_scalar.size(&cx.tcx).unsigned_int_max() - 1 =>
+                    if end == field_ty_scalar.size(&tcx).unsigned_int_max() - 1 =>
                 {
-                    return Some(get_nullable_type(cx, field_ty).unwrap());
+                    return Some(get_nullable_type(tcx, typing_env, field_ty).unwrap());
                 }
                 WrappingRange { start: 1, .. } => {
-                    return Some(get_nullable_type(cx, field_ty).unwrap());
+                    return Some(get_nullable_type(tcx, typing_env, field_ty).unwrap());
                 }
                 WrappingRange { start, end } => {
                     unreachable!("Unhandled start and end range: ({}, {})", start, end)
@@ -958,68 +1036,75 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
     /// Checks if the given field's type is "ffi-safe".
     fn check_field_type_for_ffi(
         &self,
-        cache: &mut FxHashSet<Ty<'tcx>>,
+        acc: &mut CTypesVisitorState<'tcx>,
         field: &ty::FieldDef,
-        substs: SubstsRef<'tcx>,
+        args: GenericArgsRef<'tcx>,
     ) -> FfiResult<'tcx> {
-        let field_ty = field.ty(self.cx.tcx, substs);
-        if field_ty.has_opaque_types() {
-            self.check_type_for_ffi(cache, field_ty)
-        } else {
-            let field_ty = self.cx.tcx.normalize_erasing_regions(self.cx.param_env, field_ty);
-            self.check_type_for_ffi(cache, field_ty)
-        }
+        let field_ty = field.ty(self.cx.tcx, args);
+        let field_ty = self
+            .cx
+            .tcx
+            .try_normalize_erasing_regions(self.cx.typing_env(), field_ty)
+            .unwrap_or(field_ty);
+        self.check_type_for_ffi(acc, field_ty)
     }
 
     /// Checks if the given `VariantDef`'s field types are "ffi-safe".
     fn check_variant_for_ffi(
         &self,
-        cache: &mut FxHashSet<Ty<'tcx>>,
+        acc: &mut CTypesVisitorState<'tcx>,
         ty: Ty<'tcx>,
         def: ty::AdtDef<'tcx>,
         variant: &ty::VariantDef,
-        substs: SubstsRef<'tcx>,
+        args: GenericArgsRef<'tcx>,
     ) -> FfiResult<'tcx> {
         use FfiResult::*;
-
-        let transparent_safety = def.repr().transparent().then(|| {
-            // Can assume that at most one field is not a ZST, so only check
-            // that field's type for FFI-safety.
+        let transparent_with_all_zst_fields = if def.repr().transparent() {
             if let Some(field) = transparent_newtype_field(self.cx.tcx, variant) {
-                return self.check_field_type_for_ffi(cache, field, substs);
+                // Transparent newtypes have at most one non-ZST field which needs to be checked..
+                match self.check_field_type_for_ffi(acc, field, args) {
+                    FfiUnsafe { ty, .. } if ty.is_unit() => (),
+                    r => return r,
+                }
+
+                false
             } else {
-                // All fields are ZSTs; this means that the type should behave
-                // like (), which is FFI-unsafe... except if all fields are PhantomData,
-                // which is tested for below
-                FfiUnsafe { ty, reason: fluent::lint_improper_ctypes_struct_zst, help: None }
+                // ..or have only ZST fields, which is FFI-unsafe (unless those fields are all
+                // `PhantomData`).
+                true
             }
-        });
-        // We can't completely trust repr(C) markings; make sure the fields are
-        // actually safe.
+        } else {
+            false
+        };
+
+        // We can't completely trust `repr(C)` markings, so make sure the fields are actually safe.
         let mut all_phantom = !variant.fields.is_empty();
         for field in &variant.fields {
-            match self.check_field_type_for_ffi(cache, &field, substs) {
-                FfiSafe => {
-                    all_phantom = false;
-                }
-                FfiPhantom(..) if !def.repr().transparent() && def.is_enum() => {
-                    return FfiUnsafe {
-                        ty,
-                        reason: fluent::lint_improper_ctypes_enum_phantomdata,
-                        help: None,
-                    };
-                }
-                FfiPhantom(..) => {}
-                r => return transparent_safety.unwrap_or(r),
+            all_phantom &= match self.check_field_type_for_ffi(acc, field, args) {
+                FfiSafe => false,
+                // `()` fields are FFI-safe!
+                FfiUnsafe { ty, .. } if ty.is_unit() => false,
+                FfiPhantom(..) => true,
+                r @ FfiUnsafe { .. } => return r,
             }
         }
 
-        if all_phantom { FfiPhantom(ty) } else { transparent_safety.unwrap_or(FfiSafe) }
+        if all_phantom {
+            FfiPhantom(ty)
+        } else if transparent_with_all_zst_fields {
+            FfiUnsafe { ty, reason: fluent::lint_improper_ctypes_struct_zst, help: None }
+        } else {
+            FfiSafe
+        }
     }
 
     /// Checks if the given type is "ffi-safe" (has a stable, well-defined
     /// representation which can be exported to C code).
-    fn check_type_for_ffi(&self, cache: &mut FxHashSet<Ty<'tcx>>, ty: Ty<'tcx>) -> FfiResult<'tcx> {
+    fn check_type_for_ffi(
+        &self,
+        acc: &mut CTypesVisitorState<'tcx>,
+        ty: Ty<'tcx>,
+    ) -> FfiResult<'tcx> {
         use FfiResult::*;
 
         let tcx = self.cx.tcx;
@@ -1028,14 +1113,16 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
         // `struct S(*mut S);`.
         // FIXME: A recursion limit is necessary as well, for irregular
         // recursive types.
-        if !cache.insert(ty) {
+        if !acc.cache.insert(ty) {
             return FfiSafe;
         }
 
         match *ty.kind() {
-            ty::Adt(def, substs) => {
-                if def.is_box() && matches!(self.mode, CItemKind::Definition) {
-                    if ty.boxed_ty().is_sized(tcx, self.cx.param_env) {
+            ty::Adt(def, args) => {
+                if let Some(boxed) = ty.boxed_ty()
+                    && matches!(self.mode, CItemKind::Definition)
+                {
+                    if boxed.is_sized(tcx, self.cx.typing_env()) {
                         return FfiSafe;
                     } else {
                         return FfiUnsafe {
@@ -1050,6 +1137,17 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
                 }
                 match def.adt_kind() {
                     AdtKind::Struct | AdtKind::Union => {
+                        if let Some(sym::cstring_type | sym::cstr_type) =
+                            tcx.get_diagnostic_name(def.did())
+                            && !acc.base_ty.is_mutable_ptr()
+                        {
+                            return FfiUnsafe {
+                                ty,
+                                reason: fluent::lint_improper_ctypes_cstr_reason,
+                                help: Some(fluent::lint_improper_ctypes_cstr_help),
+                            };
+                        }
+
                         if !def.repr().c() && !def.repr().transparent() {
                             return FfiUnsafe {
                                 ty,
@@ -1096,51 +1194,48 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
                             };
                         }
 
-                        self.check_variant_for_ffi(cache, ty, def, def.non_enum_variant(), substs)
+                        self.check_variant_for_ffi(acc, ty, def, def.non_enum_variant(), args)
                     }
                     AdtKind::Enum => {
                         if def.variants().is_empty() {
                             // Empty enums are okay... although sort of useless.
                             return FfiSafe;
                         }
-
                         // Check for a repr() attribute to specify the size of the
                         // discriminant.
                         if !def.repr().c() && !def.repr().transparent() && def.repr().int.is_none()
                         {
-                            // Special-case types like `Option<extern fn()>`.
-                            if repr_nullable_ptr(self.cx, ty, self.mode).is_none() {
-                                return FfiUnsafe {
-                                    ty,
-                                    reason: fluent::lint_improper_ctypes_enum_repr_reason,
-                                    help: Some(fluent::lint_improper_ctypes_enum_repr_help),
-                                };
+                            // Special-case types like `Option<extern fn()>` and `Result<extern fn(), ()>`
+                            if let Some(ty) =
+                                repr_nullable_ptr(self.cx.tcx, self.cx.typing_env(), ty, self.mode)
+                            {
+                                return self.check_type_for_ffi(acc, ty);
                             }
-                        }
 
-                        if def.is_variant_list_non_exhaustive() && !def.did().is_local() {
                             return FfiUnsafe {
                                 ty,
-                                reason: fluent::lint_improper_ctypes_non_exhaustive,
-                                help: None,
+                                reason: fluent::lint_improper_ctypes_enum_repr_reason,
+                                help: Some(fluent::lint_improper_ctypes_enum_repr_help),
                             };
                         }
 
-                        // Check the contained variants.
-                        for variant in def.variants() {
-                            let is_non_exhaustive = variant.is_field_list_non_exhaustive();
-                            if is_non_exhaustive && !variant.def_id.is_local() {
-                                return FfiUnsafe {
-                                    ty,
-                                    reason: fluent::lint_improper_ctypes_non_exhaustive_variant,
-                                    help: None,
-                                };
-                            }
+                        use improper_ctypes::{
+                            check_non_exhaustive_variant, non_local_and_non_exhaustive,
+                        };
 
-                            match self.check_variant_for_ffi(cache, ty, def, variant, substs) {
-                                FfiSafe => (),
-                                r => return r,
+                        let non_local_def = non_local_and_non_exhaustive(def);
+                        // Check the contained variants.
+                        let ret = def.variants().iter().try_for_each(|variant| {
+                            check_non_exhaustive_variant(non_local_def, variant)
+                                .map_break(|reason| FfiUnsafe { ty, reason, help: None })?;
+
+                            match self.check_variant_for_ffi(acc, ty, def, variant, args) {
+                                FfiSafe => ControlFlow::Continue(()),
+                                r => ControlFlow::Break(r),
                             }
+                        });
+                        if let ControlFlow::Break(result) = ret {
+                            return result;
                         }
 
                         FfiSafe
@@ -1152,6 +1247,12 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
                 ty,
                 reason: fluent::lint_improper_ctypes_char_reason,
                 help: Some(fluent::lint_improper_ctypes_char_help),
+            },
+
+            ty::Pat(..) => FfiUnsafe {
+                ty,
+                reason: fluent::lint_improper_ctypes_pat_reason,
+                help: Some(fluent::lint_improper_ctypes_pat_help),
             },
 
             ty::Int(ty::IntTy::I128) | ty::Uint(ty::UintTy::U128) => {
@@ -1183,16 +1284,16 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
                 help: Some(fluent::lint_improper_ctypes_tuple_help),
             },
 
-            ty::RawPtr(ty::TypeAndMut { ty, .. }) | ty::Ref(_, ty, _)
+            ty::RawPtr(ty, _) | ty::Ref(_, ty, _)
                 if {
                     matches!(self.mode, CItemKind::Definition)
-                        && ty.is_sized(self.cx.tcx, self.cx.param_env)
+                        && ty.is_sized(self.cx.tcx, self.cx.typing_env())
                 } =>
             {
                 FfiSafe
             }
 
-            ty::RawPtr(ty::TypeAndMut { ty, .. })
+            ty::RawPtr(ty, _)
                 if match ty.kind() {
                     ty::Tuple(tuple) => tuple.is_empty(),
                     _ => false,
@@ -1201,13 +1302,12 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
                 FfiSafe
             }
 
-            ty::RawPtr(ty::TypeAndMut { ty, .. }) | ty::Ref(_, ty, _) => {
-                self.check_type_for_ffi(cache, ty)
-            }
+            ty::RawPtr(ty, _) | ty::Ref(_, ty, _) => self.check_type_for_ffi(acc, ty),
 
-            ty::Array(inner_ty, _) => self.check_type_for_ffi(cache, inner_ty),
+            ty::Array(inner_ty, _) => self.check_type_for_ffi(acc, inner_ty),
 
-            ty::FnPtr(sig) => {
+            ty::FnPtr(sig_tys, hdr) => {
+                let sig = sig_tys.with(hdr);
                 if self.is_internal_abi(sig.abi()) {
                     return FfiUnsafe {
                         ty,
@@ -1216,26 +1316,20 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
                     };
                 }
 
-                let sig = tcx.erase_late_bound_regions(sig);
-                if !sig.output().is_unit() {
-                    let r = self.check_type_for_ffi(cache, sig.output());
-                    match r {
-                        FfiSafe => {}
-                        _ => {
-                            return r;
-                        }
-                    }
-                }
+                let sig = tcx.instantiate_bound_regions_with_erased(sig);
                 for arg in sig.inputs() {
-                    let r = self.check_type_for_ffi(cache, *arg);
-                    match r {
+                    match self.check_type_for_ffi(acc, *arg) {
                         FfiSafe => {}
-                        _ => {
-                            return r;
-                        }
+                        r => return r,
                     }
                 }
-                FfiSafe
+
+                let ret_ty = sig.output();
+                if ret_ty.is_unit() {
+                    return FfiSafe;
+                }
+
+                self.check_type_for_ffi(acc, ret_ty)
             }
 
             ty::Foreign(..) => FfiSafe,
@@ -1254,15 +1348,17 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
                 FfiSafe
             }
 
+            ty::UnsafeBinder(_) => todo!("FIXME(unsafe_binder)"),
+
             ty::Param(..)
             | ty::Alias(ty::Projection | ty::Inherent | ty::Weak, ..)
             | ty::Infer(..)
             | ty::Bound(..)
             | ty::Error(_)
             | ty::Closure(..)
-            | ty::Generator(..)
-            | ty::GeneratorWitness(..)
-            | ty::GeneratorWitnessMIR(..)
+            | ty::CoroutineClosure(..)
+            | ty::Coroutine(..)
+            | ty::CoroutineWitness(..)
             | ty::Placeholder(..)
             | ty::FnDef(..) => bug!("unexpected type in foreign function: {:?}", ty),
         }
@@ -1272,8 +1368,8 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
         &mut self,
         ty: Ty<'tcx>,
         sp: Span,
-        note: DiagnosticMessage,
-        help: Option<DiagnosticMessage>,
+        note: DiagMessage,
+        help: Option<DiagMessage>,
     ) {
         let lint = match self.mode {
             CItemKind::Declaration => IMPROPER_CTYPES,
@@ -1284,24 +1380,28 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
             CItemKind::Definition => "fn",
         };
         let span_note = if let ty::Adt(def, _) = ty.kind()
-            && let Some(sp) = self.cx.tcx.hir().span_if_local(def.did()) {
-                Some(sp)
-            } else {
-                None
-            };
-        self.cx.emit_spanned_lint(
-            lint,
-            sp,
-            ImproperCTypes { ty, desc, label: sp, help, note, span_note },
-        );
+            && let Some(sp) = self.cx.tcx.hir().span_if_local(def.did())
+        {
+            Some(sp)
+        } else {
+            None
+        };
+        self.cx.emit_span_lint(lint, sp, ImproperCTypes {
+            ty,
+            desc,
+            label: sp,
+            help,
+            note,
+            span_note,
+        });
     }
 
     fn check_for_opaque_ty(&mut self, sp: Span, ty: Ty<'tcx>) -> bool {
         struct ProhibitOpaqueTypes;
         impl<'tcx> ty::visit::TypeVisitor<TyCtxt<'tcx>> for ProhibitOpaqueTypes {
-            type BreakTy = Ty<'tcx>;
+            type Result = ControlFlow<Ty<'tcx>>;
 
-            fn visit_ty(&mut self, ty: Ty<'tcx>) -> ControlFlow<Self::BreakTy> {
+            fn visit_ty(&mut self, ty: Ty<'tcx>) -> Self::Result {
                 if !ty.has_opaque_types() {
                     return ControlFlow::Continue(());
                 }
@@ -1317,7 +1417,8 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
         if let Some(ty) = self
             .cx
             .tcx
-            .normalize_erasing_regions(self.cx.param_env, ty)
+            .try_normalize_erasing_regions(self.cx.typing_env(), ty)
+            .unwrap_or(ty)
             .visit_with(&mut ProhibitOpaqueTypes)
             .break_value()
         {
@@ -1335,16 +1436,12 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
         is_static: bool,
         is_return_type: bool,
     ) {
-        // We have to check for opaque types before `normalize_erasing_regions`,
-        // which will replace opaque types with their underlying concrete type.
         if self.check_for_opaque_ty(sp, ty) {
             // We've already emitted an error due to an opaque type.
             return;
         }
 
-        // it is only OK to use this function because extern fns cannot have
-        // any generic types right now:
-        let ty = self.cx.tcx.normalize_erasing_regions(self.cx.param_env, ty);
+        let ty = self.cx.tcx.try_normalize_erasing_regions(self.cx.typing_env(), ty).unwrap_or(ty);
 
         // C doesn't really support passing arrays by value - the only way to pass an array by value
         // is through a struct. So, first test that the top level isn't an array, and then
@@ -1354,13 +1451,14 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
         }
 
         // Don't report FFI errors for unit return types. This check exists here, and not in
-        // `check_foreign_fn` (where it would make more sense) so that normalization has definitely
+        // the caller (where it would make more sense) so that normalization has definitely
         // happened.
         if is_return_type && ty.is_unit() {
             return;
         }
 
-        match self.check_type_for_ffi(&mut FxHashSet::default(), ty) {
+        let mut acc = CTypesVisitorState { cache: FxHashSet::default(), base_ty: ty };
+        match self.check_type_for_ffi(&mut acc, ty) {
             FfiResult::FfiSafe => {}
             FfiResult::FfiPhantom(ty) => {
                 self.emit_ffi_unsafe_type_lint(
@@ -1370,62 +1468,257 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
                     None,
                 );
             }
-            // If `ty` is a `repr(transparent)` newtype, and the non-zero-sized type is a generic
-            // argument, which after substitution, is `()`, then this branch can be hit.
-            FfiResult::FfiUnsafe { ty, .. } if is_return_type && ty.is_unit() => {}
             FfiResult::FfiUnsafe { ty, reason, help } => {
                 self.emit_ffi_unsafe_type_lint(ty, sp, reason, help);
             }
         }
     }
 
-    fn check_foreign_fn(&mut self, def_id: LocalDefId, decl: &hir::FnDecl<'_>) {
-        let sig = self.cx.tcx.fn_sig(def_id).subst_identity();
-        let sig = self.cx.tcx.erase_late_bound_regions(sig);
+    /// Check if a function's argument types and result type are "ffi-safe".
+    ///
+    /// For a external ABI function, argument types and the result type are walked to find fn-ptr
+    /// types that have external ABIs, as these still need checked.
+    fn check_fn(&mut self, def_id: LocalDefId, decl: &'tcx hir::FnDecl<'_>) {
+        let sig = self.cx.tcx.fn_sig(def_id).instantiate_identity();
+        let sig = self.cx.tcx.instantiate_bound_regions_with_erased(sig);
+
+        for (input_ty, input_hir) in iter::zip(sig.inputs(), decl.inputs) {
+            for (fn_ptr_ty, span) in self.find_fn_ptr_ty_with_external_abi(input_hir, *input_ty) {
+                self.check_type_for_ffi_and_report_errors(span, fn_ptr_ty, false, false);
+            }
+        }
+
+        if let hir::FnRetTy::Return(ret_hir) = decl.output {
+            for (fn_ptr_ty, span) in self.find_fn_ptr_ty_with_external_abi(ret_hir, sig.output()) {
+                self.check_type_for_ffi_and_report_errors(span, fn_ptr_ty, false, true);
+            }
+        }
+    }
+
+    /// Check if a function's argument types and result type are "ffi-safe".
+    fn check_foreign_fn(&mut self, def_id: LocalDefId, decl: &'tcx hir::FnDecl<'_>) {
+        let sig = self.cx.tcx.fn_sig(def_id).instantiate_identity();
+        let sig = self.cx.tcx.instantiate_bound_regions_with_erased(sig);
 
         for (input_ty, input_hir) in iter::zip(sig.inputs(), decl.inputs) {
             self.check_type_for_ffi_and_report_errors(input_hir.span, *input_ty, false, false);
         }
 
-        if let hir::FnRetTy::Return(ref ret_hir) = decl.output {
-            let ret_ty = sig.output();
-            self.check_type_for_ffi_and_report_errors(ret_hir.span, ret_ty, false, true);
+        if let hir::FnRetTy::Return(ret_hir) = decl.output {
+            self.check_type_for_ffi_and_report_errors(ret_hir.span, sig.output(), false, true);
         }
     }
 
     fn check_foreign_static(&mut self, id: hir::OwnerId, span: Span) {
-        let ty = self.cx.tcx.type_of(id).subst_identity();
+        let ty = self.cx.tcx.type_of(id).instantiate_identity();
         self.check_type_for_ffi_and_report_errors(span, ty, true, false);
     }
 
-    fn is_internal_abi(&self, abi: SpecAbi) -> bool {
+    fn is_internal_abi(&self, abi: ExternAbi) -> bool {
         matches!(
             abi,
-            SpecAbi::Rust | SpecAbi::RustCall | SpecAbi::RustIntrinsic | SpecAbi::PlatformIntrinsic
+            ExternAbi::Rust | ExternAbi::RustCall | ExternAbi::RustCold | ExternAbi::RustIntrinsic
         )
+    }
+
+    /// Find any fn-ptr types with external ABIs in `ty`.
+    ///
+    /// For example, `Option<extern "C" fn()>` returns `extern "C" fn()`
+    fn find_fn_ptr_ty_with_external_abi(
+        &self,
+        hir_ty: &hir::Ty<'tcx>,
+        ty: Ty<'tcx>,
+    ) -> Vec<(Ty<'tcx>, Span)> {
+        struct FnPtrFinder<'a, 'b, 'tcx> {
+            visitor: &'a ImproperCTypesVisitor<'b, 'tcx>,
+            spans: Vec<Span>,
+            tys: Vec<Ty<'tcx>>,
+        }
+
+        impl<'a, 'b, 'tcx> hir::intravisit::Visitor<'_> for FnPtrFinder<'a, 'b, 'tcx> {
+            fn visit_ty(&mut self, ty: &'_ hir::Ty<'_, AmbigArg>) {
+                debug!(?ty);
+                if let hir::TyKind::BareFn(hir::BareFnTy { abi, .. }) = ty.kind
+                    && !self.visitor.is_internal_abi(*abi)
+                {
+                    self.spans.push(ty.span);
+                }
+
+                hir::intravisit::walk_ty(self, ty)
+            }
+        }
+
+        impl<'a, 'b, 'tcx> ty::visit::TypeVisitor<TyCtxt<'tcx>> for FnPtrFinder<'a, 'b, 'tcx> {
+            type Result = ControlFlow<Ty<'tcx>>;
+
+            fn visit_ty(&mut self, ty: Ty<'tcx>) -> Self::Result {
+                if let ty::FnPtr(_, hdr) = ty.kind()
+                    && !self.visitor.is_internal_abi(hdr.abi)
+                {
+                    self.tys.push(ty);
+                }
+
+                ty.super_visit_with(self)
+            }
+        }
+
+        let mut visitor = FnPtrFinder { visitor: self, spans: Vec::new(), tys: Vec::new() };
+        ty.visit_with(&mut visitor);
+        visitor.visit_ty_unambig(hir_ty);
+
+        iter::zip(visitor.tys.drain(..), visitor.spans.drain(..)).collect()
     }
 }
 
 impl<'tcx> LateLintPass<'tcx> for ImproperCTypesDeclarations {
-    fn check_foreign_item(&mut self, cx: &LateContext<'_>, it: &hir::ForeignItem<'_>) {
+    fn check_foreign_item(&mut self, cx: &LateContext<'tcx>, it: &hir::ForeignItem<'tcx>) {
         let mut vis = ImproperCTypesVisitor { cx, mode: CItemKind::Declaration };
         let abi = cx.tcx.hir().get_foreign_abi(it.hir_id());
 
-        if !vis.is_internal_abi(abi) {
-            match it.kind {
-                hir::ForeignItemKind::Fn(ref decl, _, _) => {
-                    vis.check_foreign_fn(it.owner_id.def_id, decl);
+        match it.kind {
+            hir::ForeignItemKind::Fn(sig, _, _) => {
+                if vis.is_internal_abi(abi) {
+                    vis.check_fn(it.owner_id.def_id, sig.decl)
+                } else {
+                    vis.check_foreign_fn(it.owner_id.def_id, sig.decl);
                 }
-                hir::ForeignItemKind::Static(ref ty, _) => {
-                    vis.check_foreign_static(it.owner_id, ty.span);
+            }
+            hir::ForeignItemKind::Static(ty, _, _) if !vis.is_internal_abi(abi) => {
+                vis.check_foreign_static(it.owner_id, ty.span);
+            }
+            hir::ForeignItemKind::Static(..) | hir::ForeignItemKind::Type => (),
+        }
+    }
+}
+
+impl ImproperCTypesDefinitions {
+    fn check_ty_maybe_containing_foreign_fnptr<'tcx>(
+        &mut self,
+        cx: &LateContext<'tcx>,
+        hir_ty: &'tcx hir::Ty<'_>,
+        ty: Ty<'tcx>,
+    ) {
+        let mut vis = ImproperCTypesVisitor { cx, mode: CItemKind::Definition };
+        for (fn_ptr_ty, span) in vis.find_fn_ptr_ty_with_external_abi(hir_ty, ty) {
+            vis.check_type_for_ffi_and_report_errors(span, fn_ptr_ty, true, false);
+        }
+    }
+
+    fn check_arg_for_power_alignment<'tcx>(
+        &mut self,
+        cx: &LateContext<'tcx>,
+        ty: Ty<'tcx>,
+    ) -> bool {
+        // Structs (under repr(C)) follow the power alignment rule if:
+        //   - the first field of the struct is a floating-point type that
+        //     is greater than 4-bytes, or
+        //   - the first field of the struct is an aggregate whose
+        //     recursively first field is a floating-point type greater than
+        //     4 bytes.
+        if cx.tcx.sess.target.os != "aix" {
+            return false;
+        }
+        if ty.is_floating_point() && ty.primitive_size(cx.tcx).bytes() > 4 {
+            return true;
+        } else if let Adt(adt_def, _) = ty.kind()
+            && adt_def.is_struct()
+        {
+            let struct_variant = adt_def.variant(VariantIdx::ZERO);
+            // Within a nested struct, all fields are examined to correctly
+            // report if any fields after the nested struct within the
+            // original struct are misaligned.
+            for struct_field in &struct_variant.fields {
+                let field_ty = cx.tcx.type_of(struct_field.did).instantiate_identity();
+                if self.check_arg_for_power_alignment(cx, field_ty) {
+                    return true;
                 }
-                hir::ForeignItemKind::Type => (),
+            }
+        }
+        return false;
+    }
+
+    fn check_struct_for_power_alignment<'tcx>(
+        &mut self,
+        cx: &LateContext<'tcx>,
+        item: &'tcx hir::Item<'tcx>,
+    ) {
+        let adt_def = cx.tcx.adt_def(item.owner_id.to_def_id());
+        if adt_def.repr().c()
+            && !adt_def.repr().packed()
+            && cx.tcx.sess.target.os == "aix"
+            && !adt_def.all_fields().next().is_none()
+        {
+            let struct_variant_data = item.expect_struct().0;
+            for (index, ..) in struct_variant_data.fields().iter().enumerate() {
+                // Struct fields (after the first field) are checked for the
+                // power alignment rule, as fields after the first are likely
+                // to be the fields that are misaligned.
+                if index != 0 {
+                    let first_field_def = struct_variant_data.fields()[index];
+                    let def_id = first_field_def.def_id;
+                    let ty = cx.tcx.type_of(def_id).instantiate_identity();
+                    if self.check_arg_for_power_alignment(cx, ty) {
+                        cx.emit_span_lint(
+                            USES_POWER_ALIGNMENT,
+                            first_field_def.span,
+                            UsesPowerAlignment,
+                        );
+                    }
+                }
             }
         }
     }
 }
 
+/// `ImproperCTypesDefinitions` checks items outside of foreign items (e.g. stuff that isn't in
+/// `extern "C" { }` blocks):
+///
+/// - `extern "<abi>" fn` definitions are checked in the same way as the
+///   `ImproperCtypesDeclarations` visitor checks functions if `<abi>` is external (e.g. "C").
+/// - All other items which contain types (e.g. other functions, struct definitions, etc) are
+///   checked for extern fn-ptrs with external ABIs.
 impl<'tcx> LateLintPass<'tcx> for ImproperCTypesDefinitions {
+    fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx hir::Item<'tcx>) {
+        match item.kind {
+            hir::ItemKind::Static(ty, ..)
+            | hir::ItemKind::Const(ty, ..)
+            | hir::ItemKind::TyAlias(ty, ..) => {
+                self.check_ty_maybe_containing_foreign_fnptr(
+                    cx,
+                    ty,
+                    cx.tcx.type_of(item.owner_id).instantiate_identity(),
+                );
+            }
+            // See `check_fn`..
+            hir::ItemKind::Fn { .. } => {}
+            // Structs are checked based on if they follow the power alignment
+            // rule (under repr(C)).
+            hir::ItemKind::Struct(..) => {
+                self.check_struct_for_power_alignment(cx, item);
+            }
+            // See `check_field_def`..
+            hir::ItemKind::Union(..) | hir::ItemKind::Enum(..) => {}
+            // Doesn't define something that can contain a external type to be checked.
+            hir::ItemKind::Impl(..)
+            | hir::ItemKind::TraitAlias(..)
+            | hir::ItemKind::Trait(..)
+            | hir::ItemKind::GlobalAsm(..)
+            | hir::ItemKind::ForeignMod { .. }
+            | hir::ItemKind::Mod(..)
+            | hir::ItemKind::Macro(..)
+            | hir::ItemKind::Use(..)
+            | hir::ItemKind::ExternCrate(..) => {}
+        }
+    }
+
+    fn check_field_def(&mut self, cx: &LateContext<'tcx>, field: &'tcx hir::FieldDef<'tcx>) {
+        self.check_ty_maybe_containing_foreign_fnptr(
+            cx,
+            field.ty,
+            cx.tcx.type_of(field.def_id).instantiate_identity(),
+        );
+    }
+
     fn check_fn(
         &mut self,
         cx: &LateContext<'tcx>,
@@ -1444,7 +1737,9 @@ impl<'tcx> LateLintPass<'tcx> for ImproperCTypesDefinitions {
         };
 
         let mut vis = ImproperCTypesVisitor { cx, mode: CItemKind::Definition };
-        if !vis.is_internal_abi(abi) {
+        if vis.is_internal_abi(abi) {
+            vis.check_fn(id, decl);
+        } else {
             vis.check_foreign_fn(id, decl);
         }
     }
@@ -1455,13 +1750,13 @@ declare_lint_pass!(VariantSizeDifferences => [VARIANT_SIZE_DIFFERENCES]);
 impl<'tcx> LateLintPass<'tcx> for VariantSizeDifferences {
     fn check_item(&mut self, cx: &LateContext<'_>, it: &hir::Item<'_>) {
         if let hir::ItemKind::Enum(ref enum_definition, _) = it.kind {
-            let t = cx.tcx.type_of(it.owner_id).subst_identity();
+            let t = cx.tcx.type_of(it.owner_id).instantiate_identity();
             let ty = cx.tcx.erase_regions(t);
             let Ok(layout) = cx.layout_of(ty) else { return };
-            let Variants::Multiple {
-                    tag_encoding: TagEncoding::Direct, tag, ref variants, ..
-                } = &layout.variants else {
-                return
+            let Variants::Multiple { tag_encoding: TagEncoding::Direct, tag, ref variants, .. } =
+                &layout.variants
+            else {
+                return;
             };
 
             let tag_size = tag.size(&cx.tcx).bytes();
@@ -1495,7 +1790,7 @@ impl<'tcx> LateLintPass<'tcx> for VariantSizeDifferences {
             // We only warn if the largest variant is at least thrice as large as
             // the second-largest.
             if largest > slargest * 3 && slargest > 0 {
-                cx.emit_spanned_lint(
+                cx.emit_span_lint(
                     VARIANT_SIZE_DIFFERENCES,
                     enum_definition.variants[largest_index].span,
                     VariantSizeDifferencesDiag { largest },
@@ -1571,11 +1866,11 @@ impl InvalidAtomicOrdering {
             sym::AtomicI64,
             sym::AtomicI128,
         ];
-        if let ExprKind::MethodCall(ref method_path, _, args, _) = &expr.kind
+        if let ExprKind::MethodCall(method_path, _, args, _) = &expr.kind
             && recognized_names.contains(&method_path.ident.name)
             && let Some(m_def_id) = cx.typeck_results().type_dependent_def_id(expr.hir_id)
             && let Some(impl_did) = cx.tcx.impl_of_method(m_def_id)
-            && let Some(adt) = cx.tcx.type_of(impl_did).subst_identity().ty_adt_def()
+            && let Some(adt) = cx.tcx.type_of(impl_did).instantiate_identity().ty_adt_def()
             // skip extension traits, only lint functions from the standard library
             && cx.tcx.trait_id_of_impl(impl_did).is_none()
             && let parent = cx.tcx.parent(adt.did())
@@ -1605,7 +1900,8 @@ impl InvalidAtomicOrdering {
     }
 
     fn check_atomic_load_store(cx: &LateContext<'_>, expr: &Expr<'_>) {
-        if let Some((method, args)) = Self::inherent_atomic_method_call(cx, expr, &[sym::load, sym::store])
+        if let Some((method, args)) =
+            Self::inherent_atomic_method_call(cx, expr, &[sym::load, sym::store])
             && let Some((ordering_arg, invalid_ordering)) = match method {
                 sym::load => Some((&args[0], sym::Release)),
                 sym::store => Some((&args[1], sym::Acquire)),
@@ -1615,27 +1911,32 @@ impl InvalidAtomicOrdering {
             && (ordering == invalid_ordering || ordering == sym::AcqRel)
         {
             if method == sym::load {
-                cx.emit_spanned_lint(INVALID_ATOMIC_ORDERING, ordering_arg.span, AtomicOrderingLoad);
+                cx.emit_span_lint(INVALID_ATOMIC_ORDERING, ordering_arg.span, AtomicOrderingLoad);
             } else {
-                cx.emit_spanned_lint(INVALID_ATOMIC_ORDERING, ordering_arg.span, AtomicOrderingStore);
+                cx.emit_span_lint(INVALID_ATOMIC_ORDERING, ordering_arg.span, AtomicOrderingStore);
             };
         }
     }
 
     fn check_memory_fence(cx: &LateContext<'_>, expr: &Expr<'_>) {
-        if let ExprKind::Call(ref func, ref args) = expr.kind
+        if let ExprKind::Call(func, args) = expr.kind
             && let ExprKind::Path(ref func_qpath) = func.kind
             && let Some(def_id) = cx.qpath_res(func_qpath, func.hir_id).opt_def_id()
             && matches!(cx.tcx.get_diagnostic_name(def_id), Some(sym::fence | sym::compiler_fence))
             && Self::match_ordering(cx, &args[0]) == Some(sym::Relaxed)
         {
-            cx.emit_spanned_lint(INVALID_ATOMIC_ORDERING, args[0].span, AtomicOrderingFence);
+            cx.emit_span_lint(INVALID_ATOMIC_ORDERING, args[0].span, AtomicOrderingFence);
         }
     }
 
     fn check_atomic_compare_exchange(cx: &LateContext<'_>, expr: &Expr<'_>) {
-        let Some((method, args)) = Self::inherent_atomic_method_call(cx, expr, &[sym::fetch_update, sym::compare_exchange, sym::compare_exchange_weak])
-            else {return };
+        let Some((method, args)) = Self::inherent_atomic_method_call(cx, expr, &[
+            sym::fetch_update,
+            sym::compare_exchange,
+            sym::compare_exchange_weak,
+        ]) else {
+            return;
+        };
 
         let fail_order_arg = match method {
             sym::fetch_update => &args[1],
@@ -1646,7 +1947,7 @@ impl InvalidAtomicOrdering {
         let Some(fail_ordering) = Self::match_ordering(cx, fail_order_arg) else { return };
 
         if matches!(fail_ordering, sym::Release | sym::AcqRel) {
-            cx.emit_spanned_lint(
+            cx.emit_span_lint(
                 INVALID_ATOMIC_ORDERING,
                 fail_order_arg.span,
                 InvalidAtomicOrderingDiag { method, fail_order_arg_span: fail_order_arg.span },

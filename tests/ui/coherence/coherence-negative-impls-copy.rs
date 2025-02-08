@@ -1,4 +1,4 @@
-// check-pass
+//@ check-pass
 // regression test for issue #101836
 
 #![feature(negative_impls, extern_types)]
@@ -18,7 +18,7 @@ impl !Copy for WithDrop {}
 
 struct Type;
 trait Trait {}
-extern {
+extern "C" {
     type ExternType;
 }
 

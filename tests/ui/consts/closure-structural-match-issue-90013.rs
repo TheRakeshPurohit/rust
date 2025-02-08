@@ -1,6 +1,5 @@
 // Regression test for issue 90013.
-// check-pass
-#![feature(inline_const)]
+//@ check-pass
 
 fn main() {
     const { || {} };

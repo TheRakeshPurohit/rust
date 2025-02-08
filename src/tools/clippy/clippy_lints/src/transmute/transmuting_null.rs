@@ -1,4 +1,4 @@
-use clippy_utils::consts::{constant, Constant};
+use clippy_utils::consts::{ConstEvalCtxt, Constant};
 use clippy_utils::diagnostics::span_lint;
 use clippy_utils::{is_integer_literal, is_path_diagnostic_item};
 use rustc_hir::{Expr, ExprKind};
@@ -16,8 +16,8 @@ pub(super) fn check<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>, arg: &'t
     }
 
     // Catching transmute over constants that resolve to `null`.
-    if let ExprKind::Path(ref _qpath) = arg.kind &&
-        let Some(Constant::RawPtr(0)) = constant(cx, cx.typeck_results(), arg)
+    if let ExprKind::Path(ref _qpath) = arg.kind
+        && let Some(Constant::RawPtr(0)) = ConstEvalCtxt::new(cx).eval(arg)
     {
         span_lint(cx, TRANSMUTING_NULL, expr.span, LINT_MSG);
         return true;
@@ -25,15 +25,17 @@ pub(super) fn check<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>, arg: &'t
 
     // Catching:
     // `std::mem::transmute(0 as *const i32)`
-    if let ExprKind::Cast(inner_expr, _cast_ty) = arg.kind && is_integer_literal(inner_expr, 0) {
+    if let ExprKind::Cast(inner_expr, _cast_ty) = arg.kind
+        && is_integer_literal(inner_expr, 0)
+    {
         span_lint(cx, TRANSMUTING_NULL, expr.span, LINT_MSG);
         return true;
     }
 
     // Catching:
     // `std::mem::transmute(std::ptr::null::<i32>())`
-    if let ExprKind::Call(func1, []) = arg.kind &&
-        is_path_diagnostic_item(cx, func1, sym::ptr_null)
+    if let ExprKind::Call(func1, []) = arg.kind
+        && is_path_diagnostic_item(cx, func1, sym::ptr_null)
     {
         span_lint(cx, TRANSMUTING_NULL, expr.span, LINT_MSG);
         return true;

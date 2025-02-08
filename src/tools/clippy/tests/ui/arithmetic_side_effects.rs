@@ -1,5 +1,7 @@
 //@aux-build:proc_macro_derive.rs
 
+#![feature(f128)]
+#![feature(f16)]
 #![allow(
     clippy::assign_op_pattern,
     clippy::erasing_op,
@@ -10,12 +12,11 @@
     arithmetic_overflow,
     unconditional_panic
 )]
-#![feature(const_mut_refs, inline_const, saturating_int_impl)]
 #![warn(clippy::arithmetic_side_effects)]
 
 extern crate proc_macro_derive;
 
-use core::num::{Saturating, Wrapping};
+use core::num::{NonZero, Saturating, Wrapping};
 
 const ONE: i32 = 1;
 const ZERO: i32 = 0;
@@ -162,11 +163,14 @@ pub fn association_with_structures_should_not_trigger_the_lint() {
 }
 
 pub fn hard_coded_allowed() {
+    let _ = 1f16 + 1f16;
     let _ = 1f32 + 1f32;
     let _ = 1f64 + 1f64;
+    let _ = 1f128 + 1f128;
 
     let _ = Saturating(0u32) + Saturating(0u32);
     let _ = String::new() + "";
+    let _ = String::new() + &String::new();
     let _ = Wrapping(0u32) + Wrapping(0u32);
 
     let saturating: Saturating<u32> = Saturating(0u32);
@@ -405,11 +409,14 @@ pub fn unknown_ops_or_runtime_ops_that_can_overflow() {
     _n.wrapping_rem(_n);
     _n.wrapping_rem_euclid(_n);
 
+    _n.saturating_div(*Box::new(_n));
+
     // Unary
     _n = -_n;
     _n = -&_n;
     _custom = -_custom;
     _custom = -&_custom;
+    _ = -*Box::new(_n);
 }
 
 // Copied and pasted from the `integer_arithmetic` lint for comparison.
@@ -464,6 +471,78 @@ pub fn issue_10767() {
     3.1_f32 + &1.2_f32;
     &3.4_f32 + 1.5_f32;
     &3.5_f32 + &1.3_f32;
+}
+
+pub fn issue_10792() {
+    struct One {
+        a: u32,
+    }
+    struct Two {
+        b: u32,
+        c: u64,
+    }
+    const ONE: One = One { a: 1 };
+    const TWO: Two = Two { b: 2, c: 3 };
+    let _ = 10 / ONE.a;
+    let _ = 10 / TWO.b;
+    let _ = 10 / TWO.c;
+}
+
+pub fn issue_11145() {
+    let mut x: Wrapping<u32> = Wrapping(0_u32);
+    x += 1;
+}
+
+pub fn issue_11262() {
+    let one = 1;
+    let zero = 0;
+    let _ = 2 / one;
+    let _ = 2 / zero;
+}
+
+pub fn issue_11392() {
+    fn example_div(unsigned: usize, nonzero_unsigned: NonZero<usize>) -> usize {
+        unsigned / nonzero_unsigned
+    }
+
+    fn example_rem(unsigned: usize, nonzero_unsigned: NonZero<usize>) -> usize {
+        unsigned % nonzero_unsigned
+    }
+
+    let (unsigned, nonzero_unsigned) = (0, NonZero::new(1).unwrap());
+    example_div(unsigned, nonzero_unsigned);
+    example_rem(unsigned, nonzero_unsigned);
+}
+
+pub fn issue_11393() {
+    fn example_div(x: Wrapping<i32>, maybe_zero: Wrapping<i32>) -> Wrapping<i32> {
+        x / maybe_zero
+    }
+
+    fn example_rem(x: Wrapping<i32>, maybe_zero: Wrapping<i32>) -> Wrapping<i32> {
+        x % maybe_zero
+    }
+
+    let [x, maybe_zero] = [1, 0].map(Wrapping);
+    example_div(x, maybe_zero);
+    example_rem(x, maybe_zero);
+}
+
+pub fn issue_12318() {
+    use core::ops::{AddAssign, DivAssign, MulAssign, RemAssign, SubAssign};
+    let mut one: i32 = 1;
+    one.add_assign(1);
+    one.div_assign(1);
+    one.mul_assign(1);
+    one.rem_assign(1);
+    one.sub_assign(1);
+}
+
+pub fn explicit_methods() {
+    use core::ops::Add;
+    let one: i32 = 1;
+    one.add(&one);
+    Box::new(one).add(one);
 }
 
 fn main() {}

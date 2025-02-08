@@ -1,4 +1,4 @@
-// run-rustfix
+//@ run-rustfix
 
 // Regression test for #54505 - range borrowing suggestion had
 // incorrect syntax (missing parentheses).
@@ -23,6 +23,7 @@ fn main() {
 
     take_range(&(..));
     //~^ ERROR mismatched types [E0308]
+    //~| HELP you might have meant
     //~| HELP consider borrowing here
     //~| SUGGESTION &(
 

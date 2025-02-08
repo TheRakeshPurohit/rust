@@ -3,7 +3,7 @@ use syntax::{
     AstNode, AstToken,
 };
 
-use crate::{utils::test_related_attribute, AssistContext, AssistId, AssistKind, Assists};
+use crate::{utils::test_related_attribute_syn, AssistContext, AssistId, AssistKind, Assists};
 
 // Assist: toggle_ignore
 //
@@ -26,7 +26,7 @@ use crate::{utils::test_related_attribute, AssistContext, AssistId, AssistKind, 
 pub(crate) fn toggle_ignore(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
     let attr: ast::Attr = ctx.find_node_at_offset()?;
     let func = attr.syntax().parent().and_then(ast::Fn::cast)?;
-    let attr = test_related_attribute(&func)?;
+    let attr = test_related_attribute_syn(&func)?;
 
     match has_ignore_attribute(&func) {
         None => acc.add(
@@ -55,7 +55,7 @@ pub(crate) fn toggle_ignore(acc: &mut Assists, ctx: &AssistContext<'_>) -> Optio
 }
 
 fn has_ignore_attribute(fn_def: &ast::Fn) -> Option<ast::Attr> {
-    fn_def.attrs().find(|attr| attr.path().map(|it| it.syntax().text() == "ignore") == Some(true))
+    fn_def.attrs().find(|attr| attr.path().is_some_and(|it| it.syntax().text() == "ignore"))
 }
 
 #[cfg(test)]

@@ -1,11 +1,11 @@
-//@run-rustfix
 #![warn(clippy::option_if_let_else)]
 #![allow(
-    unused_tuple_struct_fields,
-    clippy::redundant_closure,
     clippy::ref_option_ref,
     clippy::equatable_if_let,
-    clippy::let_unit_value
+    clippy::let_unit_value,
+    clippy::redundant_locals,
+    clippy::manual_unwrap_or_default,
+    clippy::manual_unwrap_or
 )]
 
 fn bad1(string: Option<&str>) -> (bool, &str) {
@@ -116,11 +116,13 @@ fn pattern_to_vec(pattern: &str) -> Vec<String> {
 }
 
 // #10335
-fn test_result_impure_else(variable: Result<u32, &str>) {
+fn test_result_impure_else(variable: Result<u32, &str>) -> bool {
     if let Ok(binding) = variable {
         println!("Ok {binding}");
+        true
     } else {
         println!("Err");
+        false
     }
 }
 
@@ -247,5 +249,59 @@ fn issue9742() -> Option<&'static str> {
     match Some("foo  ") {
         Some(name) if name.starts_with("foo") => Some(name.trim()),
         _ => None,
+    }
+}
+
+mod issue10729 {
+    #![allow(clippy::unit_arg, dead_code)]
+
+    pub fn reproduce(initial: &Option<String>) {
+        // 👇 needs `.as_ref()` because initial is an `&Option<_>`
+        let _ = match initial {
+            Some(value) => do_something(value),
+            None => 42,
+        };
+    }
+
+    pub fn reproduce2(initial: &mut Option<String>) {
+        let _ = match initial {
+            Some(value) => do_something2(value),
+            None => 42,
+        };
+    }
+
+    fn do_something(_value: &str) -> u32 {
+        todo!()
+    }
+    fn do_something2(_value: &mut str) -> u32 {
+        todo!()
+    }
+}
+
+fn issue11429() {
+    use std::collections::HashMap;
+
+    macro_rules! new_map {
+        () => {{ HashMap::new() }};
+    }
+
+    let opt: Option<HashMap<u8, u8>> = None;
+
+    let mut _hashmap = if let Some(hm) = &opt {
+        hm.clone()
+    } else {
+        HashMap::new()
+    };
+
+    let mut _hm = if let Some(hm) = &opt { hm.clone() } else { new_map!() };
+}
+
+fn issue11893() {
+    use std::io::Write;
+    let mut output = std::io::stdout().lock();
+    if let Some(name) = Some("stuff") {
+        writeln!(output, "{name:?}").unwrap();
+    } else {
+        panic!("Haven't thought about this condition.");
     }
 }

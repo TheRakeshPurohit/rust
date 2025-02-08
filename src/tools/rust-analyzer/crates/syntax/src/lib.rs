@@ -19,34 +19,34 @@
 //! [RFC]: <https://github.com/rust-lang/rfcs/pull/2256>
 //! [Swift]: <https://github.com/apple/swift/blob/13d593df6f359d0cb2fc81cfaac273297c539455/lib/Syntax/README.md>
 
-#![warn(rust_2018_idioms, unused_lifetimes, semicolon_in_expressions_from_macros)]
+#![cfg_attr(feature = "in-rust-tree", feature(rustc_private))]
 
-#[allow(unused)]
-macro_rules! eprintln {
-    ($($tt:tt)*) => { stdx::eprintln!($($tt)*) };
-}
+#[cfg(not(feature = "in-rust-tree"))]
+extern crate ra_ap_rustc_lexer as rustc_lexer;
+#[cfg(feature = "in-rust-tree")]
+extern crate rustc_lexer;
 
-mod syntax_node;
-mod syntax_error;
 mod parsing;
-mod validation;
 mod ptr;
-mod token_text;
+mod syntax_error;
+mod syntax_node;
 #[cfg(test)]
 mod tests;
+mod token_text;
+mod validation;
 
 pub mod algo;
 pub mod ast;
 #[doc(hidden)]
 pub mod fuzz;
-pub mod utils;
-pub mod ted;
 pub mod hacks;
+pub mod syntax_editor;
+pub mod ted;
+pub mod utils;
 
-use std::marker::PhantomData;
+use std::{marker::PhantomData, ops::Range};
 
 use stdx::format_to;
-use text_edit::Indel;
 use triomphe::Arc;
 
 pub use crate::{
@@ -59,12 +59,13 @@ pub use crate::{
     },
     token_text::TokenText,
 };
-pub use parser::{SyntaxKind, T};
+pub use parser::{Edition, SyntaxKind, T};
 pub use rowan::{
     api::Preorder, Direction, GreenNode, NodeOrToken, SyntaxText, TextRange, TextSize,
     TokenAtOffset, WalkEvent,
 };
-pub use smol_str::SmolStr;
+pub use rustc_lexer::unescape;
+pub use smol_str::{format_smolstr, SmolStr, SmolStrBuilder, ToSmolStr};
 
 /// `Parse` is the result of the parsing: a syntax tree and a collection of
 /// errors.
@@ -74,7 +75,7 @@ pub use smol_str::SmolStr;
 #[derive(Debug, PartialEq, Eq)]
 pub struct Parse<T> {
     green: GreenNode,
-    errors: Arc<Vec<SyntaxError>>,
+    errors: Option<Arc<[SyntaxError]>>,
     _ty: PhantomData<fn() -> T>,
 }
 
@@ -86,31 +87,45 @@ impl<T> Clone for Parse<T> {
 
 impl<T> Parse<T> {
     fn new(green: GreenNode, errors: Vec<SyntaxError>) -> Parse<T> {
-        Parse { green, errors: Arc::new(errors), _ty: PhantomData }
+        Parse {
+            green,
+            errors: if errors.is_empty() { None } else { Some(errors.into()) },
+            _ty: PhantomData,
+        }
     }
 
     pub fn syntax_node(&self) -> SyntaxNode {
         SyntaxNode::new_root(self.green.clone())
     }
-    pub fn errors(&self) -> &[SyntaxError] {
-        &self.errors
+
+    pub fn errors(&self) -> Vec<SyntaxError> {
+        let mut errors = if let Some(e) = self.errors.as_deref() { e.to_vec() } else { vec![] };
+        validation::validate(&self.syntax_node(), &mut errors);
+        errors
     }
 }
 
 impl<T: AstNode> Parse<T> {
+    /// Converts this parse result into a parse result for an untyped syntax tree.
     pub fn to_syntax(self) -> Parse<SyntaxNode> {
         Parse { green: self.green, errors: self.errors, _ty: PhantomData }
     }
 
+    /// Gets the parsed syntax tree as a typed ast node.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the root node cannot be casted into the typed ast node
+    /// (e.g. if it's an `ERROR` node).
     pub fn tree(&self) -> T {
         T::cast(self.syntax_node()).unwrap()
     }
 
-    pub fn ok(self) -> Result<T, Arc<Vec<SyntaxError>>> {
-        if self.errors.is_empty() {
-            Ok(self.tree())
-        } else {
-            Err(self.errors)
+    /// Converts from `Parse<T>` to [`Result<T, Vec<SyntaxError>>`].
+    pub fn ok(self) -> Result<T, Vec<SyntaxError>> {
+        match self.errors() {
+            errors if !errors.is_empty() => Err(errors),
+            _ => Ok(self.tree()),
         }
     }
 }
@@ -128,31 +143,65 @@ impl Parse<SyntaxNode> {
 impl Parse<SourceFile> {
     pub fn debug_dump(&self) -> String {
         let mut buf = format!("{:#?}", self.tree().syntax());
-        for err in self.errors.iter() {
+        for err in self.errors() {
             format_to!(buf, "error {:?}: {}\n", err.range(), err);
         }
         buf
     }
 
-    pub fn reparse(&self, indel: &Indel) -> Parse<SourceFile> {
-        self.incremental_reparse(indel).unwrap_or_else(|| self.full_reparse(indel))
+    pub fn reparse(&self, delete: TextRange, insert: &str, edition: Edition) -> Parse<SourceFile> {
+        self.incremental_reparse(delete, insert, edition)
+            .unwrap_or_else(|| self.full_reparse(delete, insert, edition))
     }
 
-    fn incremental_reparse(&self, indel: &Indel) -> Option<Parse<SourceFile>> {
+    fn incremental_reparse(
+        &self,
+        delete: TextRange,
+        insert: &str,
+        edition: Edition,
+    ) -> Option<Parse<SourceFile>> {
         // FIXME: validation errors are not handled here
-        parsing::incremental_reparse(self.tree().syntax(), indel, self.errors.to_vec()).map(
-            |(green_node, errors, _reparsed_range)| Parse {
-                green: green_node,
-                errors: Arc::new(errors),
-                _ty: PhantomData,
-            },
+        parsing::incremental_reparse(
+            self.tree().syntax(),
+            delete,
+            insert,
+            self.errors.as_deref().unwrap_or_default().iter().cloned(),
+            edition,
         )
+        .map(|(green_node, errors, _reparsed_range)| Parse {
+            green: green_node,
+            errors: if errors.is_empty() { None } else { Some(errors.into()) },
+            _ty: PhantomData,
+        })
     }
 
-    fn full_reparse(&self, indel: &Indel) -> Parse<SourceFile> {
+    fn full_reparse(&self, delete: TextRange, insert: &str, edition: Edition) -> Parse<SourceFile> {
         let mut text = self.tree().syntax().text().to_string();
-        indel.apply(&mut text);
-        SourceFile::parse(&text)
+        text.replace_range(Range::<usize>::from(delete), insert);
+        SourceFile::parse(&text, edition)
+    }
+}
+
+impl ast::Expr {
+    /// Parses an `ast::Expr` from `text`.
+    ///
+    /// Note that if the parsed root node is not a valid expression, [`Parse::tree`] will panic.
+    /// For example:
+    /// ```rust,should_panic
+    /// # use syntax::{ast, Edition};
+    /// ast::Expr::parse("let fail = true;", Edition::CURRENT).tree();
+    /// ```
+    pub fn parse(text: &str, edition: Edition) -> Parse<ast::Expr> {
+        let _p = tracing::info_span!("Expr::parse").entered();
+        let (green, errors) = parsing::parse_text_at(text, parser::TopEntryPoint::Expr, edition);
+        let root = SyntaxNode::new_root(green.clone());
+
+        assert!(
+            ast::Expr::can_cast(root.kind()) || root.kind() == SyntaxKind::ERROR,
+            "{:?} isn't an expression",
+            root.kind()
+        );
+        Parse::new(green, errors)
     }
 }
 
@@ -160,14 +209,13 @@ impl Parse<SourceFile> {
 pub use crate::ast::SourceFile;
 
 impl SourceFile {
-    pub fn parse(text: &str) -> Parse<SourceFile> {
-        let (green, mut errors) = parsing::parse_text(text);
+    pub fn parse(text: &str, edition: Edition) -> Parse<SourceFile> {
+        let _p = tracing::info_span!("SourceFile::parse").entered();
+        let (green, errors) = parsing::parse_text(text, edition);
         let root = SyntaxNode::new_root(green.clone());
 
-        errors.extend(validation::validate(&root));
-
         assert_eq!(root.kind(), SyntaxKind::SOURCE_FILE);
-        Parse { green, errors: Arc::new(errors), _ty: PhantomData }
+        Parse::new(green, errors)
     }
 }
 
@@ -213,7 +261,7 @@ fn api_walkthrough() {
     //
     // The `parse` method returns a `Parse` -- a pair of syntax tree and a list
     // of errors. That is, syntax tree is constructed even in presence of errors.
-    let parse = SourceFile::parse(source_code);
+    let parse = SourceFile::parse(source_code, parser::Edition::CURRENT);
     assert!(parse.errors().is_empty());
 
     // The `tree` method returns an owned syntax node of type `SourceFile`.
@@ -292,7 +340,7 @@ fn api_walkthrough() {
     assert!(expr_syntax.siblings_with_tokens(Direction::Next).any(|it| it.kind() == T!['}']));
     assert_eq!(
         expr_syntax.descendants_with_tokens().count(),
-        8, // 5 tokens `1`, ` `, `+`, ` `, `!`
+        8, // 5 tokens `1`, ` `, `+`, ` `, `1`
            // 2 child literal expressions: `1`, `1`
            // 1 the node itself: `1 + 1`
     );
@@ -305,7 +353,7 @@ fn api_walkthrough() {
             WalkEvent::Enter(node) => {
                 let text = match &node {
                     NodeOrToken::Node(it) => it.text().to_string(),
-                    NodeOrToken::Token(it) => it.text().to_string(),
+                    NodeOrToken::Token(it) => it.text().to_owned(),
                 };
                 format_to!(buf, "{:indent$}{:?} {:?}\n", " ", text, node.kind(), indent = indent);
                 indent += 2;

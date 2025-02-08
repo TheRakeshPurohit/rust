@@ -2,20 +2,19 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
-use core::cmp::Ordering;
-use core::hash::{Hash, Hasher};
-use core::ops::Deref;
-#[cfg(not(no_global_oom_handling))]
-use core::ops::{Add, AddAssign};
-
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::borrow::{Borrow, BorrowMut};
+use core::cmp::Ordering;
+use core::hash::{Hash, Hasher};
+#[cfg(not(no_global_oom_handling))]
+use core::ops::{Add, AddAssign};
+use core::ops::{Deref, DerefPure};
+
+use Cow::*;
 
 use crate::fmt;
 #[cfg(not(no_global_oom_handling))]
 use crate::string::String;
-
-use Cow::*;
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<'a, B: ?Sized> Borrow<B> for Cow<'a, B>
@@ -55,6 +54,7 @@ pub trait ToOwned {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[must_use = "cloning is often expensive and is not expected to have side effects"]
+    #[cfg_attr(not(test), rustc_diagnostic_item = "to_owned_method")]
     fn to_owned(&self) -> Self::Owned;
 
     /// Uses borrowed data to replace owned data, usually by cloning.
@@ -225,7 +225,6 @@ impl<B: ?Sized + ToOwned> Cow<'_, B> {
     /// assert!(!bull.is_borrowed());
     /// ```
     #[unstable(feature = "cow_is_borrowed", issue = "65143")]
-    #[rustc_const_unstable(feature = "const_cow_is_borrowed", issue = "65143")]
     pub const fn is_borrowed(&self) -> bool {
         match *self {
             Borrowed(_) => true,
@@ -248,7 +247,6 @@ impl<B: ?Sized + ToOwned> Cow<'_, B> {
     /// assert!(!bull.is_owned());
     /// ```
     #[unstable(feature = "cow_is_borrowed", issue = "65143")]
-    #[rustc_const_unstable(feature = "const_cow_is_borrowed", issue = "65143")]
     pub const fn is_owned(&self) -> bool {
         !self.is_borrowed()
     }
@@ -341,6 +339,9 @@ where
         }
     }
 }
+
+#[unstable(feature = "deref_pure_trait", issue = "87121")]
+unsafe impl<B: ?Sized + ToOwned> DerefPure for Cow<'_, B> where B::Owned: Borrow<B> {}
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<B: ?Sized> Eq for Cow<'_, B> where B: Eq + ToOwned {}

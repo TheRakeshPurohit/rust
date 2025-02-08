@@ -22,6 +22,7 @@ struct MyType {
 impl MyTrait<MyType> for MyType {
 //~^ ERROR E0119
     fn get(&self) -> usize { (*self).clone() }
+    //~^ ERROR mismatched types
 }
 
 fn main() { }

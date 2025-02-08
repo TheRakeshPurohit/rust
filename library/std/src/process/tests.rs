@@ -1,6 +1,5 @@
-use crate::io::prelude::*;
-
 use super::{Command, Output, Stdio};
+use crate::io::prelude::*;
 use crate::io::{BorrowedBuf, ErrorKind};
 use crate::mem::MaybeUninit;
 use crate::str;
@@ -97,9 +96,23 @@ fn stdout_works() {
 #[test]
 #[cfg_attr(any(windows, target_os = "vxworks"), ignore)]
 fn set_current_dir_works() {
+    // On many Unix platforms this will use the posix_spawn path.
     let mut cmd = shell_cmd();
     cmd.arg("-c").arg("pwd").current_dir("/").stdout(Stdio::piped());
     assert_eq!(run_output(cmd), "/\n");
+
+    // Also test the fork/exec path by setting a pre_exec function.
+    #[cfg(unix)]
+    {
+        use crate::os::unix::process::CommandExt;
+
+        let mut cmd = shell_cmd();
+        cmd.arg("-c").arg("pwd").current_dir("/").stdout(Stdio::piped());
+        unsafe {
+            cmd.pre_exec(|| Ok(()));
+        }
+        assert_eq!(run_output(cmd), "/\n");
+    }
 }
 
 #[test]
@@ -137,7 +150,7 @@ fn child_stdout_read_buf() {
     let child = cmd.spawn().unwrap();
 
     let mut stdout = child.stdout.unwrap();
-    let mut buf: [MaybeUninit<u8>; 128] = MaybeUninit::uninit_array();
+    let mut buf: [MaybeUninit<u8>; 128] = [MaybeUninit::uninit(); 128];
     let mut buf = BorrowedBuf::from(buf.as_mut_slice());
     stdout.read_buf(buf.unfilled()).unwrap();
 
@@ -378,62 +391,6 @@ fn test_interior_nul_in_env_value_is_error() {
     }
 }
 
-/// Tests that process creation flags work by debugging a process.
-/// Other creation flags make it hard or impossible to detect
-/// behavioral changes in the process.
-#[test]
-#[cfg(windows)]
-fn test_creation_flags() {
-    use crate::os::windows::process::CommandExt;
-    use crate::sys::c::{BOOL, DWORD, INFINITE};
-    #[repr(C, packed)]
-    struct DEBUG_EVENT {
-        pub event_code: DWORD,
-        pub process_id: DWORD,
-        pub thread_id: DWORD,
-        // This is a union in the real struct, but we don't
-        // need this data for the purposes of this test.
-        pub _junk: [u8; 164],
-    }
-
-    extern "system" {
-        fn WaitForDebugEvent(lpDebugEvent: *mut DEBUG_EVENT, dwMilliseconds: DWORD) -> BOOL;
-        fn ContinueDebugEvent(
-            dwProcessId: DWORD,
-            dwThreadId: DWORD,
-            dwContinueStatus: DWORD,
-        ) -> BOOL;
-    }
-
-    const DEBUG_PROCESS: DWORD = 1;
-    const EXIT_PROCESS_DEBUG_EVENT: DWORD = 5;
-    const DBG_EXCEPTION_NOT_HANDLED: DWORD = 0x80010001;
-
-    let mut child =
-        Command::new("cmd").creation_flags(DEBUG_PROCESS).stdin(Stdio::piped()).spawn().unwrap();
-    child.stdin.take().unwrap().write_all(b"exit\r\n").unwrap();
-    let mut events = 0;
-    let mut event = DEBUG_EVENT { event_code: 0, process_id: 0, thread_id: 0, _junk: [0; 164] };
-    loop {
-        if unsafe { WaitForDebugEvent(&mut event as *mut DEBUG_EVENT, INFINITE) } == 0 {
-            panic!("WaitForDebugEvent failed!");
-        }
-        events += 1;
-
-        if event.event_code == EXIT_PROCESS_DEBUG_EVENT {
-            break;
-        }
-
-        if unsafe {
-            ContinueDebugEvent(event.process_id, event.thread_id, DBG_EXCEPTION_NOT_HANDLED)
-        } == 0
-        {
-            panic!("ContinueDebugEvent failed!");
-        }
-    }
-    assert!(events > 0);
-}
-
 #[test]
 fn test_command_implements_send_sync() {
     fn take_send_sync_type<T: Send + Sync>(_: T) {}
@@ -452,7 +409,7 @@ fn env_empty() {
 #[test]
 #[cfg(not(windows))]
 #[cfg_attr(any(target_os = "emscripten", target_env = "sgx"), ignore)]
-fn main() {
+fn debug_print() {
     const PIDFD: &'static str =
         if cfg!(target_os = "linux") { "    create_pidfd: false,\n" } else { "" };
 
@@ -541,6 +498,51 @@ fn main() {
 {PIDFD}}}"#
         )
     );
+
+    let mut command_with_removed_env = Command::new("boring-name");
+    command_with_removed_env.env_remove("FOO").env_remove("BAR");
+    assert_eq!(format!("{command_with_removed_env:?}"), r#"env -u BAR -u FOO "boring-name""#);
+    assert_eq!(
+        format!("{command_with_removed_env:#?}"),
+        format!(
+            r#"Command {{
+    program: "boring-name",
+    args: [
+        "boring-name",
+    ],
+    env: CommandEnv {{
+        clear: false,
+        vars: {{
+            "BAR": None,
+            "FOO": None,
+        }},
+    }},
+{PIDFD}}}"#
+        )
+    );
+
+    let mut command_with_cleared_env = Command::new("boring-name");
+    command_with_cleared_env.env_clear().env("BAR", "val").env_remove("FOO");
+    assert_eq!(format!("{command_with_cleared_env:?}"), r#"env -i BAR="val" "boring-name""#);
+    assert_eq!(
+        format!("{command_with_cleared_env:#?}"),
+        format!(
+            r#"Command {{
+    program: "boring-name",
+    args: [
+        "boring-name",
+    ],
+    env: CommandEnv {{
+        clear: true,
+        vars: {{
+            "BAR": Some(
+                "val",
+            ),
+        }},
+    }},
+{PIDFD}}}"#
+        )
+    );
 }
 
 // See issue #91991
@@ -581,4 +583,19 @@ fn run_canonical_bat_script() {
         .unwrap();
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "Hello, fellow Rustaceans!");
+}
+
+#[test]
+fn terminate_exited_process() {
+    let mut cmd = if cfg!(target_os = "android") {
+        let mut p = shell_cmd();
+        p.args(&["-c", "true"]);
+        p
+    } else {
+        known_command()
+    };
+    let mut p = cmd.stdout(Stdio::null()).spawn().unwrap();
+    p.wait().unwrap();
+    assert!(p.kill().is_ok());
+    assert!(p.kill().is_ok());
 }

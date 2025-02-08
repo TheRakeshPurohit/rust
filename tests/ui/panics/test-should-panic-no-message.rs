@@ -1,7 +1,7 @@
-// run-fail
-// compile-flags: --test
-// check-stdout
-// ignore-emscripten no processes
+//@ run-fail
+//@ compile-flags: --test
+//@ check-stdout
+//@ needs-subprocess
 
 #[test]
 #[should_panic(expected = "foo")]

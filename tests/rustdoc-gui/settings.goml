@@ -35,8 +35,12 @@ wait-for: "#alternative-display #search"
 assert: "#main-content.hidden"
 
 // Now let's check the content of the settings menu.
+// If we are on the settings page, the menu doesn't work the same so we set
+// the theme manually.
 set-local-storage: {"rustdoc-theme": "dark", "rustdoc-use-system-theme": "false"}
+// We reload the page so the local storage settings are being used.
 reload:
+
 click: "#settings-menu"
 wait-for: "#settings"
 
@@ -56,19 +60,19 @@ move-cursor-to: "#settings-menu > a"
 assert-css: (
     "#theme-dark",
     {
-        "border-color": "rgb(153, 153, 153)",
-        "box-shadow": "rgb(53, 53, 53) 0px 0px 0px 3px inset",
+        "border-color": "#999",
+        "box-shadow": "#353535 0px 0px 0px 3px inset",
         "border-width": "2px",
     },
 )
-assert-css: ("#theme-light", {"border-color": "rgb(153, 153, 153)", "box-shadow": "none"})
+assert-css: ("#theme-light", {"border-color": "#999", "box-shadow": "none"})
 // Let's start with the hover for radio buttons.
 move-cursor-to: "#theme-dark"
 assert-css: (
     "#theme-dark",
     {
-        "border-color": "rgb(33, 150, 243)",
-        "box-shadow": "rgb(53, 53, 53) 0px 0px 0px 3px inset",
+        "border-color": "#2196f3",
+        "box-shadow": "#353535 0px 0px 0px 3px inset",
         "border-width": "2px",
     },
 )
@@ -76,7 +80,7 @@ move-cursor-to: "#theme-light"
 assert-css: (
     "#theme-light",
     {
-        "border-color": "rgb(33, 150, 243)",
+        "border-color": "#2196f3",
         "box-shadow": "none",
         "border-width": "2px",
     }
@@ -87,8 +91,8 @@ focus: "#theme-dark"
 assert-css: (
     "#theme-dark",
     {
-        "border-color": "rgb(153, 153, 153)",
-        "box-shadow": "rgb(53, 53, 53) 0px 0px 0px 3px inset, rgb(33, 150, 243) 0px 0px 2px 2px",
+        "border-color": "#999",
+        "box-shadow": "#353535 0px 0px 0px 3px inset, #2196f3 0px 0px 2px 2px",
         "border-width": "2px",
     },
 )
@@ -96,8 +100,8 @@ focus: "#theme-light"
 assert-css: (
     "#theme-light",
     {
-        "border-color": "rgb(153, 153, 153)",
-        "box-shadow": "rgb(33, 150, 243) 0px 0px 1px 1px",
+        "border-color": "#999",
+        "box-shadow": "#2196f3 0px 0px 1px 1px",
         "border-width": "2px",
     },
 )
@@ -107,8 +111,8 @@ focus: "#theme-dark"
 assert-css: (
     "#theme-dark",
     {
-        "border-color": "rgb(33, 150, 243)",
-        "box-shadow": "rgb(53, 53, 53) 0px 0px 0px 3px inset, rgb(33, 150, 243) 0px 0px 2px 2px",
+        "border-color": "#2196f3",
+        "box-shadow": "#353535 0px 0px 0px 3px inset, #2196f3 0px 0px 2px 2px",
         "border-width": "2px",
     },
 )
@@ -117,8 +121,8 @@ focus: "#theme-light"
 assert-css: (
     "#theme-light",
     {
-        "border-color": "rgb(33, 150, 243)",
-        "box-shadow": "rgb(33, 150, 243) 0px 0px 1px 1px",
+        "border-color": "#2196f3",
+        "box-shadow": "#2196f3 0px 0px 1px 1px",
         "border-width": "2px",
     },
 )
@@ -154,8 +158,8 @@ compare-elements-position-near: (
 assert-css: (
     "#auto-hide-large-items",
     {
-        "background-color": "rgb(33, 150, 243)",
-        "border-color": "rgb(153, 153, 153)",
+        "background-color": "#2196f3",
+        "border-color": "#999",
         // 1px border when checked
         "border-width": "1px",
     },
@@ -164,7 +168,7 @@ assert-css: (
     "#auto-hide-method-docs",
     {
         "background-color": "rgba(0, 0, 0, 0)",
-        "border-color": "rgb(153, 153, 153)",
+        "border-color": "#999",
         // 2px border when unchecked
         "border-width": "2px",
     },
@@ -174,8 +178,8 @@ move-cursor-to: "#auto-hide-large-items"
 assert-css: (
     "#auto-hide-large-items",
     {
-        "background-color": "rgb(33, 150, 243)",
-        "border-color": "rgb(33, 150, 243)",
+        "background-color": "#2196f3",
+        "border-color": "#2196f3",
         // 1px border when checked
         "border-width": "1px",
     },
@@ -185,7 +189,7 @@ assert-css: (
     "#auto-hide-method-docs",
     {
         "background-color": "rgba(0, 0, 0, 0)",
-        "border-color": "rgb(33, 150, 243)",
+        "border-color": "#2196f3",
         // 2px border when unchecked
         "border-width": "2px",
     },
@@ -196,9 +200,9 @@ focus: "#auto-hide-large-items"
 assert-css: (
     "#auto-hide-large-items",
     {
-        "background-color": "rgb(33, 150, 243)",
-        "border-color": "rgb(153, 153, 153)",
-        "box-shadow": "rgb(33, 150, 243) 0px 0px 1px 1px",
+        "background-color": "#2196f3",
+        "border-color": "#999",
+        "box-shadow": "#2196f3 0px 0px 1px 1px",
         // 1px border when checked
         "border-width": "1px",
     },
@@ -208,8 +212,8 @@ assert-css: (
     "#auto-hide-method-docs",
     {
         "background-color": "rgba(0, 0, 0, 0)",
-        "border-color": "rgb(153, 153, 153)",
-        "box-shadow": "rgb(33, 150, 243) 0px 0px 1px 1px",
+        "border-color": "#999",
+        "box-shadow": "#2196f3 0px 0px 1px 1px",
         // 2px border when unchecked
         "border-width": "2px",
     },
@@ -220,9 +224,9 @@ focus: "#auto-hide-large-items"
 assert-css: (
     "#auto-hide-large-items",
     {
-        "background-color": "rgb(33, 150, 243)",
-        "border-color": "rgb(33, 150, 243)",
-        "box-shadow": "rgb(33, 150, 243) 0px 0px 1px 1px",
+        "background-color": "#2196f3",
+        "border-color": "#2196f3",
+        "box-shadow": "#2196f3 0px 0px 1px 1px",
         // 1px border when checked
         "border-width": "1px",
     },
@@ -233,8 +237,8 @@ assert-css: (
     "#auto-hide-method-docs",
     {
         "background-color": "rgba(0, 0, 0, 0)",
-        "border-color": "rgb(33, 150, 243)",
-        "box-shadow": "rgb(33, 150, 243) 0px 0px 1px 1px",
+        "border-color": "#2196f3",
+        "box-shadow": "#2196f3 0px 0px 1px 1px",
         // 2px border when unchecked
         "border-width": "2px",
     },
@@ -253,15 +257,15 @@ assert-text: ("#preferred-light-theme .setting-radio-name", "Preferred light the
 // We now check that clicking on the toggles' text is like clicking on the checkbox.
 // To test it, we use the "Disable keyboard shortcuts".
 set-local-storage: {"rustdoc-disable-shortcuts": "false"}
-click: ".setting-line:last-child .setting-check span"
+click: "#disable-shortcuts"
 assert-local-storage: {"rustdoc-disable-shortcuts": "true"}
 
 // We now check that focusing a toggle and pressing Space is like clicking on it.
 assert-local-storage: {"rustdoc-disable-shortcuts": "true"}
-focus: ".setting-line:last-child .setting-check input"
+focus: "#disable-shortcuts"
 press-key: "Space"
 assert-local-storage: {"rustdoc-disable-shortcuts": "false"}
-focus: ".setting-line:last-child .setting-check input"
+focus: "#disable-shortcuts"
 press-key: "Space"
 assert-local-storage: {"rustdoc-disable-shortcuts": "true"}
 
@@ -272,7 +276,7 @@ assert-false: "#help-button .popover"
 wait-for-css: ("#settings-menu .popover", {"display": "block"})
 
 // Now turn keyboard shortcuts back on, and see if they work.
-click: ".setting-line:last-child .setting-check span"
+click: "#disable-shortcuts"
 assert-local-storage: {"rustdoc-disable-shortcuts": "false"}
 press-key: "Escape"
 press-key: "?"
@@ -301,10 +305,11 @@ wait-for-css: ("#help-button .popover", {"display": "block"})
 // Now we go to the settings page to check that the CSS is loaded as expected.
 go-to: "file://" + |DOC_PATH| + "/settings.html"
 wait-for: "#settings"
+assert-false: "#settings-menu"
 assert-css: (".setting-radio", {"cursor": "pointer"})
 
 assert-attribute-false: ("#settings", {"class": "popover"}, CONTAINS)
-compare-elements-position: (".sub form", "#settings", ("x"))
+compare-elements-position: (".sub form", "#settings", ["x"])
 
 // Check that setting-line has the same margin in this mode as in the popover.
 assert-css: (".setting-line", {"margin": |setting_line_margin|})
@@ -320,6 +325,5 @@ javascript: true
 show-text: true
 reload:
 set-window-size: (300, 1000)
-click: "#settings-menu"
 wait-for: "#settings"
 assert-css: (".setting-radio", {"cursor": "pointer"})

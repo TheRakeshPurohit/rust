@@ -1,4 +1,4 @@
-// build-fail
+//@ build-fail
 
 // Regression test for #66975
 #![feature(never_type)]
@@ -11,5 +11,5 @@ impl PrintName {
 }
 
 fn main() {
-    let _ = PrintName::VOID; //~ erroneous constant used
+    let _ = PrintName::VOID; //~ erroneous constant encountered
 }

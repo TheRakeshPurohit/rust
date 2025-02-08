@@ -1,6 +1,14 @@
 # `*-unknown-linux-ohos`
 
+**Tier: 2**
+
+* aarch64-unknown-linux-ohos
+* armv7-unknown-linux-ohos
+* x86_64-unknown-linux-ohos
+
 **Tier: 3**
+
+* loongarch64-unknown-linux-ohos
 
 Targets for the [OpenHarmony](https://gitee.com/openharmony/docs/) operating
 system.
@@ -8,6 +16,7 @@ system.
 ## Target maintainers
 
 - Amanieu d'Antras ([@Amanieu](https://github.com/Amanieu))
+- Lu Binglun ([@lubinglun](https://github.com/lubinglun))
 
 ## Setup
 
@@ -71,15 +80,62 @@ exec /path/to/ohos-sdk/linux/native/llvm/bin/clang++ \
   "$@"
 ```
 
+`x86_64-unknown-linux-ohos-clang.sh`
+
+```sh
+#!/bin/sh
+exec /path/to/ohos-sdk/linux/native/llvm/bin/clang \
+  -target x86_64-linux-ohos \
+  --sysroot=/path/to/ohos-sdk/linux/native/sysroot \
+  -D__MUSL__ \
+  "$@"
+```
+
+`x86_64-unknown-linux-ohos-clang++.sh`
+
+```sh
+#!/bin/sh
+exec /path/to/ohos-sdk/linux/native/llvm/bin/clang++ \
+  -target x86_64-linux-ohos \
+  --sysroot=/path/to/ohos-sdk/linux/native/sysroot \
+  -D__MUSL__ \
+  "$@"
+```
+
 Future versions of the OpenHarmony SDK will avoid the need for this process.
 
-## Building the target
+## Building Rust programs
 
-To build a rust toolchain, create a `config.toml` with the following contents:
+Rustup ships pre-compiled artifacts for this target, which you can install with:
+```sh
+rustup target add aarch64-unknown-linux-ohos
+rustup target add armv7-unknown-linux-ohos
+rustup target add x86_64-unknown-linux-ohos
+```
+
+You will need to configure the linker to use in `~/.cargo/config.toml`:
+```toml
+[target.aarch64-unknown-linux-ohos]
+ar = "/path/to/ohos-sdk/linux/native/llvm/bin/llvm-ar"
+linker = "/path/to/aarch64-unknown-linux-ohos-clang.sh"
+
+[target.armv7-unknown-linux-ohos]
+ar = "/path/to/ohos-sdk/linux/native/llvm/bin/llvm-ar"
+linker = "/path/to/armv7-unknown-linux-ohos-clang.sh"
+
+[target.x86_64-unknown-linux-ohos]
+ar = "/path/to/ohos-sdk/linux/native/llvm/bin/llvm-ar"
+linker = "/path/to/x86_64-unknown-linux-ohos-clang.sh"
+```
+
+## Building the target from source
+
+Instead of using `rustup`, you can instead build a rust toolchain from source.
+Create a `config.toml` with the following contents:
 
 ```toml
 profile = "compiler"
-changelog-seen = 2
+change-id = 115898
 
 [build]
 sanitizers = true
@@ -98,24 +154,13 @@ cxx = "/path/to/armv7-unknown-linux-ohos-clang++.sh"
 ar = "/path/to/ohos-sdk/linux/native/llvm/bin/llvm-ar"
 ranlib = "/path/to/ohos-sdk/linux/native/llvm/bin/llvm-ranlib"
 linker  = "/path/to/armv7-unknown-linux-ohos-clang.sh"
-```
 
-## Building Rust programs
-
-Rust does not yet ship pre-compiled artifacts for this target. To compile for
-this target, you will either need to build Rust with the target enabled (see
-"Building the target" above), or build your own copy of `core` by using
-`build-std` or similar.
-
-You will need to configure the linker to use in `~/.cargo/config`:
-```toml
-[target.aarch64-unknown-linux-ohos]
+[target.x86_64-unknown-linux-ohos]
+cc = "/path/to/x86_64-unknown-linux-ohos-clang.sh"
+cxx = "/path/to/x86_64-unknown-linux-ohos-clang++.sh"
 ar = "/path/to/ohos-sdk/linux/native/llvm/bin/llvm-ar"
-linker = "/path/to/aarch64-unknown-linux-ohos-clang.sh"
-
-[target.armv7-unknown-linux-ohos]
-ar = "/path/to/ohos-sdk/linux/native/llvm/bin/llvm-ar"
-linker = "/path/to/armv7-unknown-linux-ohos-clang.sh"
+ranlib = "/path/to/ohos-sdk/linux/native/llvm/bin/llvm-ranlib"
+linker  = "/path/to/x86_64-unknown-linux-ohos-clang.sh"
 ```
 
 ## Testing

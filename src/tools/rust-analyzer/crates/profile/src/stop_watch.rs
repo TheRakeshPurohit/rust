@@ -1,4 +1,7 @@
 //! Like `std::time::Instant`, but also measures memory & CPU cycles.
+
+#![allow(clippy::print_stderr)]
+
 use std::{
     fmt,
     time::{Duration, Instant},
@@ -10,13 +13,13 @@ pub struct StopWatch {
     time: Instant,
     #[cfg(target_os = "linux")]
     counter: Option<perf_event::Counter>,
-    memory: Option<MemoryUsage>,
+    memory: MemoryUsage,
 }
 
 pub struct StopWatchSpan {
     pub time: Duration,
     pub instructions: Option<u64>,
-    pub memory: Option<MemoryUsage>,
+    pub memory: MemoryUsage,
 }
 
 impl StopWatch {
@@ -26,11 +29,10 @@ impl StopWatch {
             // When debugging rust-analyzer using rr, the perf-related syscalls cause it to abort.
             // We allow disabling perf by setting the env var `RA_DISABLE_PERF`.
 
-            use once_cell::sync::Lazy;
-            static PERF_ENABLED: Lazy<bool> =
-                Lazy::new(|| std::env::var_os("RA_DISABLE_PERF").is_none());
+            use std::sync::OnceLock;
+            static PERF_ENABLED: OnceLock<bool> = OnceLock::new();
 
-            if *PERF_ENABLED {
+            if *PERF_ENABLED.get_or_init(|| std::env::var_os("RA_DISABLE_PERF").is_none()) {
                 let mut counter = perf_event::Builder::new()
                     .build()
                     .map_err(|err| eprintln!("Failed to create perf counter: {err}"))
@@ -45,20 +47,16 @@ impl StopWatch {
                 None
             }
         };
+        let memory = MemoryUsage::now();
         let time = Instant::now();
         StopWatch {
             time,
             #[cfg(target_os = "linux")]
             counter,
-            memory: None,
+            memory,
         }
     }
-    pub fn memory(mut self, yes: bool) -> StopWatch {
-        if yes {
-            self.memory = Some(MemoryUsage::now());
-        }
-        self
-    }
+
     pub fn elapsed(&mut self) -> StopWatchSpan {
         let time = self.time.elapsed();
 
@@ -69,7 +67,7 @@ impl StopWatch {
         #[cfg(not(target_os = "linux"))]
         let instructions = None;
 
-        let memory = self.memory.map(|it| MemoryUsage::now() - it);
+        let memory = MemoryUsage::now() - self.memory;
         StopWatchSpan { time, instructions, memory }
     }
 }
@@ -93,9 +91,7 @@ impl fmt::Display for StopWatchSpan {
             }
             write!(f, ", {instructions}{prefix}instr")?;
         }
-        if let Some(memory) = self.memory {
-            write!(f, ", {memory}")?;
-        }
+        write!(f, ", {}", self.memory)?;
         Ok(())
     }
 }

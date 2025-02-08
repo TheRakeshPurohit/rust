@@ -18,6 +18,8 @@
 #![crate_type = "rlib"]
 #![no_core]
 #![allow(non_camel_case_types)]
+#![allow(internal_features)]
+#![warn(unreachable_pub)]
 
 #[lang = "sized"]
 trait Sized {}
@@ -27,6 +29,8 @@ auto trait Sync {}
 trait Copy {}
 #[lang = "freeze"]
 auto trait Freeze {}
+
+impl<T: ?Sized> Copy for *mut T {}
 
 #[lang = "drop_in_place"]
 #[inline]

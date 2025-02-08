@@ -2,11 +2,6 @@
 //! It is intended to be completely decoupled from the
 //! parser, so as to allow to evolve the tree representation
 //! and the parser algorithm independently.
-//!
-//! The `TreeSink` trait is the bridge between the parser and the
-//! tree builder: the parser produces a stream of events like
-//! `start node`, `finish node`, and `FileBuilder` converts
-//! this stream to a real tree.
 use std::mem;
 
 use crate::{
@@ -17,7 +12,7 @@ use crate::{
 /// `Parser` produces a flat list of `Event`s.
 /// They are converted to a tree-structure in
 /// a separate pass, via `TreeBuilder`.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum Event {
     /// This event signifies the start of the node.
     /// It should be either abandoned (in which case the

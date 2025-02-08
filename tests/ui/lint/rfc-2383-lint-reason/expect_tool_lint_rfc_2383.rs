@@ -1,5 +1,4 @@
-// check-pass
-#![feature(lint_reasons)]
+//@ check-pass
 
 //! This file tests the `#[expect]` attribute implementation for tool lints. The same
 //! file is used to test clippy and rustdoc. Any changes to this file should be synced
@@ -22,12 +21,8 @@ mod rustc_ok {
     pub fn rustc_lints() {
         let x = 42.0;
 
-        #[expect(illegal_floating_point_literal_pattern)]
-        match x {
-            5.0 => {}
-            6.0 => {}
-            _ => {}
-        }
+        #[expect(invalid_nan_comparisons)]
+        let _b = x == f32::NAN;
     }
 }
 
@@ -40,13 +35,11 @@ mod rustc_warn {
     pub fn rustc_lints() {
         let x = 42;
 
-        #[expect(illegal_floating_point_literal_pattern)]
+        #[expect(invalid_nan_comparisons)]
         //~^ WARNING this lint expectation is unfulfilled [unfulfilled_lint_expectations]
-        match x {
-            5 => {}
-            6 => {}
-            _ => {}
-        }
+        //~| WARNING this lint expectation is unfulfilled [unfulfilled_lint_expectations]
+        //~| NOTE duplicate diagnostic emitted due to `-Z deduplicate-diagnostics=no`
+        let _b = x == 5;
     }
 }
 

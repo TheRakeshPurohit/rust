@@ -1,10 +1,9 @@
-// compile-flags: -C panic=abort
+//@ compile-flags: -C panic=abort
 
 // Test that `nounwind` attributes are also applied to extern `C-unwind` Rust functions
 // when the code is compiled with `panic=abort`.
 
 #![crate_type = "lib"]
-#![feature(c_unwind)]
 
 // CHECK: @rust_item_that_can_unwind() unnamed_addr [[ATTR0:#[0-9]+]]
 #[no_mangle]

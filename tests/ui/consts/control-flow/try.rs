@@ -3,7 +3,9 @@
 
 const fn opt() -> Option<i32> {
     let x = Some(2);
-    x?; //~ ERROR `?` is not allowed in a `const fn`
+    x?;
+    //~^ ERROR: `?` is not allowed
+    //~| ERROR: `?` is not allowed
     None
 }
 

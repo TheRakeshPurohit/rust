@@ -1,4 +1,4 @@
-// revisions: full min
+//@ revisions: full min
 
 #![cfg_attr(full, feature(adt_const_params))]
 #![cfg_attr(full, allow(incomplete_features))]
@@ -13,7 +13,7 @@ struct Foo<const N: [u8; {
     }
 
     Foo::<17>::value()
-    //~^ ERROR cannot call non-const fn
+    //~^ ERROR cannot call non-const associated function
 }]>;
 //[min]~^^^^^^^^^^^^ ERROR `[u8; {
 

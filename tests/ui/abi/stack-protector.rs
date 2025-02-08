@@ -1,9 +1,9 @@
-// run-pass
-// only-x86_64-unknown-linux-gnu
-// revisions: ssp no-ssp
-// [ssp] compile-flags: -Z stack-protector=all
-// compile-flags: -C opt-level=2
-// compile-flags: -g
+//@ run-pass
+//@ only-x86_64-unknown-linux-gnu
+//@ revisions: ssp no-ssp
+//@ [ssp] compile-flags: -Z stack-protector=all
+//@ compile-flags: -C opt-level=2
+//@ compile-flags: -g
 
 use std::env;
 use std::process::{Command, ExitStatus};
@@ -40,6 +40,8 @@ fn vulnerable_function() {
     // Overwrite the on-stack return address with the address of `malicious_code()`,
     // thereby jumping to that function when returning from `vulnerable_function()`.
     unsafe { fill(stackaddr, bad_code_ptr, 20); }
+    // Capture the address, so the write is not optimized away.
+    std::hint::black_box(stackaddr);
 }
 
 // Use an uninlined function with its own stack frame to make sure that we don't

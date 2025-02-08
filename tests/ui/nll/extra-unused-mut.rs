@@ -1,8 +1,8 @@
 // extra unused mut lint tests for #51918
 
-// check-pass
+//@ check-pass
 
-#![feature(generators)]
+#![feature(coroutines)]
 #![deny(unused_mut)]
 
 fn ref_argument(ref _y: i32) {}
@@ -16,8 +16,10 @@ fn mutable_upvar() {
 }
 
 // #50897
-fn generator_mutable_upvar() {
+fn coroutine_mutable_upvar() {
     let mut x = 0;
+
+    #[coroutine]
     move || {
         x = 1;
         yield;
@@ -36,13 +38,13 @@ struct Expr {
 // #51904
 fn parse_dot_or_call_expr_with(mut attrs: Vec<u32>) {
     let x = Expr { attrs: vec![] };
-    Some(Some(x)).map(|expr|
+    Some(Some(x)).map(|expr| {
         expr.map(|mut expr| {
             attrs.push(666);
             expr.attrs = attrs;
             expr
         })
-    );
+    });
 }
 
 // Found when trying to bootstrap rustc

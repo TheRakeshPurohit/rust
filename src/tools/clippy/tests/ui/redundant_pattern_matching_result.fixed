@@ -1,4 +1,3 @@
-//@run-rustfix
 #![warn(clippy::all)]
 #![warn(clippy::redundant_pattern_matching)]
 #![allow(deprecated, unused_must_use)]
@@ -6,6 +5,7 @@
     clippy::if_same_then_else,
     clippy::match_like_matches_macro,
     clippy::needless_bool,
+    clippy::needless_if,
     clippy::uninlined_format_args,
     clippy::unnecessary_wraps
 )]

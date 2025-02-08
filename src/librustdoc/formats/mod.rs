@@ -2,27 +2,11 @@ pub(crate) mod cache;
 pub(crate) mod item_type;
 pub(crate) mod renderer;
 
+pub(crate) use renderer::{FormatRenderer, run_format};
 use rustc_hir::def_id::DefId;
-
-pub(crate) use renderer::{run_format, FormatRenderer};
 
 use crate::clean::{self, ItemId};
 use crate::html::render::Context;
-
-/// Specifies whether rendering directly implemented trait items or ones from a certain Deref
-/// impl.
-pub(crate) enum AssocItemRender<'a> {
-    All,
-    DerefFor { trait_: &'a clean::Path, type_: &'a clean::Type, deref_mut_: bool },
-}
-
-/// For different handling of associated items from the Deref target of a type rather than the type
-/// itself.
-#[derive(Copy, Clone, PartialEq)]
-pub(crate) enum RenderMode {
-    Normal,
-    ForDeref { mut_: bool },
-}
 
 /// Metadata about implementations for a type or trait.
 #[derive(Clone, Debug)]
@@ -32,7 +16,7 @@ pub(crate) struct Impl {
 
 impl Impl {
     pub(crate) fn inner_impl(&self) -> &clean::Impl {
-        match *self.impl_item.kind {
+        match self.impl_item.kind {
             clean::ImplItem(ref impl_) => impl_,
             _ => panic!("non-impl item found in impl"),
         }

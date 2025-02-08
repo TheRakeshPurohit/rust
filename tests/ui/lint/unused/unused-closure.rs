@@ -1,8 +1,7 @@
-// Test that closures and generators are "must use" types.
-// edition:2018
+// Test that closures and coroutines are "must use" types.
+//@ edition:2018
 
-#![feature(async_closure)]
-#![feature(generators)]
+#![feature(coroutines, stmt_expr_attributes)]
 #![deny(unused_must_use)]
 
 fn unused() {
@@ -26,7 +25,7 @@ fn unused() {
 
 fn ignored() {
     let _ = || {};
-    let _ = || yield 42;
+    let _ = #[coroutine] || yield 42;
 }
 
 fn main() {

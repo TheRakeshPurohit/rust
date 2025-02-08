@@ -1,6 +1,4 @@
-// check-pass
-
-#![feature(c_unwind, const_extern_fn)]
+//@ check-pass
 
 // We don't unwind in const-eval anyways.
 const extern "C" fn foo() {

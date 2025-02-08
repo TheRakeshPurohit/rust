@@ -1,8 +1,9 @@
+use rustc_abi::{FieldIdx, VariantIdx};
+use rustc_hir::HirId;
+use rustc_macros::{HashStable, TyDecodable, TyEncodable, TypeFoldable, TypeVisitable};
+
 use crate::ty;
 use crate::ty::Ty;
-
-use rustc_hir::HirId;
-use rustc_target::abi::{FieldIdx, VariantIdx};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, TyEncodable, TyDecodable, HashStable)]
 #[derive(TypeFoldable, TypeVisitable)]
@@ -36,6 +37,10 @@ pub enum ProjectionKind {
 
     /// A subslice covering a range of values like `B[x..y]`.
     Subslice,
+
+    /// A conversion from an opaque type to its hidden type so we can
+    /// do further projections on it.
+    OpaqueCast,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, TyEncodable, TyDecodable, HashStable)]

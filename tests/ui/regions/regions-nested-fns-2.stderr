@@ -1,6 +1,9 @@
 error[E0597]: `y` does not live long enough
   --> $DIR/regions-nested-fns-2.rs:7:25
    |
+LL |     let y = 3;
+   |         - binding `y` declared here
+LL |     ignore(
 LL |         |z| {
    |         --- value captured here
 LL |             if false { &y } else { z }
@@ -12,6 +15,6 @@ LL |             if false { &y } else { z }
 LL | }
    | - `y` dropped here while still borrowed
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0597`.

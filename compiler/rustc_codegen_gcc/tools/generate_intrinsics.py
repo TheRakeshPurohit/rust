@@ -3,7 +3,6 @@ import os
 import re
 import sys
 import subprocess
-from os import walk
 
 
 def run_command(command, cwd=None):
@@ -46,11 +45,11 @@ def convert_to_string(content):
     return content
 
 
-def extract_instrinsics_from_llvm(llvm_path, intrinsics):
-    p = subprocess.Popen(
-        ["llvm-tblgen", "llvm/IR/Intrinsics.td"],
-        cwd=os.path.join(llvm_path, "llvm/include"),
-        stdout=subprocess.PIPE)
+def extract_intrinsics_from_llvm(llvm_path, intrinsics):
+    command = ["llvm-tblgen", "llvm/IR/Intrinsics.td"]
+    cwd = os.path.join(llvm_path, "llvm/include")
+    print("=> Running command `{}` from `{}`".format(command, cwd))
+    p = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE)
     output, err = p.communicate()
     lines = convert_to_string(output).splitlines()
     pos = 0
@@ -89,7 +88,7 @@ def append_translation(json_data, p, array):
     append_intrinsic(array, content[1], content[3])
 
 
-def extract_instrinsics_from_llvmint(llvmint, intrinsics):
+def extract_intrinsics_from_llvmint(llvmint, intrinsics):
     archs = [
         "AMDGPU",
         "aarch64",
@@ -153,9 +152,9 @@ def update_intrinsics(llvm_path, llvmint, llvmint2):
     intrinsics_llvmint = {}
     all_intrinsics = {}
 
-    extract_instrinsics_from_llvm(llvm_path, intrinsics_llvm)
-    extract_instrinsics_from_llvmint(llvmint, intrinsics_llvmint)
-    extract_instrinsics_from_llvmint(llvmint2, intrinsics_llvmint)
+    extract_intrinsics_from_llvm(llvm_path, intrinsics_llvm)
+    extract_intrinsics_from_llvmint(llvmint, intrinsics_llvmint)
+    extract_intrinsics_from_llvmint(llvmint2, intrinsics_llvmint)
 
     intrinsics = {}
     # We give priority to translations from LLVM over the ones from llvmint.
@@ -180,7 +179,7 @@ def update_intrinsics(llvm_path, llvmint, llvmint2):
             intrinsics[arch].sort(key=lambda x: (x[0], x[2]))
             out.write('    // {}\n'.format(arch))
             for entry in intrinsics[arch]:
-                if entry[2] == True: # if it is a duplicate
+                if entry[2] is True: # if it is a duplicate
                     out.write('    // [DUPLICATE]: "{}" => "{}",\n'.format(entry[0], entry[1]))
                 elif "_round_mask" in entry[1]:
                     out.write('    // [INVALID CONVERSION]: "{}" => "{}",\n'.format(entry[0], entry[1]))

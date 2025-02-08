@@ -1,7 +1,8 @@
 use proc_macro::{Diagnostic, Level, MultiSpan};
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{spanned::Spanned, Attribute, Error as SynError, Meta};
+use syn::spanned::Spanned;
+use syn::{Attribute, Error as SynError, Meta};
 
 #[derive(Debug)]
 pub(crate) enum DiagnosticDeriveError {
@@ -14,7 +15,7 @@ impl DiagnosticDeriveError {
         match self {
             DiagnosticDeriveError::SynError(e) => e.to_compile_error(),
             DiagnosticDeriveError::ErrorHandled => {
-                // Return ! to avoid having to create a blank DiagnosticBuilder to return when an
+                // Return ! to avoid having to create a blank Diag to return when an
                 // error has already been emitted to the compiler.
                 quote! {
                     { unreachable!(); }
@@ -54,8 +55,8 @@ fn path_to_string(path: &syn::Path) -> String {
 
 /// Returns an error diagnostic on span `span` with msg `msg`.
 #[must_use]
-pub(crate) fn span_err(span: impl MultiSpan, msg: &str) -> Diagnostic {
-    Diagnostic::spanned(span, Level::Error, msg)
+pub(crate) fn span_err<T: Into<String>>(span: impl MultiSpan, msg: T) -> Diagnostic {
+    Diagnostic::spanned(span, Level::Error, format!("derive(Diagnostic): {}", msg.into()))
 }
 
 /// Emit a diagnostic on span `$span` with msg `$msg` (optionally performing additional decoration
@@ -77,11 +78,9 @@ pub(crate) fn invalid_attr(attr: &Attribute) -> Diagnostic {
     let span = attr.span().unwrap();
     let path = path_to_string(attr.path());
     match attr.meta {
-        Meta::Path(_) => span_err(span, &format!("`#[{path}]` is not a valid attribute")),
-        Meta::NameValue(_) => {
-            span_err(span, &format!("`#[{path} = ...]` is not a valid attribute"))
-        }
-        Meta::List(_) => span_err(span, &format!("`#[{path}(...)]` is not a valid attribute")),
+        Meta::Path(_) => span_err(span, format!("`#[{path}]` is not a valid attribute")),
+        Meta::NameValue(_) => span_err(span, format!("`#[{path} = ...]` is not a valid attribute")),
+        Meta::List(_) => span_err(span, format!("`#[{path}(...)]` is not a valid attribute")),
     }
 }
 

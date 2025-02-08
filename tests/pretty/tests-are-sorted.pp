@@ -4,14 +4,15 @@
 use ::std::prelude::rust_2015::*;
 #[macro_use]
 extern crate std;
-// compile-flags: --crate-type=lib --test --remap-path-prefix={{src-base}}/=/the/src/ --remap-path-prefix={{src-base}}\=/the/src/
-// pretty-compare-only
-// pretty-mode:expanded
-// pp-exact:tests-are-sorted.pp
+//@ compile-flags: --crate-type=lib --test --remap-path-prefix={{src-base}}/=/the/src/ --remap-path-prefix={{src-base}}\=/the/src/
+//@ pretty-compare-only
+//@ pretty-mode:expanded
+//@ pp-exact:tests-are-sorted.pp
 
 extern crate test;
 #[cfg(test)]
 #[rustc_test_marker = "m_test"]
+#[doc(hidden)]
 pub const m_test: test::TestDescAndFn =
     test::TestDescAndFn {
         desc: test::TestDesc {
@@ -28,13 +29,15 @@ pub const m_test: test::TestDescAndFn =
             should_panic: test::ShouldPanic::No,
             test_type: test::TestType::Unknown,
         },
-        testfn: test::StaticTestFn(|| test::assert_test_result(m_test())),
+        testfn: test::StaticTestFn(#[coverage(off)] ||
+                test::assert_test_result(m_test())),
     };
 fn m_test() {}
 
 extern crate test;
 #[cfg(test)]
 #[rustc_test_marker = "z_test"]
+#[doc(hidden)]
 pub const z_test: test::TestDescAndFn =
     test::TestDescAndFn {
         desc: test::TestDesc {
@@ -51,7 +54,8 @@ pub const z_test: test::TestDescAndFn =
             should_panic: test::ShouldPanic::No,
             test_type: test::TestType::Unknown,
         },
-        testfn: test::StaticTestFn(|| test::assert_test_result(z_test())),
+        testfn: test::StaticTestFn(#[coverage(off)] ||
+                test::assert_test_result(z_test())),
     };
 #[ignore = "not yet implemented"]
 fn z_test() {}
@@ -59,6 +63,7 @@ fn z_test() {}
 extern crate test;
 #[cfg(test)]
 #[rustc_test_marker = "a_test"]
+#[doc(hidden)]
 pub const a_test: test::TestDescAndFn =
     test::TestDescAndFn {
         desc: test::TestDesc {
@@ -75,11 +80,13 @@ pub const a_test: test::TestDescAndFn =
             should_panic: test::ShouldPanic::No,
             test_type: test::TestType::Unknown,
         },
-        testfn: test::StaticTestFn(|| test::assert_test_result(a_test())),
+        testfn: test::StaticTestFn(#[coverage(off)] ||
+                test::assert_test_result(a_test())),
     };
 fn a_test() {}
 #[rustc_main]
-#[no_coverage]
+#[coverage(off)]
+#[doc(hidden)]
 pub fn main() -> () {
     extern crate test;
     test::test_main_static(&[&a_test, &m_test, &z_test])

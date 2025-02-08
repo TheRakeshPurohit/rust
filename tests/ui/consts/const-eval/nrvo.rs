@@ -1,9 +1,8 @@
-// run-pass
+//@ run-pass
 
 // When the NRVO is applied, the return place (`_0`) gets treated like a normal local. For example,
-// its address may be taken and it may be written to indirectly. Ensure that MIRI can handle this.
-
-#![feature(const_mut_refs)]
+// its address may be taken and it may be written to indirectly. Ensure that the const-eval
+// interpreter can handle this.
 
 #[inline(never)] // Try to ensure that MIR optimizations don't optimize this away.
 const fn init(buf: &mut [u8; 1024]) {

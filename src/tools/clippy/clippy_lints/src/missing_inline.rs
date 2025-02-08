@@ -1,27 +1,30 @@
 use clippy_utils::diagnostics::span_lint;
-use rustc_ast::ast;
 use rustc_hir as hir;
-use rustc_lint::{self, LateContext, LateLintPass, LintContext};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
-use rustc_span::source_map::Span;
-use rustc_span::sym;
+use rustc_hir::Attribute;
+use rustc_lint::{LateContext, LateLintPass, LintContext};
+use rustc_middle::ty::AssocItemContainer;
+use rustc_session::declare_lint_pass;
+use rustc_span::{Span, sym};
 
 declare_clippy_lint! {
     /// ### What it does
     /// It lints if an exported function, method, trait method with default impl,
     /// or trait method impl is not `#[inline]`.
     ///
-    /// ### Why is this bad?
-    /// In general, it is not. Functions can be inlined across
-    /// crates when that's profitable as long as any form of LTO is used. When LTO is disabled,
-    /// functions that are not `#[inline]` cannot be inlined across crates. Certain types of crates
-    /// might intend for most of the methods in their public API to be able to be inlined across
-    /// crates even when LTO is disabled. For these types of crates, enabling this lint might make
-    /// sense. It allows the crate to require all exported methods to be `#[inline]` by default, and
+    /// ### Why restrict this?
+    /// When a function is not marked `#[inline]`, it is not
+    /// [a “small” candidate for automatic inlining][small], and LTO is not in use, then it is not
+    /// possible for the function to be inlined into the code of any crate other than the one in
+    /// which it is defined.  Depending on the role of the function and the relationship of the crates,
+    /// this could significantly reduce performance.
+    ///
+    /// Certain types of crates might intend for most of the methods in their public API to be able
+    /// to be inlined across crates even when LTO is disabled.
+    /// This lint allows those crates to require all exported methods to be `#[inline]` by default, and
     /// then opt out for specific methods where this might not make sense.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// pub fn foo() {} // missing #[inline]
     /// fn ok() {} // ok
     /// #[inline] pub fn bar() {} // ok
@@ -52,20 +55,22 @@ declare_clippy_lint! {
     ///    fn def_bar() {} // missing #[inline]
     /// }
     /// ```
+    ///
+    /// [small]: https://github.com/rust-lang/rust/pull/116505
     #[clippy::version = "pre 1.29.0"]
     pub MISSING_INLINE_IN_PUBLIC_ITEMS,
     restriction,
     "detects missing `#[inline]` attribute for public callables (functions, trait methods, methods...)"
 }
 
-fn check_missing_inline_attrs(cx: &LateContext<'_>, attrs: &[ast::Attribute], sp: Span, desc: &'static str) {
+fn check_missing_inline_attrs(cx: &LateContext<'_>, attrs: &[Attribute], sp: Span, desc: &'static str) {
     let has_inline = attrs.iter().any(|a| a.has_name(sym::inline));
     if !has_inline {
         span_lint(
             cx,
             MISSING_INLINE_IN_PUBLIC_ITEMS,
             sp,
-            &format!("missing `#[inline]` for {desc}"),
+            format!("missing `#[inline]` for {desc}"),
         );
     }
 }
@@ -74,7 +79,6 @@ fn is_executable_or_proc_macro(cx: &LateContext<'_>) -> bool {
     use rustc_session::config::CrateType;
 
     cx.tcx
-        .sess
         .crate_types()
         .iter()
         .any(|t: &CrateType| matches!(t, CrateType::Executable | CrateType::ProcMacro))
@@ -84,7 +88,7 @@ declare_lint_pass!(MissingInline => [MISSING_INLINE_IN_PUBLIC_ITEMS]);
 
 impl<'tcx> LateLintPass<'tcx> for MissingInline {
     fn check_item(&mut self, cx: &LateContext<'tcx>, it: &'tcx hir::Item<'_>) {
-        if rustc_middle::lint::in_external_macro(cx.sess(), it.span) || is_executable_or_proc_macro(cx) {
+        if it.span.in_external_macro(cx.sess().source_map()) || is_executable_or_proc_macro(cx) {
             return;
         }
 
@@ -92,7 +96,7 @@ impl<'tcx> LateLintPass<'tcx> for MissingInline {
             return;
         }
         match it.kind {
-            hir::ItemKind::Fn(..) => {
+            hir::ItemKind::Fn { .. } => {
                 let desc = "a function";
                 let attrs = cx.tcx.hir().attrs(it.hir_id());
                 check_missing_inline_attrs(cx, attrs, it.span, desc);
@@ -127,17 +131,15 @@ impl<'tcx> LateLintPass<'tcx> for MissingInline {
             | hir::ItemKind::GlobalAsm(..)
             | hir::ItemKind::TyAlias(..)
             | hir::ItemKind::Union(..)
-            | hir::ItemKind::OpaqueTy(..)
             | hir::ItemKind::ExternCrate(..)
             | hir::ItemKind::ForeignMod { .. }
             | hir::ItemKind::Impl { .. }
             | hir::ItemKind::Use(..) => {},
-        };
+        }
     }
 
     fn check_impl_item(&mut self, cx: &LateContext<'tcx>, impl_item: &'tcx hir::ImplItem<'_>) {
-        use rustc_middle::ty::{ImplContainer, TraitContainer};
-        if rustc_middle::lint::in_external_macro(cx.sess(), impl_item.span) || is_executable_or_proc_macro(cx) {
+        if impl_item.span.in_external_macro(cx.sess().source_map()) || is_executable_or_proc_macro(cx) {
             return;
         }
 
@@ -154,8 +156,8 @@ impl<'tcx> LateLintPass<'tcx> for MissingInline {
         let assoc_item = cx.tcx.associated_item(impl_item.owner_id);
         let container_id = assoc_item.container_id(cx.tcx);
         let trait_def_id = match assoc_item.container {
-            TraitContainer => Some(container_id),
-            ImplContainer => cx.tcx.impl_trait_ref(container_id).map(|t| t.skip_binder().def_id),
+            AssocItemContainer::Trait => Some(container_id),
+            AssocItemContainer::Impl => cx.tcx.impl_trait_ref(container_id).map(|t| t.skip_binder().def_id),
         };
 
         if let Some(trait_def_id) = trait_def_id {

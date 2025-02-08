@@ -1,4 +1,4 @@
-// check-pass
+//@ check-pass
 //! The fields of a struct should be laid out in lexical order.
 
 #![crate_type = "lib"]
@@ -6,12 +6,11 @@
 #![allow(dead_code)]
 
 mod assert {
-    use std::mem::{Assume, BikeshedIntrinsicFrom};
-    pub struct Context;
+    use std::mem::{Assume, TransmuteFrom};
 
     pub fn is_transmutable<Src, Dst>()
     where
-        Dst: BikeshedIntrinsicFrom<Src, Context, {
+        Dst: TransmuteFrom<Src, {
             Assume::ALIGNMENT
                 .and(Assume::LIFETIMES)
                 .and(Assume::SAFETY)

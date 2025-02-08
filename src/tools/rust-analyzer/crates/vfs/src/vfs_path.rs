@@ -292,8 +292,8 @@ impl From<AbsPathBuf> for VfsPath {
 impl fmt::Display for VfsPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.0 {
-            VfsPathRepr::PathBuf(it) => fmt::Display::fmt(&it.display(), f),
-            VfsPathRepr::VirtualPath(VirtualPath(it)) => fmt::Display::fmt(it, f),
+            VfsPathRepr::PathBuf(it) => it.fmt(f),
+            VfsPathRepr::VirtualPath(VirtualPath(it)) => it.fmt(f),
         }
     }
 }
@@ -307,9 +307,23 @@ impl fmt::Debug for VfsPath {
 impl fmt::Debug for VfsPathRepr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self {
-            VfsPathRepr::PathBuf(it) => fmt::Debug::fmt(&it.display(), f),
-            VfsPathRepr::VirtualPath(VirtualPath(it)) => fmt::Debug::fmt(&it, f),
+            VfsPathRepr::PathBuf(it) => it.fmt(f),
+            VfsPathRepr::VirtualPath(VirtualPath(it)) => it.fmt(f),
         }
+    }
+}
+
+impl PartialEq<AbsPath> for VfsPath {
+    fn eq(&self, other: &AbsPath) -> bool {
+        match &self.0 {
+            VfsPathRepr::PathBuf(lhs) => lhs == other,
+            VfsPathRepr::VirtualPath(_) => false,
+        }
+    }
+}
+impl PartialEq<VfsPath> for AbsPath {
+    fn eq(&self, other: &VfsPath) -> bool {
+        other == self
     }
 }
 
@@ -326,7 +340,7 @@ impl VirtualPath {
     }
 
     fn strip_prefix(&self, base: &VirtualPath) -> Option<&RelPath> {
-        <_ as AsRef<std::path::Path>>::as_ref(&self.0)
+        <_ as AsRef<paths::Utf8Path>>::as_ref(&self.0)
             .strip_prefix(&base.0)
             .ok()
             .map(RelPath::new_unchecked)
@@ -384,8 +398,7 @@ impl VirtualPath {
     ///
     /// # Returns
     /// - `None` if `self` ends with `"//"`.
-    /// - `Some((name, None))` if `self`'s base contains no `.`, or only one `.` at
-    /// the start.
+    /// - `Some((name, None))` if `self`'s base contains no `.`, or only one `.` at the start.
     /// - `Some((name, Some(extension))` else.
     ///
     /// # Note

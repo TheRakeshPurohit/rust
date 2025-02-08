@@ -1,5 +1,5 @@
-// compile-flags: -O --target=avr-unknown-gnu-atmega328 --crate-type=rlib
-// needs-llvm-components: avr
+//@ compile-flags: -O --target=avr-unknown-gnu-atmega328 --crate-type=rlib -C panic=abort
+//@ needs-llvm-components: avr
 
 // This test validates that function pointers can be stored in global variables
 // and called upon. It ensures that Rust emits function pointers in the correct
@@ -14,15 +14,19 @@
 #![no_core]
 
 #[lang = "sized"]
-pub trait Sized { }
+pub trait Sized {}
 #[lang = "copy"]
-pub trait Copy { }
-#[lang = "receiver"]
-pub trait Receiver { }
+pub trait Copy {}
+impl<T: ?Sized> Copy for *const T {}
+#[lang = "legacy_receiver"]
+pub trait LegacyReceiver {}
 #[lang = "tuple_trait"]
-pub trait Tuple { }
+pub trait Tuple {}
 
-pub struct Result<T, E> { _a: T, _b: E }
+pub struct Result<T, E> {
+    _a: T,
+    _b: E,
+}
 
 impl Copy for usize {}
 impl Copy for &usize {}
@@ -39,7 +43,7 @@ pub trait FnOnce<Args: Tuple> {
 }
 
 #[lang = "fn_mut"]
-pub trait FnMut<Args: Tuple> : FnOnce<Args> {
+pub trait FnMut<Args: Tuple>: FnOnce<Args> {
     extern "rust-call" fn call_mut(&mut self, args: Args) -> Self::Output;
 }
 
@@ -64,7 +68,7 @@ fn arbitrary_black_box(ptr: &usize, _: &mut u32) -> Result<(), ()> {
 
 #[inline(never)]
 #[no_mangle]
-fn call_through_fn_trait(a: &mut impl Fn<(), Output=()>) {
+fn call_through_fn_trait(a: &mut impl Fn<(), Output = ()>) {
     (*a)()
 }
 
@@ -82,7 +86,7 @@ pub extern "C" fn test() {
 
     // A call through the Fn trait must use address space 1.
     //
-    // CHECK: call{{.+}}addrspace(1) void @call_through_fn_trait()
+    // CHECK: call{{.+}}addrspace(1) void @call_through_fn_trait({{.*}})
     call_through_fn_trait(&mut update_bar_value);
 
     // A call through a global variable must use address space 1.
@@ -94,7 +98,7 @@ pub extern "C" fn test() {
 
 // Validate that we can codegen transmutes between data ptrs and fn ptrs.
 
-// CHECK: define{{.+}}{{void \(\) addrspace\(1\)\*|ptr addrspace\(1\)}} @transmute_data_ptr_to_fn({{\{\}\*|ptr}}{{.*}} %x)
+// CHECK: define{{.+}}ptr addrspace(1) @transmute_data_ptr_to_fn(ptr{{.*}} %x)
 #[no_mangle]
 pub unsafe fn transmute_data_ptr_to_fn(x: *const ()) -> fn() {
     // It doesn't matter precisely how this is codegenned (through memory or an addrspacecast),
@@ -102,7 +106,7 @@ pub unsafe fn transmute_data_ptr_to_fn(x: *const ()) -> fn() {
     transmute(x)
 }
 
-// CHECK: define{{.+}}{{\{\}\*|ptr}} @transmute_fn_ptr_to_data({{void \(\) addrspace\(1\)\*|ptr addrspace\(1\)}}{{.*}} %x)
+// CHECK: define{{.+}}ptr @transmute_fn_ptr_to_data(ptr addrspace(1){{.*}} %x)
 #[no_mangle]
 pub unsafe fn transmute_fn_ptr_to_data(x: fn()) -> *const () {
     // It doesn't matter precisely how this is codegenned (through memory or an addrspacecast),
@@ -110,13 +114,16 @@ pub unsafe fn transmute_fn_ptr_to_data(x: fn()) -> *const () {
     transmute(x)
 }
 
-pub enum Either<T, U> { A(T), B(U) }
+pub enum Either<T, U> {
+    A(T),
+    B(U),
+}
 
 // Previously, we would codegen this as passing/returning a scalar pair of `{ i8, ptr }`,
 // with the `ptr` field representing both `&i32` and `fn()` depending on the variant.
 // This is incorrect, because `fn()` should be `ptr addrspace(1)`, not `ptr`.
 
-// CHECK: define{{.+}}void @should_not_combine_addrspace({{.+\*|ptr}}{{.+}}sret{{.+}}%0, {{.+\*|ptr}}{{.+}}%x)
+// CHECK: define{{.+}}void @should_not_combine_addrspace(ptr{{.+}}sret{{.+}}%_0, ptr{{.+}}%x)
 #[no_mangle]
 #[inline(never)]
 pub fn should_not_combine_addrspace(x: Either<&i32, fn()>) -> Either<&i32, fn()> {

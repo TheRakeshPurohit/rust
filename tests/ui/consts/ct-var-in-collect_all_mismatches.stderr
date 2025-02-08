@@ -12,11 +12,11 @@ LL |     fn unsatisfied(self)
 LL |     where
 LL |         T: Bar<N>,
    |            ^^^^^^ required by this bound in `Foo::<T, N>::unsatisfied`
-help: consider restricting type parameter `T`
+help: consider restricting type parameter `T` with trait `Bar`
    |
 LL | impl<T: Bar<N>, const N: usize> Foo<T, N> {
    |       ++++++++
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0277`.

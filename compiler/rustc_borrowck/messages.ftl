@@ -1,20 +1,23 @@
 borrowck_assign_due_to_use_closure =
     assignment occurs due to use in closure
 
-borrowck_assign_due_to_use_generator =
-    assign occurs due to use in generator
+borrowck_assign_due_to_use_coroutine =
+    assign occurs due to use in coroutine
 
 borrowck_assign_part_due_to_use_closure =
     assignment to part occurs due to use in closure
 
-borrowck_assign_part_due_to_use_generator =
-    assign to part occurs due to use in generator
+borrowck_assign_part_due_to_use_coroutine =
+    assign to part occurs due to use in coroutine
 
 borrowck_borrow_due_to_use_closure =
     borrow occurs due to use in closure
 
-borrowck_borrow_due_to_use_generator =
-    borrow occurs due to use in generator
+borrowck_borrow_due_to_use_coroutine =
+    borrow occurs due to use in coroutine
+
+borrowck_calling_operator_moves =
+    calling this operator moves the value
 
 borrowck_calling_operator_moves_lhs =
     calling this operator moves the left-hand side
@@ -59,6 +62,9 @@ borrowck_could_not_normalize =
 borrowck_could_not_prove =
     could not prove `{$predicate}`
 
+borrowck_dereference_suggestion =
+    dereference the return value
+
 borrowck_func_take_self_moved_place =
     `{$func}` takes ownership of the receiver `self`, which moves {$place_name}
 
@@ -71,11 +77,23 @@ borrowck_higher_ranked_lifetime_error =
 borrowck_higher_ranked_subtype_error =
     higher-ranked subtype error
 
+borrowck_implicit_static =
+    this has an implicit `'static` lifetime requirement
+
+borrowck_implicit_static_introduced =
+    calling this method introduces the `impl`'s `'static` requirement
+
+borrowck_implicit_static_relax =
+    consider relaxing the implicit `'static` requirement
+
 borrowck_lifetime_constraints_error =
     lifetime may not live long enough
 
-borrowck_move_borrowed =
-    cannot move out of `{$desc}` because it is borrowed
+borrowck_limitations_implies_static =
+    due to current limitations in the borrow checker, this implies a `'static` lifetime
+
+borrowck_move_closure_suggestion =
+    consider adding 'move' keyword before the nested closure
 
 borrowck_move_out_place_here =
     {$place} is moved here
@@ -86,6 +104,12 @@ borrowck_move_unsized =
 
 borrowck_moved_a_fn_once_in_call =
     this value implements `FnOnce`, which causes it to be moved when called
+
+borrowck_moved_a_fn_once_in_call_call =
+    `FnOnce` closures can only be called once
+
+borrowck_moved_a_fn_once_in_call_def =
+    `{$ty}` is made to be an `FnOnce` closure here
 
 borrowck_moved_due_to_await =
     {$place_name} {$is_partial ->
@@ -132,6 +156,12 @@ borrowck_moved_due_to_usage_in_operator =
         *[false] operator
     }
 
+borrowck_opaque_type_lifetime_mismatch =
+    opaque type used twice with different lifetimes
+    .label = lifetime `{$arg}` used here
+    .prev_lifetime_label = lifetime `{$prev}` previously used here
+    .note = if all non-lifetime generic parameters are the same, but the lifetime parameters differ, it is not possible to differentiate the opaque types
+
 borrowck_opaque_type_non_generic_param =
     expected generic {$kind} parameter, found `{$ty}`
     .label = {STREQ($ty, "'static") ->
@@ -145,11 +175,14 @@ borrowck_partial_var_move_by_use_in_closure =
         *[false] moved
     } due to use in closure
 
-borrowck_partial_var_move_by_use_in_generator =
+borrowck_partial_var_move_by_use_in_coroutine =
     variable {$is_partial ->
         [true] partially moved
         *[false] moved
-    } due to use in generator
+    } due to use in coroutine
+
+borrowck_restrict_to_static =
+    consider restricting the type parameter to the `'static` lifetime
 
 borrowck_returned_async_block_escaped =
     returns an `async` block that contains a reference to a captured variable, which then escapes the closure body
@@ -166,11 +199,23 @@ borrowck_returned_lifetime_wrong =
 borrowck_returned_ref_escaped =
     returns a reference to a captured variable which escapes the closure body
 
-borrowck_suggest_create_freash_reborrow =
+borrowck_simd_intrinsic_arg_const =
+    {$arg ->
+        [1] 1st
+        [2] 2nd
+        [3] 3rd
+        *[other] {$arg}th
+    } argument of `{$intrinsic}` is required to be a `const` item
+
+borrowck_suggest_create_fresh_reborrow =
     consider reborrowing the `Pin` instead of moving it
 
 borrowck_suggest_iterate_over_slice =
     consider iterating over a slice of the `{$ty}`'s content to avoid moving into the `for` loop
+
+borrowck_tail_expr_drop_order = relative drop order changing in Rust 2024
+    .label = this temporary value will be dropped at the end of the block
+    .note = consider using a `let` binding to ensure the value will live long enough
 
 borrowck_ty_no_impl_copy =
     {$is_partial_move ->
@@ -181,15 +226,15 @@ borrowck_ty_no_impl_copy =
 borrowck_use_due_to_use_closure =
     use occurs due to use in closure
 
-borrowck_use_due_to_use_generator =
-    use occurs due to use in generator
+borrowck_use_due_to_use_coroutine =
+    use occurs due to use in coroutine
 
 borrowck_used_impl_require_static =
     the used `impl` has a `'static` requirement
 
 borrowck_value_capture_here =
     value captured {$is_within ->
-        [true] here by generator
+        [true] here by coroutine
         *[false] here
     }
 
@@ -208,8 +253,8 @@ borrowck_value_moved_here =
 borrowck_var_borrow_by_use_in_closure =
     borrow occurs due to use in closure
 
-borrowck_var_borrow_by_use_in_generator =
-    borrow occurs due to use in generator
+borrowck_var_borrow_by_use_in_coroutine =
+    borrow occurs due to use in coroutine
 
 borrowck_var_borrow_by_use_place_in_closure =
     {$is_single_var ->
@@ -217,11 +262,11 @@ borrowck_var_borrow_by_use_place_in_closure =
         [false] borrows occur
     } due to use of {$place} in closure
 
-borrowck_var_borrow_by_use_place_in_generator =
+borrowck_var_borrow_by_use_place_in_coroutine =
     {$is_single_var ->
         *[true] borrow occurs
         [false] borrows occur
-    } due to use of {$place} in generator
+    } due to use of {$place} in coroutine
 
 borrowck_var_cannot_escape_closure =
     captured variable cannot escape `FnMut` closure body
@@ -235,8 +280,8 @@ borrowck_var_does_not_need_mut =
 borrowck_var_first_borrow_by_use_place_in_closure =
     first borrow occurs due to use of {$place} in closure
 
-borrowck_var_first_borrow_by_use_place_in_generator =
-    first borrow occurs due to use of {$place} in generator
+borrowck_var_first_borrow_by_use_place_in_coroutine =
+    first borrow occurs due to use of {$place} in coroutine
 
 borrowck_var_here_captured = variable captured here
 
@@ -245,14 +290,8 @@ borrowck_var_here_defined = variable defined here
 borrowck_var_move_by_use_in_closure =
     move occurs due to use in closure
 
-borrowck_var_move_by_use_in_generator =
-    move occurs due to use in generator
-
-borrowck_var_move_by_use_place_in_closure =
-    move occurs due to use of {$place} in closure
-
-borrowck_var_move_by_use_place_in_generator =
-    move occurs due to use of {$place} in generator
+borrowck_var_move_by_use_in_coroutine =
+    move occurs due to use in coroutine
 
 borrowck_var_mutable_borrow_by_use_place_in_closure =
     mutable borrow occurs due to use of {$place} in closure
@@ -260,5 +299,5 @@ borrowck_var_mutable_borrow_by_use_place_in_closure =
 borrowck_var_second_borrow_by_use_place_in_closure =
     second borrow occurs due to use of {$place} in closure
 
-borrowck_var_second_borrow_by_use_place_in_generator =
-    second borrow occurs due to use of {$place} in generator
+borrowck_var_second_borrow_by_use_place_in_coroutine =
+    second borrow occurs due to use of {$place} in coroutine

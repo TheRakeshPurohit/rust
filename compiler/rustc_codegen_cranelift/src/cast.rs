@@ -96,29 +96,9 @@ pub(crate) fn clif_int_or_float_cast(
                 },
             );
 
-            if fx.tcx.sess.target.is_like_windows {
-                let ret = fx.lib_call(
-                    &name,
-                    vec![AbiParam::new(from_ty)],
-                    vec![AbiParam::new(types::I64X2)],
-                    &[from],
-                )[0];
-                // FIXME(bytecodealliance/wasmtime#6104) use bitcast instead of store to get from i64x2 to i128
-                let stack_slot = fx.bcx.create_sized_stack_slot(StackSlotData {
-                    kind: StackSlotKind::ExplicitSlot,
-                    size: 16,
-                });
-                let ret_ptr = Pointer::stack_slot(stack_slot);
-                ret_ptr.store(fx, ret, MemFlags::trusted());
-                ret_ptr.load(fx, types::I128, MemFlags::trusted())
-            } else {
-                fx.lib_call(
-                    &name,
-                    vec![AbiParam::new(from_ty)],
-                    vec![AbiParam::new(types::I128)],
-                    &[from],
-                )[0]
-            }
+            fx.lib_call(&name, vec![AbiParam::new(from_ty)], vec![AbiParam::new(types::I128)], &[
+                from,
+            ])[0]
         } else if to_ty == types::I8 || to_ty == types::I16 {
             // FIXME implement fcvt_to_*int_sat.i8/i16
             let val = if to_signed {
@@ -129,8 +109,8 @@ pub(crate) fn clif_int_or_float_cast(
             let (min, max) = match (to_ty, to_signed) {
                 (types::I8, false) => (0, i64::from(u8::MAX)),
                 (types::I16, false) => (0, i64::from(u16::MAX)),
-                (types::I8, true) => (i64::from(i8::MIN), i64::from(i8::MAX)),
-                (types::I16, true) => (i64::from(i16::MIN), i64::from(i16::MAX)),
+                (types::I8, true) => (i64::from(i8::MIN as u32), i64::from(i8::MAX as u32)),
+                (types::I16, true) => (i64::from(i16::MIN as u32), i64::from(i16::MAX as u32)),
                 _ => unreachable!(),
             };
             let min_val = fx.bcx.ins().iconst(types::I32, min);

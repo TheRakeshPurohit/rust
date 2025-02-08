@@ -21,7 +21,7 @@ The LSP allows various code editors, like VS Code, Emacs or Vim, to implement se
 To improve this document, send a pull request: +
 https://github.com/rust-lang/rust-analyzer/blob/master/docs/user/manual.adoc[https://github.com/rust-analyzer/.../manual.adoc]
 
-The manual is written in https://asciidoc.org[AsciiDoc] and includes some extra files which are generated from the source code. Run `cargo test` and `cargo test -p xtask` to create these and then `asciidoctor manual.adoc` to create an HTML copy.
+The manual is written in https://asciidoc.org[AsciiDoc] and includes some extra files which are generated from the source code. Run `cargo test` and `cargo xtask codegen` to create these and then `asciidoctor manual.adoc` to create an HTML copy.
 ====
 
 If you have questions about using rust-analyzer, please ask them in the https://users.rust-lang.org/c/ide/14["`IDEs and Editors`"] topic of Rust users forum.
@@ -64,22 +64,8 @@ You can install the latest release of the plugin from
 https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer[the marketplace].
 
 Note that the plugin may cause conflicts with the
-https://marketplace.visualstudio.com/items?itemName=rust-lang.rust[official Rust plugin].
-It is recommended to disable the Rust plugin when using the rust-analyzer extension.
-
-By default, the plugin will prompt you to download the matching version of the server as well:
-
-image::https://user-images.githubusercontent.com/9021944/75067008-17502500-54ba-11ea-835a-f92aac50e866.png[]
-
-[NOTE]
-====
-To disable this notification put the following to `settings.json`
-
-[source,json]
-----
-{ "rust-analyzer.updates.askBeforeDownload": false }
-----
-====
+https://marketplace.visualstudio.com/items?itemName=rust-lang.rust[previous official Rust plugin].
+The latter is no longer maintained and should be uninstalled.
 
 The server binary is stored in the extension install directory, which starts with `rust-lang.rust-analyzer-` and is located under:
 
@@ -141,6 +127,9 @@ If you're not using Code, you can compile and install only the LSP server:
 $ cargo xtask install --server
 ----
 
+Make sure that `.cargo/bin` is in `$PATH` and precedes paths where `rust-analyzer` may also be installed.
+Specifically, `rustup` includes a proxy called `rust-analyzer`, which can cause problems if you're planning to use a source build or even a downloaded binary.
+
 === rust-analyzer Language Server Binary
 
 Other editors generally require the `rust-analyzer` binary to be in `$PATH`.
@@ -185,7 +174,7 @@ $ rustup component add rust-analyzer
 
 The `rust-analyzer` binary can be installed from the repos or AUR (Arch User Repository):
 
-- https://www.archlinux.org/packages/community/x86_64/rust-analyzer/[`rust-analyzer`] (built from latest tagged source)
+- https://www.archlinux.org/packages/extra/x86_64/rust-analyzer/[`rust-analyzer`] (built from latest tagged source)
 - https://aur.archlinux.org/packages/rust-analyzer-git[`rust-analyzer-git`] (latest Git version)
 
 Install it with pacman, for example:
@@ -197,18 +186,13 @@ $ pacman -S rust-analyzer
 
 ==== Gentoo Linux
 
-`rust-analyzer` is available in the GURU repository:
+There are two ways to install `rust-analyzer` under Gentoo:
 
-- https://gitweb.gentoo.org/repo/proj/guru.git/tree/dev-util/rust-analyzer?id=9895cea62602cfe599bd48e0fb02127411ca6e81[`dev-util/rust-analyzer`] builds from source
-- https://gitweb.gentoo.org/repo/proj/guru.git/tree/dev-util/rust-analyzer-bin?id=9895cea62602cfe599bd48e0fb02127411ca6e81[`dev-util/rust-analyzer-bin`] installs an official binary release
+- when installing `dev-lang/rust` or `dev-lang/rust-bin`, enable the `rust-analyzer` and `rust-src` USE flags
+- use the `rust-analyzer` component in `rustup` (see instructions above)
 
-If not already, GURU must be enabled (e.g. using `app-eselect/eselect-repository`) and sync'd before running `emerge`:
-
-[source,bash]
-----
-$ eselect repository enable guru && emaint sync -r guru
-$ emerge rust-analyzer-bin
-----
+Note that in both cases, the version installed lags for a couple of months behind the official releases on GitHub.
+To obtain a newer one, you can download a binary from GitHub Releases or building from source.
 
 ==== macOS
 
@@ -219,6 +203,12 @@ The `rust-analyzer` binary can be installed via https://brew.sh/[Homebrew].
 $ brew install rust-analyzer
 ----
 
+==== Windows
+
+It is recommended to install the latest Microsoft Visual C++ Redistributable prior to installation.
+Download links can be found
+https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist[here].
+
 === VS Code or VSCodium in Flatpak
 
 Setting up `rust-analyzer` with a Flatpak version of Code is not trivial because of the Flatpak sandbox.
@@ -226,7 +216,10 @@ While the sandbox can be disabled for some directories, `/usr/bin` will always b
 This prevents access to the system's C compiler, a system-wide installation of Rust, or any other libraries you might want to link to.
 Some compilers and libraries can be acquired as Flatpak SDKs, such as `org.freedesktop.Sdk.Extension.rust-stable` or `org.freedesktop.Sdk.Extension.llvm15`.
 
-If you use a Flatpak SDK for Rust, there should be no extra steps necessary.
+If you use a Flatpak SDK for Rust, it must be in your `PATH`:
+
+ * install the SDK extensions with `flatpak install org.freedesktop.Sdk.Extension.{llvm15,rust-stable}//23.08`
+ * enable SDK extensions in the editor with the environment variable `FLATPAK_ENABLE_SDK_EXT=llvm15,rust-stable` (this can be done using flatseal or `flatpak override`)
 
 If you want to use Flatpak in combination with `rustup`, the following steps might help:
 
@@ -244,17 +237,26 @@ Any other tools or libraries you will need to acquire  from Flatpak.
 
 Prerequisites: You have installed the <<rust-analyzer-language-server-binary,`rust-analyzer` binary>>.
 
-To use `rust-analyzer`, you need to install and enable one of the two popular two popular LSP client implementations for Emacs, https://github.com/joaotavora/eglot[Eglot] or https://github.com/emacs-lsp/lsp-mode[LSP Mode]. Both enable `rust-analyzer` by default in rust buffers if it is available.
+To use `rust-analyzer`, you need to install and enable one of the two popular LSP client implementations for Emacs, https://github.com/joaotavora/eglot[Eglot] or https://github.com/emacs-lsp/lsp-mode[LSP Mode]. Both enable `rust-analyzer` by default in rust buffers if it is available.
 
 ==== Eglot
 
-Eglot is the more minimalistic and lightweight LSP client for Emacs, integrates well with existing Emacs functionality and will be built into Emacs starting from release 29.
+Eglot is the more minimalistic and lightweight LSP client for Emacs, integrates well with existing Emacs functionality and is built into Emacs starting from release 29.
 
 After installing Eglot, e.g. via `M-x package-install` (not needed from Emacs 29), you can enable it via the `M-x eglot` command or load it automatically in `rust-mode` via
 
 [source,emacs-lisp]
 ----
 (add-hook 'rust-mode-hook 'eglot-ensure)
+----
+
+To enable clippy, you will need to configure the initialization options to pass the `check.command` setting.
+
+[source,emacs-lisp]
+----
+(add-to-list 'eglot-server-programs
+             '((rust-ts-mode rust-mode) .
+               ("rust-analyzer" :initializationOptions (:check (:command "clippy")))))
 ----
 
 For more detailed instructions and options see the https://joaotavora.github.io/eglot[Eglot manual] (also available from Emacs via `M-x info`) and the
@@ -280,12 +282,12 @@ Also see the https://emacs-lsp.github.io/lsp-mode/page/lsp-rust-analyzer/[rust-a
 
 Note the excellent https://robert.kra.hn/posts/2021-02-07_rust-with-emacs/[guide] from https://github.com/rksm[@rksm] on how to set-up Emacs for Rust development with LSP mode and several other packages.
 
-=== Vim/NeoVim
+=== Vim/Neovim
 
 Prerequisites: You have installed the <<rust-analyzer-language-server-binary,`rust-analyzer` binary>>.
 Not needed if the extension can install/update it on its own, coc-rust-analyzer is one example.
 
-There are several LSP client implementations for vim or neovim:
+There are several LSP client implementations for Vim or Neovim:
 
 ==== coc-rust-analyzer
 
@@ -308,7 +310,7 @@ Note: for code actions, use `coc-codeaction-cursor` and `coc-codeaction-selected
    https://github.com/autozimu/LanguageClient-neovim[here]
    * The GitHub project wiki has extra tips on configuration
 
-2. Configure by adding this to your vim/neovim config file (replacing the existing Rust-specific line if it exists):
+2. Configure by adding this to your Vim/Neovim config file (replacing the existing Rust-specific line if it exists):
 +
 [source,vim]
 ----
@@ -335,7 +337,7 @@ let g:ale_linters = {'rust': ['analyzer']}
 
 ==== nvim-lsp
 
-NeoVim 0.5 has built-in language server support.
+Neovim 0.5 has built-in language server support.
 For a quick start configuration of rust-analyzer, use https://github.com/neovim/nvim-lspconfig#rust_analyzer[neovim/nvim-lspconfig].
 Once `neovim/nvim-lspconfig` is installed, use `+lua require'lspconfig'.rust_analyzer.setup({})+` in your `init.vim`.
 
@@ -344,14 +346,14 @@ You can also pass LSP settings to the server:
 [source,vim]
 ----
 lua << EOF
-local nvim_lsp = require'lspconfig'
+local lspconfig = require'lspconfig'
 
 local on_attach = function(client)
     require'completion'.on_attach(client)
 end
 
-nvim_lsp.rust_analyzer.setup({
-    on_attach=on_attach,
+lspconfig.rust_analyzer.setup({
+    on_attach = on_attach,
     settings = {
         ["rust-analyzer"] = {
             imports = {
@@ -374,9 +376,22 @@ nvim_lsp.rust_analyzer.setup({
 EOF
 ----
 
+If you're running Neovim 0.10 or later, you can enable inlay hints via `on_attach`:
+
+[source,vim]
+----
+lspconfig.rust_analyzer.setup({
+    on_attach = function(client, bufnr)
+        vim.lsp.inlay_hint.enable(true, { bufnr = bufnr })
+    end
+})
+----
+
+Note that the hints are only visible after `rust-analyzer` has finished loading **and** you have to edit the file to trigger a re-render.
+
 See https://sharksforarms.dev/posts/neovim-rust/ for more tips on getting started.
 
-Check out https://github.com/simrat39/rust-tools.nvim for a batteries included rust-analyzer setup for neovim.
+Check out https://github.com/mrcjkb/rustaceanvim for a batteries included rust-analyzer setup for Neovim.
 
 ==== vim-lsp
 
@@ -460,27 +475,24 @@ You'll need to close and reopen all .rs and Cargo files, or to restart the IDE, 
 Support for the language server protocol is built into Kate through the LSP plugin, which is included by default.
 It is preconfigured to use rust-analyzer for Rust sources since Kate 21.12.
 
-Earlier versions allow you to use rust-analyzer through a simple settings change.
-In the LSP Client settings of Kate, copy the content of the third tab "default parameters" to the second tab "server configuration".
-Then in the configuration replace:
+To change rust-analyzer config options, start from the following example and put it into Kate's "User Server Settings" tab (located under the LSP Client settings):
 [source,json]
 ----
+{
+    "servers": {
         "rust": {
-            "command": ["rls"],
-            "rootIndicationFileNames": ["Cargo.lock", "Cargo.toml"],
-            "url": "https://github.com/rust-lang/rls",
-            "highlightingModeRegex": "^Rust$"
-        },
-----
-With
-[source,json]
-----
-        "rust": {
-            "command": ["rust-analyzer"],
-            "rootIndicationFileNames": ["Cargo.lock", "Cargo.toml"],
-            "url": "https://github.com/rust-lang/rust-analyzer",
-            "highlightingModeRegex": "^Rust$"
-        },
+            "initializationOptions": {
+                "cachePriming": {
+                    "enable": false
+                },
+                "check": {
+                    "allTargets": false
+                },
+                "checkOnSave": false
+            }
+        }
+    }
+}
 ----
 Then click on apply, and restart the LSP server for your rust project.
 
@@ -522,7 +534,8 @@ https://docs.helix-editor.com/[Helix] supports LSP by default.
 However, it won't install `rust-analyzer` automatically.
 You can follow instructions for installing <<rust-analyzer-language-server-binary,`rust-analyzer` binary>>.
 
-=== Visual Studio 2022
+[#visual-studio]
+=== [[visual-studio-2022]]Visual Studio 2022
 
 There are multiple rust-analyzer extensions for Visual Studio 2022 on Windows:
 
@@ -567,7 +580,12 @@ Unfortunately, it downloads an old version of `rust-analyzer`, but you can set t
 
 There is a package named `ra_ap_rust_analyzer` available on https://crates.io/crates/ra_ap_rust-analyzer[crates.io], for someone who wants to use it programmatically.
 
-For more details, see https://github.com/rust-lang/rust-analyzer/blob/master/.github/workflows/publish.yml[the publish workflow].
+For more details, see https://github.com/rust-lang/rust-analyzer/blob/master/.github/workflows/autopublish.yaml[the publish workflow].
+
+=== Zed
+
+https://zed.dev[Zed] has native `rust-analyzer` support.
+If the LSP binary is not available, Zed can install it when opening a Rust file.
 
 == Troubleshooting
 
@@ -579,7 +597,7 @@ The next thing to check would be panic messages in rust-analyzer's log.
 Log messages are printed to stderr, in VS Code you can see them in the `Output > Rust Analyzer Language Server` tab of the panel.
 To see more logs, set the `RA_LOG=info` environment variable, this can be done either by setting the environment variable manually or by using `rust-analyzer.server.extraEnv`, note that both of these approaches require the server to be restarted.
 
-To fully capture LSP messages between the editor and the server, set `"rust-analyzer.trace.server": "verbose"` config and check
+To fully capture LSP messages between the editor and the server, run the `rust-analyzer: Toggle LSP Logs` command and check
 `Output > Rust Analyzer Language Server Trace`.
 
 The root cause for many "`nothing works`" problems is that rust-analyzer fails to understand the project structure.
@@ -611,7 +629,7 @@ https://github.com/rust-lang/rust-analyzer/tree/master/docs/dev[dev docs]!
 
 **Source:** https://github.com/rust-lang/rust-analyzer/blob/master/crates/rust-analyzer/src/config.rs[config.rs]
 
-The <<_installation,Installation>> section contains details on configuration for some of the editors.
+The <<installation,Installation>> section contains details on configuration for some of the editors.
 In general `rust-analyzer` is configured via LSP messages, which means that it's up to the editor to decide on the exact format and location of configuration files.
 
 Some clients, such as <<vs-code,VS Code>> or <<coc-rust-analyzer,COC plugin in Vim>> provide `rust-analyzer` specific configuration UIs. Others may require you to know a bit more about the interaction with `rust-analyzer`.
@@ -653,8 +671,27 @@ However, if you use some other build system, you'll have to describe the structu
 [source,TypeScript]
 ----
 interface JsonProject {
+    /// Path to the sysroot directory.
+    ///
+    /// The sysroot is where rustc looks for the
+    /// crates that are built-in to rust, such as
+    /// std.
+    ///
+    /// https://doc.rust-lang.org/rustc/command-line-arguments.html#--sysroot-override-the-system-root
+    ///
+    /// To see the current value of sysroot, you
+    /// can query rustc:
+    ///
+    /// ```
+    /// $ rustc --print sysroot
+    /// /Users/yourname/.rustup/toolchains/stable-x86_64-apple-darwin
+    /// ```
+    sysroot?: string;
     /// Path to the directory with *source code* of
     /// sysroot crates.
+    ///
+    /// By default, this is `lib/rustlib/src/rust/library`
+    /// relative to the sysroot.
     ///
     /// It should point to the directory where std,
     /// core, and friends can be found:
@@ -668,11 +705,43 @@ interface JsonProject {
     /// several different "sysroots" in one graph of
     /// crates.
     sysroot_src?: string;
+    /// List of groups of common cfg values, to allow
+    /// sharing them between crates.
+    ///
+    /// Maps from group name to its cfgs. Cfg follow
+    /// the same format as `Crate.cfg`.
+    cfg_groups?: { [key: string]: string[]; };
     /// The set of crates comprising the current
     /// project. Must include all transitive
     /// dependencies as well as sysroot crate (libstd,
     /// libcore and such).
     crates: Crate[];
+    /// Configuration for CLI commands.
+    ///
+    /// These are used for running and debugging binaries
+    /// and tests without encoding build system-specific
+    /// knowledge into rust-analyzer.
+    ///
+    /// # Example
+    ///
+    /// Below is an example of a test runnable. `{label}` and `{test_id}`
+    /// are explained in `Runnable::args`'s documentation below.
+    ///
+    /// ```json
+    /// {
+    ///     "program": "buck",
+    ///     "args": [
+    ///         "test",
+    ///          "{label}",
+    ///          "--",
+    ///          "{test_id}",
+    ///          "--print-passing-details"
+    ///     ],
+    ///     "cwd": "/home/user/repo-root/",
+    ///     "kind": "testOne"
+    /// }
+    /// ```
+    runnables?: Runnable[];
 }
 
 interface Crate {
@@ -683,7 +752,10 @@ interface Crate {
     /// Path to the root module of the crate.
     root_module: string;
     /// Edition of the crate.
-    edition: "2015" | "2018" | "2021";
+    edition: '2015' | '2018' | '2021' | '2024';
+    /// The version of the crate. Used for calculating
+    /// the correct docs.rs URL.
+    version?: string;
     /// Dependencies
     deps: Dep[];
     /// Should this crate be treated as a member of
@@ -714,34 +786,87 @@ interface Crate {
     /// rust-analyzer assumes that files from one
     /// source can't refer to files in another source.
     source?: {
-        include_dirs: string[],
-        exclude_dirs: string[],
-    },
+        include_dirs: string[];
+        exclude_dirs: string[];
+    };
+    /// List of cfg groups this crate inherits.
+    ///
+    /// All cfg in these groups will be concatenated to
+    /// `cfg`. It is impossible to replace a value from
+    /// the groups.
+    cfg_groups?: string[];
     /// The set of cfgs activated for a given crate, like
     /// `["unix", "feature=\"foo\"", "feature=\"bar\""]`.
     cfg: string[];
-    /// Target triple for this Crate.
+    /// Target tuple for this Crate.
     ///
     /// Used when running `rustc --print cfg`
     /// to get target-specific cfgs.
     target?: string;
     /// Environment variables, used for
     /// the `env!` macro
-    env: { [key: string]: string; },
+    env: { [key: string]: string; };
 
     /// Whether the crate is a proc-macro crate.
     is_proc_macro: boolean;
     /// For proc-macro crates, path to compiled
     /// proc-macro (.so file).
     proc_macro_dylib_path?: string;
+
+    /// Repository, matching the URL that would be used
+    /// in Cargo.toml.
+    repository?: string;
+
+    /// Build-specific data about this crate.
+    build?: BuildInfo;
 }
 
 interface Dep {
     /// Index of a crate in the `crates` array.
-    crate: number,
+    crate: number;
     /// Name as should appear in the (implicit)
     /// `extern crate name` declaration.
-    name: string,
+    name: string;
+}
+
+interface BuildInfo {
+    /// The name associated with this crate.
+    ///
+    /// This is determined by the build system that produced
+    /// the `rust-project.json` in question. For instance, if buck were used,
+    /// the label might be something like `//ide/rust/rust-analyzer:rust-analyzer`.
+    ///
+    /// Do not attempt to parse the contents of this string; it is a build system-specific
+    /// identifier similar to `Crate::display_name`.
+    label: string;
+    /// Path corresponding to the build system-specific file defining the crate.
+    build_file: string;
+    /// The kind of target.
+    ///
+    /// This information is used to determine what sort
+    /// of runnable codelens to provide, if any.
+    target_kind: 'bin' | 'lib' | 'test';
+}
+
+interface Runnable {
+    /// The program invoked by the runnable.
+    ///
+    /// For example, this might be `cargo`, `buck`, or `bazel`.
+    program: string;
+    /// The arguments passed to `program`.
+    args: string[];
+    /// The current working directory of the runnable.
+    cwd: string;
+    /// Used to decide what code lens to offer.
+    ///
+    /// `testOne`: This runnable will be used when the user clicks the 'Run Test'
+    /// CodeLens above a test.
+    ///
+    /// The args for testOne can contain two template strings:
+    /// `{label}` and `{test_id}`. `{label}` will be replaced
+    /// with the `Build::label` and `{test_id}` will be replaced
+    /// with the test name.
+    kind: 'testOne' | string;
 }
 ----
 
@@ -755,8 +880,6 @@ There are three ways to feed `rust-project.json` to rust-analyzer:
 * Specify `"rust-analyzer.linkedProjects": [ { "roots": [...], "crates": [...] }]` inline.
 
 Relative paths are interpreted relative to `rust-project.json` file location or (for inline JSON) relative to `rootUri`.
-
-See https://github.com/rust-analyzer/rust-project.json-example for a small example.
 
 You can set the `RA_LOG` environment variable to `rust_analyzer=info` to inspect how rust-analyzer handles config and project loading.
 
@@ -914,20 +1037,20 @@ For example:
 More about `when` clause contexts https://code.visualstudio.com/docs/getstarted/keybindings#_when-clause-contexts[here].
 
 ==== Setting runnable environment variables
-You can use "rust-analyzer.runnableEnv" setting to define runnable environment-specific substitution variables.
+You can use "rust-analyzer.runnables.extraEnv" setting to define runnable environment-specific substitution variables.
 The simplest way for all runnables in a bunch:
 ```jsonc
-"rust-analyzer.runnableEnv": {
+"rust-analyzer.runnables.extraEnv": {
     "RUN_SLOW_TESTS": "1"
 }
 ```
 
 Or it is possible to specify vars more granularly:
 ```jsonc
-"rust-analyzer.runnableEnv": [
+"rust-analyzer.runnables.extraEnv": [
     {
         // "mask": null, // null mask means that this rule will be applied for all runnables
-        env: {
+        "env": {
              "APP_ID": "1",
              "APP_DATA": "asdf"
         }
@@ -943,6 +1066,29 @@ Or it is possible to specify vars more granularly:
 
 You can use any valid regular expression as a mask.
 Also note that a full runnable name is something like *run bin_or_example_name*, *test some::mod::test_name* or *test-mod some::mod*, so it is possible to distinguish binaries, single tests, and test modules with this masks: `"^run"`, `"^test "` (the trailing space matters!), and `"^test-mod"` respectively.
+
+If needed, you can set different values for different platforms:
+```jsonc
+"rust-analyzer.runnables.extraEnv": [
+    {
+        "platform": "win32", // windows only
+        "env": {
+             "APP_DATA": "windows specific data"
+        }
+    },
+    {
+        "platform": ["linux"],
+        "env": {
+             "APP_DATA": "linux data",
+        }
+    },
+    { // for all platforms
+        "env": {
+             "APP_COMMON_DATA": "xxx",
+        }
+    }
+]
+```
 
 ==== Compiler feedback from external commands
 

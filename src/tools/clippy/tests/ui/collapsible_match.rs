@@ -4,13 +4,15 @@
     clippy::needless_return,
     clippy::no_effect,
     clippy::single_match,
-    clippy::uninlined_format_args
+    clippy::uninlined_format_args,
+    clippy::let_unit_value
 )]
 
 fn lint_cases(opt_opt: Option<Option<u32>>, res_opt: Result<Option<u32>, String>) {
     // match without block
     match res_opt {
         Ok(val) => match val {
+            //~^ ERROR: this `match` can be collapsed into the outer `match`
             Some(n) => foo(n),
             _ => return,
         },
@@ -20,6 +22,7 @@ fn lint_cases(opt_opt: Option<Option<u32>>, res_opt: Result<Option<u32>, String>
     // match with block
     match res_opt {
         Ok(val) => match val {
+            //~^ ERROR: this `match` can be collapsed into the outer `match`
             Some(n) => foo(n),
             _ => return,
         },
@@ -29,6 +32,7 @@ fn lint_cases(opt_opt: Option<Option<u32>>, res_opt: Result<Option<u32>, String>
     // if let, if let
     if let Ok(val) = res_opt {
         if let Some(n) = val {
+            //~^ ERROR: this `if let` can be collapsed into the outer `if let`
             take(n);
         }
     }
@@ -36,6 +40,7 @@ fn lint_cases(opt_opt: Option<Option<u32>>, res_opt: Result<Option<u32>, String>
     // if let else, if let else
     if let Ok(val) = res_opt {
         if let Some(n) = val {
+            //~^ ERROR: this `if let` can be collapsed into the outer `if let`
             take(n);
         } else {
             return;
@@ -47,6 +52,7 @@ fn lint_cases(opt_opt: Option<Option<u32>>, res_opt: Result<Option<u32>, String>
     // if let, match
     if let Ok(val) = res_opt {
         match val {
+            //~^ ERROR: this `match` can be collapsed into the outer `if let`
             Some(n) => foo(n),
             _ => (),
         }
@@ -56,6 +62,7 @@ fn lint_cases(opt_opt: Option<Option<u32>>, res_opt: Result<Option<u32>, String>
     match res_opt {
         Ok(val) => {
             if let Some(n) = val {
+                //~^ ERROR: this `if let` can be collapsed into the outer `match`
                 take(n);
             }
         },
@@ -65,6 +72,7 @@ fn lint_cases(opt_opt: Option<Option<u32>>, res_opt: Result<Option<u32>, String>
     // if let else, match
     if let Ok(val) = res_opt {
         match val {
+            //~^ ERROR: this `match` can be collapsed into the outer `if let`
             Some(n) => foo(n),
             _ => return,
         }
@@ -76,6 +84,7 @@ fn lint_cases(opt_opt: Option<Option<u32>>, res_opt: Result<Option<u32>, String>
     match res_opt {
         Ok(val) => {
             if let Some(n) = val {
+                //~^ ERROR: this `if let` can be collapsed into the outer `match`
                 take(n);
             } else {
                 return;
@@ -87,6 +96,7 @@ fn lint_cases(opt_opt: Option<Option<u32>>, res_opt: Result<Option<u32>, String>
     // None in inner match same as outer wild branch
     match res_opt {
         Ok(val) => match val {
+            //~^ ERROR: this `match` can be collapsed into the outer `match`
             Some(n) => foo(n),
             None => return,
         },
@@ -96,6 +106,7 @@ fn lint_cases(opt_opt: Option<Option<u32>>, res_opt: Result<Option<u32>, String>
     // None in outer match same as inner wild branch
     match opt_opt {
         Some(val) => match val {
+            //~^ ERROR: this `match` can be collapsed into the outer `match`
             Some(n) => foo(n),
             _ => return,
         },
@@ -228,13 +239,22 @@ fn negative_cases(res_opt: Result<Option<u32>, String>, res_res: Result<Result<u
         },
         _ => return,
     }
-    match make::<Option<E<u32>>>() {
+    #[clippy::msrv = "1.52.0"]
+    let _ = match make::<Option<E<u32>>>() {
         Some(val) => match val {
             E::A(val) | E::B(val) => foo(val),
             _ => return,
         },
         _ => return,
-    }
+    };
+    #[clippy::msrv = "1.53.0"]
+    let _ = match make::<Option<E<u32>>>() {
+        Some(val) => match val {
+            E::A(val) | E::B(val) => foo(val),
+            _ => return,
+        },
+        _ => return,
+    };
     if let Ok(val) = res_opt {
         if let Some(n) = val {
             let _ = || {
@@ -261,6 +281,7 @@ pub enum Issue9647 {
 pub fn test_1(x: Issue9647) {
     if let Issue9647::A { a, .. } = x {
         if let Some(u) = a {
+            //~^ ERROR: this `if let` can be collapsed into the outer `if let`
             println!("{u:?}")
         }
     }
@@ -269,6 +290,7 @@ pub fn test_1(x: Issue9647) {
 pub fn test_2(x: Issue9647) {
     if let Issue9647::A { a: Some(a), .. } = x {
         if let Some(u) = a {
+            //~^ ERROR: this `if let` can be collapsed into the outer `if let`
             println!("{u}")
         }
     }

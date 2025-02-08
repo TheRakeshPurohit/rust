@@ -1,6 +1,4 @@
-// edition:2018
-
-#![feature(async_closure)]
+//@ edition:2018
 
 async fn print_dur() {}
 

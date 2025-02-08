@@ -42,12 +42,13 @@ pub(crate) fn qualify_method_call(acc: &mut Assists, ctx: &AssistContext<'_>) ->
     let resolved_call = ctx.sema.resolve_method_call(&call)?;
 
     let current_module = ctx.sema.scope(call.syntax())?.module();
+    let current_edition = current_module.krate().edition(ctx.db());
     let target_module_def = ModuleDef::from(resolved_call);
     let item_in_ns = ItemInNs::from(target_module_def);
-    let receiver_path = current_module.find_use_path(
+    let receiver_path = current_module.find_path(
         ctx.sema.db,
         item_for_path_search(ctx.sema.db, item_in_ns)?,
-        ctx.config.prefer_no_std,
+        ctx.config.import_path_config(),
     )?;
 
     let qualify_candidate = QualifyCandidate::ImplMethod(ctx.sema.db, call, resolved_call);
@@ -61,6 +62,7 @@ pub(crate) fn qualify_method_call(acc: &mut Assists, ctx: &AssistContext<'_>) ->
                 |replace_with: String| builder.replace(range, replace_with),
                 &receiver_path,
                 item_in_ns,
+                current_edition,
             )
         },
     );
@@ -84,7 +86,7 @@ fn item_for_path_search(db: &dyn HirDatabase, item: ItemInNs) -> Option<ItemInNs
 }
 
 fn item_as_assoc(db: &dyn HirDatabase, item: ItemInNs) -> Option<AssocItem> {
-    item.as_module_def().and_then(|module_def| module_def.as_assoc_item(db))
+    item.into_module_def().as_assoc_item(db)
 }
 
 #[cfg(test)]

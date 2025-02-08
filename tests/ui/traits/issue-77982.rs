@@ -1,3 +1,6 @@
+//@ ignore-windows FIXME: We get an extra E0283 on Windows
+//@ ignore-arm extra satisfying impls
+
 use std::collections::HashMap;
 
 fn what() {

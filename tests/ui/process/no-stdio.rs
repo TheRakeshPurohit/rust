@@ -1,17 +1,16 @@
-// run-pass
-// ignore-android
-// ignore-emscripten no processes
-// ignore-sgx no processes
-// revisions: mir thir
-// [thir]compile-flags: -Zthir-unsafeck
+//@ run-pass
+//@ ignore-android
+//@ needs-subprocess
 
 #![feature(rustc_private)]
 
+#[cfg(unix)]
 extern crate libc;
 
-use std::process::{Command, Stdio};
 use std::env;
+use std::ffi::c_int;
 use std::io::{self, Read, Write};
+use std::process::{Command, Stdio};
 
 #[cfg(unix)]
 unsafe fn without_stdio<R, F: FnOnce() -> R>(f: F) -> R {
@@ -38,14 +37,14 @@ unsafe fn without_stdio<R, F: FnOnce() -> R>(f: F) -> R {
 }
 
 #[cfg(unix)]
-fn assert_fd_is_valid(fd: libc::c_int) {
+fn assert_fd_is_valid(fd: c_int) {
     if unsafe { libc::fcntl(fd, libc::F_GETFD) == -1 } {
         panic!("file descriptor {} is not valid: {}", fd, io::Error::last_os_error());
     }
 }
 
 #[cfg(windows)]
-fn assert_fd_is_valid(_fd: libc::c_int) {}
+fn assert_fd_is_valid(_fd: c_int) {}
 
 #[cfg(windows)]
 unsafe fn without_stdio<R, F: FnOnce() -> R>(f: F) -> R {

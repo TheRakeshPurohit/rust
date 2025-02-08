@@ -38,9 +38,9 @@ fn outer() {
 "#,
         expect![[r#"
             block scope
-            CrateStruct: t
-            PlainStruct: t v
-            SelfStruct: t
+            CrateStruct: ti
+            PlainStruct: ti vi
+            SelfStruct: ti
             Struct: v
             SuperStruct: _
 
@@ -66,7 +66,7 @@ fn outer() {
 "#,
         expect![[r#"
             block scope
-            imported: t v
+            imported: ti vi
             name: v
 
             crate
@@ -92,9 +92,9 @@ fn outer() {
 "#,
         expect![[r#"
             block scope
-            inner1: t
+            inner1: ti
             inner2: v
-            outer: v
+            outer: vi
 
             block scope
             inner: v
@@ -121,7 +121,7 @@ struct Struct {}
 "#,
         expect![[r#"
             block scope
-            Struct: t
+            Struct: ti
 
             crate
             Struct: t
@@ -129,6 +129,47 @@ struct Struct {}
 
             crate::module
             f: v
+        "#]],
+    );
+}
+
+#[test]
+fn super_imports_2() {
+    check_at(
+        r#"
+fn outer() {
+    mod m {
+        struct ResolveMe {}
+        fn middle() {
+            mod m2 {
+                fn inner() {
+                    use super::ResolveMe;
+                    $0
+                }
+            }
+        }
+    }
+}
+"#,
+        expect![[r#"
+            block scope
+            ResolveMe: ti
+
+            block scope
+            m2: t
+
+            block scope::m2
+            inner: v
+
+            block scope
+            m: t
+
+            block scope::m
+            ResolveMe: t
+            middle: v
+
+            crate
+            outer: v
         "#]],
     );
 }
@@ -151,6 +192,42 @@ fn f() {
             BlockId(1) in BlockRelativeModuleId { block: Some(BlockId(0)), local_id: Idx::<ModuleData>(1) }
             BlockId(0) in BlockRelativeModuleId { block: None, local_id: Idx::<ModuleData>(0) }
             crate scope
+        "#]],
+    );
+}
+
+#[test]
+fn self_imports() {
+    check_at(
+        r#"
+fn f() {
+    mod m {
+        struct ResolveMe {}
+        fn g() {
+            fn h() {
+                use self::ResolveMe;
+                $0
+            }
+        }
+    }
+}
+"#,
+        expect![[r#"
+            block scope
+            ResolveMe: ti
+
+            block scope
+            h: v
+
+            block scope
+            m: t
+
+            block scope::m
+            ResolveMe: t
+            g: v
+
+            crate
+            f: v
         "#]],
     );
 }
@@ -215,8 +292,42 @@ pub mod cov_mark {
             nested: v
 
             crate
-            cov_mark: t
+            cov_mark: ti
             f: v
+        "#]],
+    );
+}
+
+#[test]
+fn macro_exported_in_block_mod() {
+    check_at(
+        r#"
+#[macro_export]
+macro_rules! foo {
+    () => { pub struct FooWorks; };
+}
+macro_rules! bar {
+    () => { pub struct BarWorks; };
+}
+fn main() {
+    mod module {
+        foo!();
+        bar!();
+        $0
+    }
+}
+"#,
+        expect![[r#"
+            block scope
+            module: t
+
+            block scope::module
+            BarWorks: t v
+            FooWorks: t v
+
+            crate
+            foo: m
+            main: v
         "#]],
     );
 }
@@ -364,7 +475,7 @@ fn outer() {
 
             block scope::tests
             name: _
-            outer: v
+            outer: vg
 
             crate
             outer: v
@@ -414,6 +525,68 @@ fn f() {$0
 
             crate
             f: v
+        "#]],
+    )
+}
+
+#[test]
+fn resolve_extern_prelude_in_block() {
+    check_at(
+        r#"
+//- /main.rs crate:main deps:core
+fn main() {
+    mod f {
+        use core::S;
+        $0
+    }
+}
+
+//- /core.rs crate:core
+pub struct S;
+        "#,
+        expect![[r#"
+            block scope
+            f: t
+
+            block scope::f
+            S: ti vi
+
+            crate
+            main: v
+        "#]],
+    )
+}
+
+#[test]
+fn shadow_extern_prelude_in_block() {
+    check_at(
+        r#"
+//- /main.rs crate:main deps:core
+fn main() {
+    mod core { pub struct S; }
+    {
+        fn inner() {} // forces a block def map
+        use core::S; // should resolve to the local one
+        $0
+    }
+}
+
+//- /core.rs crate:core
+pub const S;
+        "#,
+        expect![[r#"
+            block scope
+            S: ti vi
+            inner: v
+
+            block scope
+            core: t
+
+            block scope::core
+            S: t v
+
+            crate
+            main: v
         "#]],
     )
 }

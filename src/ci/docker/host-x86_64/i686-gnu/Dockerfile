@@ -24,10 +24,7 @@ COPY scripts/sccache.sh /scripts/
 RUN sh /scripts/sccache.sh
 
 ENV RUST_CONFIGURE_ARGS --build=i686-unknown-linux-gnu
-# Exclude some tests that are unlikely to be platform specific, to speed up
-# this slow job.
-ENV SCRIPT python3 ../x.py --stage 2 test \
-  --exclude src/bootstrap \
-  --exclude tests/rustdoc-js \
-  --exclude src/tools/error_index_generator \
-  --exclude src/tools/linkchecker
+ARG SCRIPT_ARG
+COPY scripts/stage_2_test_set1.sh /scripts/
+COPY scripts/stage_2_test_set2.sh /scripts/
+ENV SCRIPT /scripts/${SCRIPT_ARG}

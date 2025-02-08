@@ -1,9 +1,6 @@
-use std::{
-    fmt,
-    marker::PhantomData,
-    ops::{Index, IndexMut},
-    slice,
-};
+use std::marker::PhantomData;
+use std::ops::{Index, IndexMut};
+use std::{fmt, slice};
 
 use crate::{Idx, IndexVec};
 
@@ -23,7 +20,7 @@ pub struct IndexSlice<I: Idx, T> {
 
 impl<I: Idx, T> IndexSlice<I, T> {
     #[inline]
-    pub const fn empty() -> &'static Self {
+    pub const fn empty<'a>() -> &'a Self {
         Self::from_raw(&[])
     }
 

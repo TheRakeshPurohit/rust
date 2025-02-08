@@ -1,10 +1,10 @@
 //! ICH - Incremental Compilation Hash
 
+use rustc_span::{Symbol, sym};
+
 pub use self::hcx::StableHashingContext;
-use rustc_span::symbol::{sym, Symbol};
 
 mod hcx;
-mod impls_hir;
 mod impls_syntax;
 
 pub const IGNORED_ATTRIBUTES: &[Symbol] = &[

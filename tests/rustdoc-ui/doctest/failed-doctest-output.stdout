@@ -12,7 +12,7 @@ error[E0425]: cannot find value `no` in this scope
 LL | no
    | ^^ not found in this scope
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0425`.
 Couldn't compile the test.
@@ -26,7 +26,9 @@ stdout 2
 stderr:
 stderr 1
 stderr 2
-thread 'main' panicked at 'oh no', $DIR/failed-doctest-output.rs:7:1
+
+thread 'main' panicked at $DIR/failed-doctest-output.rs:7:1:
+oh no
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
 

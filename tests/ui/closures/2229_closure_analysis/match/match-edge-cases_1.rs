@@ -1,9 +1,8 @@
-// run-pass
-// edition:2021
+//@ run-pass
+//@ edition:2021
 
 const PATTERN_REF: &str = "Hello World";
-const NUMBER: i32 = 30;
-const NUMBER_POINTER: *const i32 = &NUMBER;
+const NUMBER_POINTER: *const i32 = 30 as *const i32;
 
 pub fn edge_case_ref(event: &str) {
     let _ = || {

@@ -1,18 +1,19 @@
-use crate::{Diagnostic, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 
 // Diagnostic: private-field
 //
 // This diagnostic is triggered if the accessed field is not visible from the current module.
 pub(crate) fn private_field(ctx: &DiagnosticsContext<'_>, d: &hir::PrivateField) -> Diagnostic {
     // FIXME: add quickfix
-    Diagnostic::new(
-        "private-field",
+    Diagnostic::new_with_syntax_node_ptr(
+        ctx,
+        DiagnosticCode::RustcHardError("E0616"),
         format!(
             "field `{}` of `{}` is private",
-            d.field.name(ctx.sema.db).display(ctx.sema.db),
-            d.field.parent_def(ctx.sema.db).name(ctx.sema.db).display(ctx.sema.db)
+            d.field.name(ctx.sema.db).display(ctx.sema.db, ctx.edition),
+            d.field.parent_def(ctx.sema.db).name(ctx.sema.db).display(ctx.sema.db, ctx.edition)
         ),
-        ctx.sema.diagnostics_display_range(d.expr.clone().map(|it| it.into())).range,
+        d.expr.map(|it| it.into()),
     )
 }
 
@@ -78,6 +79,32 @@ fn main() {
                 field: (),
             }
             Struct { field: () }
+        }
+    };
+    strukt.field;
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn block_module_madness2() {
+        check_diagnostics(
+            r#"
+fn main() {
+    use crate as ForceParentBlockDefMap;
+    let strukt = {
+        use crate as ForceParentBlockDefMap;
+        {
+            pub struct Struct {
+                field: (),
+            }
+            {
+                use crate as ForceParentBlockDefMap;
+                {
+                    Struct { field: () }
+                }
+            }
         }
     };
     strukt.field;

@@ -1,6 +1,6 @@
-// run-fail
-// error-pattern:thread 'main' panicked at
-// ignore-emscripten no processes
+//@ run-fail
+//@ error-pattern:thread 'main' panicked at
+//@ needs-subprocess
 
 fn main() {
     panic!()

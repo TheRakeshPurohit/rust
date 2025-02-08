@@ -9,10 +9,12 @@
 //      12
 //      1
 
-#![feature(auto_traits, lang_items, no_core, start, intrinsics)]
+#![feature(auto_traits, lang_items, no_core, intrinsics, rustc_attrs)]
+#![allow(internal_features)]
 
 #![no_std]
 #![no_core]
+#![no_main]
 
 /*
  * Core
@@ -33,6 +35,7 @@ trait Copy {
 }
 
 impl Copy for isize {}
+impl<T: ?Sized> Copy for *mut T {}
 
 #[lang = "receiver"]
 trait Receiver {
@@ -44,9 +47,11 @@ pub(crate) unsafe auto trait Freeze {}
 mod intrinsics {
     use super::Sized;
 
-    extern "rust-intrinsic" {
-        #[rustc_safe_intrinsic]
-        pub fn abort() -> !;
+    #[rustc_nounwind]
+    #[rustc_intrinsic]
+    #[rustc_intrinsic_must_be_overridden]
+    pub fn abort() -> ! {
+        loop {}
     }
 }
 
@@ -59,9 +64,6 @@ mod libc {
 
 #[lang = "structural_peq"]
 pub trait StructuralPartialEq {}
-
-#[lang = "structural_teq"]
-pub trait StructuralEq {}
 
 #[lang = "drop_in_place"]
 #[allow(unconditional_recursion)]
@@ -97,8 +99,8 @@ static mut WITH_REF: WithRef = WithRef {
     refe: unsafe { &TEST },
 };
 
-#[start]
-fn main(mut argc: isize, _argv: *const *const u8) -> isize {
+#[no_mangle]
+extern "C" fn main(argc: i32, _argv: *const *const u8) -> i32 {
     unsafe {
         libc::printf(b"%ld\n\0" as *const u8 as *const i8, CONSTANT);
         libc::printf(b"%ld\n\0" as *const u8 as *const i8, TEST2.field);

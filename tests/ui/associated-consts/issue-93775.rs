@@ -1,4 +1,8 @@
-// build-pass
+//@ ignore-rustc-debug-assertions
+// Similar to stress testing, the test case requires a larger call stack,
+// so we ignore rustc's debug assertions.
+
+//@ build-pass
 // ignore-tidy-linelength
 
 // Regression for #93775, needs build-pass to test it.

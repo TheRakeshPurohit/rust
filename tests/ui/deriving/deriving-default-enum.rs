@@ -1,4 +1,4 @@
-// run-pass
+//@ run-pass
 
 // nb: does not impl Default
 #[derive(Debug, PartialEq)]
@@ -22,6 +22,6 @@ enum MyOption<T> {
 }
 
 fn main() {
-    assert_eq!(Foo::default(), Foo::Alpha);
+    assert!(matches!(Foo::default(), Foo::Alpha));
     assert!(matches!(MyOption::<NotDefault>::default(), MyOption::None));
 }

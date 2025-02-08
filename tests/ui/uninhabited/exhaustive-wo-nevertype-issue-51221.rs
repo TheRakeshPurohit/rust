@@ -1,6 +1,4 @@
-// check-pass
-
-#![feature(exhaustive_patterns)]
+//@ check-pass
 
 enum Void {}
 fn main() {

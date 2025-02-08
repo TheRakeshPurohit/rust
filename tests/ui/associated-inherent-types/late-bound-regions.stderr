@@ -1,5 +1,5 @@
 error[E0515]: cannot return value referencing local variable `local`
-  --> $DIR/late-bound-regions.rs:22:5
+  --> $DIR/late-bound-regions.rs:20:5
    |
 LL |     f(&local)
    |     ^^------^
@@ -7,6 +7,6 @@ LL |     f(&local)
    |     | `local` is borrowed here
    |     returns a value referencing data owned by the current function
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0515`.

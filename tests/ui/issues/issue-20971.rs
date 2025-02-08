@@ -1,8 +1,8 @@
 // Regression test for Issue #20971.
 
-// run-fail
-// error-pattern:Hello, world!
-// ignore-emscripten no processes
+//@ run-fail
+//@ error-pattern:Hello, world!
+//@ needs-subprocess
 
 pub trait Parser {
     type Input;

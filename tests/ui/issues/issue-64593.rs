@@ -1,7 +1,7 @@
-// check-pass
+//@ check-pass
 #![deny(improper_ctypes)]
 
-pub struct Error(std::num::NonZeroU32);
+pub struct Error(std::num::NonZero<u32>);
 
 extern "Rust" {
     fn foo(dest: &mut [u8]) -> Result<(), Error>;

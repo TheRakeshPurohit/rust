@@ -1,7 +1,11 @@
-//@run-rustfix
-
 #![warn(clippy::len_zero)]
-#![allow(dead_code, unused, clippy::len_without_is_empty)]
+#![allow(
+    dead_code,
+    unused,
+    clippy::needless_if,
+    clippy::len_without_is_empty,
+    clippy::const_is_empty
+)]
 
 extern crate core;
 use core::ops::Deref;
@@ -104,6 +108,8 @@ fn main() {
     let d2s = DerefToDerefToString {};
     println!("{}", (**d2s).is_empty());
 
+    println!("{}", std::borrow::Cow::Borrowed("").is_empty());
+
     let y = One;
     if y.len() == 0 {
         // No error; `One` does not have `.is_empty()`.
@@ -184,4 +190,61 @@ fn main() {
 
 fn test_slice(b: &[u8]) {
     if !b.is_empty() {}
+}
+
+// issue #11992
+fn binop_with_macros() {
+    macro_rules! len {
+        ($seq:ident) => {
+            $seq.len()
+        };
+    }
+
+    macro_rules! compare_to {
+        ($val:literal) => {
+            $val
+        };
+        ($val:expr) => {{ $val }};
+    }
+
+    macro_rules! zero {
+        () => {
+            0
+        };
+    }
+
+    let has_is_empty = HasIsEmpty;
+    // Don't lint, suggesting changes might break macro compatibility.
+    (len!(has_is_empty) > 0).then(|| println!("This can happen."));
+    // Don't lint, suggesting changes might break macro compatibility.
+    if len!(has_is_empty) == 0 {}
+    // Don't lint
+    if has_is_empty.len() == compare_to!(if true { 0 } else { 1 }) {}
+    // This is fine
+    if has_is_empty.len() == compare_to!(1) {}
+
+    if has_is_empty.is_empty() {}
+    if has_is_empty.is_empty() {}
+
+    (!has_is_empty.is_empty()).then(|| println!("This can happen."));
+}
+
+fn no_infinite_recursion() -> bool {
+    struct S;
+
+    impl Deref for S {
+        type Target = Self;
+        fn deref(&self) -> &Self::Target {
+            self
+        }
+    }
+
+    impl PartialEq<&'static str> for S {
+        fn eq(&self, _other: &&'static str) -> bool {
+            false
+        }
+    }
+
+    // Do not crash while checking if S implements `.is_empty()`
+    S == ""
 }

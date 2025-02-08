@@ -5,14 +5,6 @@
 #![allow(clippy::match_like_matches_macro)]
 #![allow(unreachable_pub)]
 
-#[macro_use]
-extern crate derive_new;
-#[cfg(test)]
-#[macro_use]
-extern crate lazy_static;
-#[macro_use]
-extern crate log;
-
 // N.B. these crates are loaded from the sysroot, so they need extern crate.
 extern crate rustc_ast;
 extern crate rustc_ast_pretty;
@@ -31,6 +23,7 @@ extern crate thin_vec;
 extern crate rustc_driver;
 
 use std::cell::RefCell;
+use std::cmp::min;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, Write};
@@ -52,8 +45,8 @@ use crate::shape::Indent;
 use crate::utils::indent_next_line;
 
 pub use crate::config::{
-    load_config, CliOptions, Color, Config, Edition, EmitMode, FileLines, FileName, NewlineStyle,
-    Range, Verbosity,
+    CliOptions, Color, Config, Edition, EmitMode, FileLines, FileName, NewlineStyle, Range,
+    StyleEdition, Verbosity, Version, load_config,
 };
 
 pub use crate::format_report_formatter::{FormatReportFormatter, FormatReportFormatterBuilder};
@@ -62,6 +55,13 @@ pub use crate::rustfmt_diff::{ModifiedChunk, ModifiedLines};
 
 #[macro_use]
 mod utils;
+
+macro_rules! static_regex {
+    ($re:literal) => {{
+        static RE: ::std::sync::OnceLock<::regex::Regex> = ::std::sync::OnceLock::new();
+        RE.get_or_init(|| ::regex::Regex::new($re).unwrap())
+    }};
+}
 
 mod attr;
 mod chains;
@@ -91,6 +91,7 @@ mod rewrite;
 pub(crate) mod rustfmt_diff;
 mod shape;
 mod skip;
+mod sort;
 pub(crate) mod source_file;
 pub(crate) mod source_map;
 mod spanned;
@@ -259,8 +260,8 @@ impl FormatReport {
         self.internal
             .borrow()
             .0
-            .iter()
-            .map(|(_, errors)| errors.len())
+            .values()
+            .map(|errors| errors.len())
             .sum()
     }
 
@@ -306,7 +307,7 @@ fn format_snippet(snippet: &str, config: &Config, is_macro_def: bool) -> Option<
         let mut out: Vec<u8> = Vec::with_capacity(snippet.len() * 2);
         config.set().emit_mode(config::EmitMode::Stdout);
         config.set().verbose(Verbosity::Quiet);
-        config.set().hide_parse_errors(true);
+        config.set().show_parse_errors(false);
         if is_macro_def {
             config.set().error_on_unformatted(true);
         }
@@ -388,9 +389,15 @@ fn format_code_block(
         .snippet
         .rfind('}')
         .unwrap_or_else(|| formatted.snippet.len());
+
+    // It's possible that `block_len < FN_MAIN_PREFIX.len()`. This can happen if the code block was
+    // formatted into the empty string, leading to the enclosing `fn main() {\n}` being formatted
+    // into `fn main() {}`. In this case no unindentation is done.
+    let block_start = min(FN_MAIN_PREFIX.len(), block_len);
+
     let mut is_indented = true;
     let indent_str = Indent::from_width(config, config.tab_spaces()).to_string(config);
-    for (kind, ref line) in LineClasses::new(&formatted.snippet[FN_MAIN_PREFIX.len()..block_len]) {
+    for (kind, ref line) in LineClasses::new(&formatted.snippet[block_start..block_len]) {
         if !is_first {
             result.push('\n');
         } else {

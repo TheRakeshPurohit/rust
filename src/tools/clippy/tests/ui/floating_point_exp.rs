@@ -1,4 +1,5 @@
-//@run-rustfix
+// FIXME(f16_f128): add tests when exp is available
+
 #![warn(clippy::imprecise_flops)]
 #![allow(clippy::unnecessary_cast)]
 

@@ -1,10 +1,11 @@
-use super::BackendTypes;
+use rustc_abi::Align;
 use rustc_hir::def_id::DefId;
-use rustc_target::abi::Align;
 
-pub trait StaticMethods: BackendTypes {
+use super::BackendTypes;
+
+pub trait StaticCodegenMethods: BackendTypes {
     fn static_addr_of(&self, cv: Self::Value, align: Align, kind: Option<&str>) -> Self::Value;
-    fn codegen_static(&self, def_id: DefId, is_mutable: bool);
+    fn codegen_static(&self, def_id: DefId);
 
     /// Mark the given global value as "used", to prevent the compiler and linker from potentially
     /// removing a static variable that may otherwise appear unused.

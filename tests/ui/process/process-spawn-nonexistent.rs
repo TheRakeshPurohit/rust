@@ -1,7 +1,6 @@
-// run-pass
-// ignore-emscripten no processes
-// ignore-sgx no processes
-// ignore-fuchsia ErrorKind not translated
+//@ run-pass
+//@ needs-subprocess
+//@ ignore-fuchsia ErrorKind not translated
 
 use std::io::ErrorKind;
 use std::process::Command;

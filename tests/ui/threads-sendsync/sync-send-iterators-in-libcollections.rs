@@ -1,20 +1,22 @@
-// run-pass
+//@ run-pass
 
 #![allow(warnings)]
 #![feature(drain, collections_bound, btree_range)]
 
-use std::collections::BinaryHeap;
-use std::collections::{BTreeMap, BTreeSet};
-use std::collections::LinkedList;
-use std::collections::VecDeque;
-use std::collections::HashMap;
-use std::collections::HashSet;
-
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, LinkedList, VecDeque};
 use std::mem;
 use std::ops::Bound::Included;
 
-fn is_sync<T>(_: T) where T: Sync {}
-fn is_send<T>(_: T) where T: Send {}
+fn is_sync<T>(_: T)
+where
+    T: Sync,
+{
+}
+fn is_send<T>(_: T)
+where
+    T: Send,
+{
+}
 
 macro_rules! all_sync_send {
     ($ctor:expr, $($iter:ident),+) => ({
@@ -37,7 +39,7 @@ macro_rules! is_sync_send {
 }
 
 fn main() {
-    // The iterator "generator" list should exhaust what corresponding
+    // The iterator "coroutine" list should exhaust what corresponding
     // implementations have where `Sync` and `Send` semantics apply.
     all_sync_send!(BinaryHeap::<usize>::new(), iter, drain, into_iter);
 

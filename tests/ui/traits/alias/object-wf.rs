@@ -1,4 +1,4 @@
-// check-pass
+//@ check-pass
 
 // This test checks that trait objects involving trait aliases are well-formed.
 
@@ -20,7 +20,7 @@ fn _f0() {
     let _: Box<dyn Unpin + _1 + Send + Sync>;
 }
 
-// Include object safe traits:
+// Include dyn-compatible traits:
 
 fn _f1() {
     let _: Box<dyn Obj + _0>;
@@ -28,7 +28,7 @@ fn _f1() {
     let _: Box<dyn Obj + _1 + _0>;
 }
 
-// And when the object safe trait is in a trait alias:
+// And when the dyn-compatible trait is in a trait alias:
 
 trait _2 = Obj;
 

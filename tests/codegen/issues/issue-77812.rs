@@ -1,4 +1,4 @@
-// compile-flags: -O
+//@ compile-flags: -O
 #![crate_type = "lib"]
 
 // Test that LLVM can eliminate the unreachable `Variant::Zero` branch.
@@ -10,7 +10,7 @@ pub enum Variant {
     Two,
 }
 
-extern {
+extern "C" {
     fn exf1();
     fn exf2();
 }

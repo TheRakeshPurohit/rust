@@ -1,5 +1,5 @@
-// run-pass
-// aux-build:multiple-derives.rs
+//@ run-pass
+//@ proc-macro: multiple-derives.rs
 
 extern crate multiple_derives;
 

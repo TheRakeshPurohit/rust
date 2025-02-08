@@ -1,4 +1,4 @@
-// run-pass
+//@ run-pass
 
 #![feature(fn_traits,
            step_trait,
@@ -156,7 +156,7 @@ impl<'a, 'b> std::ops::Add<&'b NaiveDate> for &'a NaiveDate {
 }
 
 impl std::iter::Step for NaiveDate {
-    fn steps_between(_: &Self, _: &Self) -> Option<usize> {
+    fn steps_between(_: &Self, _: &Self) -> (usize, Option<usize>) {
         unimplemented!()
     }
 

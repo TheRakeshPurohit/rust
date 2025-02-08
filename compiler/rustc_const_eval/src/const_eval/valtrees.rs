@@ -1,33 +1,40 @@
-use super::eval_queries::{mk_eval_cx, op_to_const};
-use super::machine::CompileTimeEvalContext;
-use super::{ValTreeCreationError, ValTreeCreationResult, VALTREE_MAX_NODES};
-use crate::interpret::{
-    intern_const_alloc_recursive, ConstValue, ImmTy, Immediate, InternKind, MemPlaceMeta,
-    MemoryKind, PlaceTy, Scalar,
-};
-use crate::interpret::{MPlaceTy, Value};
+use rustc_abi::{BackendRepr, VariantIdx};
+use rustc_data_structures::stack::ensure_sufficient_stack;
+use rustc_middle::mir::interpret::{EvalToValTreeResult, GlobalId, ReportedErrorInfo};
+use rustc_middle::ty::layout::{LayoutCx, LayoutOf, TyAndLayout};
 use rustc_middle::ty::{self, ScalarInt, Ty, TyCtxt};
-use rustc_span::source_map::DUMMY_SP;
-use rustc_target::abi::{Align, FieldIdx, VariantIdx, FIRST_VARIANT};
+use rustc_middle::{bug, mir};
+use rustc_span::DUMMY_SP;
+use tracing::{debug, instrument, trace};
+
+use super::eval_queries::{mk_eval_cx_to_read_const_val, op_to_const};
+use super::machine::CompileTimeInterpCx;
+use super::{VALTREE_MAX_NODES, ValTreeCreationError, ValTreeCreationResult};
+use crate::const_eval::CanAccessMutGlobal;
+use crate::errors::MaxNumNodesInConstErr;
+use crate::interpret::{
+    ImmTy, Immediate, InternKind, MPlaceTy, MemPlaceMeta, MemoryKind, PlaceTy, Projectable, Scalar,
+    intern_const_alloc_recursive,
+};
 
 #[instrument(skip(ecx), level = "debug")]
 fn branches<'tcx>(
-    ecx: &CompileTimeEvalContext<'tcx, 'tcx>,
+    ecx: &CompileTimeInterpCx<'tcx>,
     place: &MPlaceTy<'tcx>,
     n: usize,
     variant: Option<VariantIdx>,
     num_nodes: &mut usize,
 ) -> ValTreeCreationResult<'tcx> {
     let place = match variant {
-        Some(variant) => ecx.mplace_downcast(&place, variant).unwrap(),
-        None => *place,
+        Some(variant) => ecx.project_downcast(place, variant).unwrap(),
+        None => place.clone(),
     };
     let variant = variant.map(|variant| Some(ty::ValTree::Leaf(ScalarInt::from(variant.as_u32()))));
     debug!(?place, ?variant);
 
     let mut fields = Vec::with_capacity(n);
     for i in 0..n {
-        let field = ecx.mplace_field(&place, i).unwrap();
+        let field = ecx.project_field(&place, i).unwrap();
         let valtree = const_to_valtree_inner(ecx, &field, num_nodes)?;
         fields.push(Some(valtree));
     }
@@ -50,17 +57,15 @@ fn branches<'tcx>(
 
 #[instrument(skip(ecx), level = "debug")]
 fn slice_branches<'tcx>(
-    ecx: &CompileTimeEvalContext<'tcx, 'tcx>,
+    ecx: &CompileTimeInterpCx<'tcx>,
     place: &MPlaceTy<'tcx>,
     num_nodes: &mut usize,
 ) -> ValTreeCreationResult<'tcx> {
-    let n = place
-        .len(&ecx.tcx.tcx)
-        .unwrap_or_else(|_| panic!("expected to use len of place {:?}", place));
+    let n = place.len(ecx).unwrap_or_else(|_| panic!("expected to use len of place {place:?}"));
 
     let mut elems = Vec::with_capacity(n as usize);
     for i in 0..n {
-        let place_elem = ecx.mplace_index(place, i).unwrap();
+        let place_elem = ecx.project_index(place, i).unwrap();
         let valtree = const_to_valtree_inner(ecx, &place_elem, num_nodes)?;
         elems.push(valtree);
     }
@@ -69,8 +74,8 @@ fn slice_branches<'tcx>(
 }
 
 #[instrument(skip(ecx), level = "debug")]
-pub(crate) fn const_to_valtree_inner<'tcx>(
-    ecx: &CompileTimeEvalContext<'tcx, 'tcx>,
+fn const_to_valtree_inner<'tcx>(
+    ecx: &CompileTimeInterpCx<'tcx>,
     place: &MPlaceTy<'tcx>,
     num_nodes: &mut usize,
 ) -> ValTreeCreationResult<'tcx> {
@@ -87,27 +92,50 @@ pub(crate) fn const_to_valtree_inner<'tcx>(
             Ok(ty::ValTree::zst())
         }
         ty::Bool | ty::Int(_) | ty::Uint(_) | ty::Float(_) | ty::Char => {
-            let Ok(val) = ecx.read_immediate(&place.into()) else {
-                return Err(ValTreeCreationError::Other);
-            };
-            let val = val.to_scalar();
+            let val = ecx.read_immediate(place).unwrap();
+            let val = val.to_scalar_int().unwrap();
             *num_nodes += 1;
 
-            Ok(ty::ValTree::Leaf(val.assert_int()))
+            Ok(ty::ValTree::Leaf(val))
         }
 
-        // Raw pointers are not allowed in type level constants, as we cannot properly test them for
-        // equality at compile-time (see `ptr_guaranteed_cmp`).
+        ty::Pat(base, ..) => {
+            let mut place = place.clone();
+            // The valtree of the base type is the same as the valtree of the pattern type.
+            // Since the returned valtree does not contain the type or layout, we can just
+            // switch to the base type.
+            place.layout = ecx.layout_of(*base).unwrap();
+            ensure_sufficient_stack(|| const_to_valtree_inner(ecx, &place, num_nodes))
+        },
+
+
+        ty::RawPtr(_, _) => {
+            // Not all raw pointers are allowed, as we cannot properly test them for
+            // equality at compile-time (see `ptr_guaranteed_cmp`).
+            // However we allow those that are just integers in disguise.
+            // First, get the pointer. Remember it might be wide!
+            let val = ecx.read_immediate(place).unwrap();
+            // We could allow wide raw pointers where both sides are integers in the future,
+            // but for now we reject them.
+            if matches!(val.layout.backend_repr, BackendRepr::ScalarPair(..)) {
+                return Err(ValTreeCreationError::NonSupportedType(ty));
+            }
+            let val = val.to_scalar();
+            // We are in the CTFE machine, so ptr-to-int casts will fail.
+            // This can only be `Ok` if `val` already is an integer.
+            let Ok(val) = val.try_to_scalar_int() else {
+                return Err(ValTreeCreationError::NonSupportedType(ty));
+            };
+            // It's just a ScalarInt!
+            Ok(ty::ValTree::Leaf(val))
+        }
+
         // Technically we could allow function pointers (represented as `ty::Instance`), but this is not guaranteed to
         // agree with runtime equality tests.
-        ty::FnPtr(_) | ty::RawPtr(_) => Err(ValTreeCreationError::NonSupportedType),
+        ty::FnPtr(..) => Err(ValTreeCreationError::NonSupportedType(ty)),
 
         ty::Ref(_, _, _)  => {
-            let Ok(derefd_place)= ecx.deref_operand(&place.into()) else {
-                return Err(ValTreeCreationError::Other);
-            };
-            debug!(?derefd_place);
-
+            let derefd_place = ecx.deref_pointer(place).unwrap();
             const_to_valtree_inner(ecx, &derefd_place, num_nodes)
         }
 
@@ -116,9 +144,9 @@ pub(crate) fn const_to_valtree_inner<'tcx>(
         }
         // Trait objects are not allowed in type level constants, as we have no concept for
         // resolving their backing type, even if we can do that at const eval time. We may
-        // hypothetically be able to allow `dyn StructuralEq` trait objects in the future,
+        // hypothetically be able to allow `dyn StructuralPartialEq` trait objects in the future,
         // but it is unclear if this is useful.
-        ty::Dynamic(..) => Err(ValTreeCreationError::NonSupportedType),
+        ty::Dynamic(..) => Err(ValTreeCreationError::NonSupportedType(ty)),
 
         ty::Tuple(elem_tys) => {
             branches(ecx, place, elem_tys.len(), None, num_nodes)
@@ -126,14 +154,12 @@ pub(crate) fn const_to_valtree_inner<'tcx>(
 
         ty::Adt(def, _) => {
             if def.is_union() {
-                return Err(ValTreeCreationError::NonSupportedType);
+                return Err(ValTreeCreationError::NonSupportedType(ty));
             } else if def.variants().is_empty() {
                 bug!("uninhabited types should have errored and never gotten converted to valtree")
             }
 
-            let Ok((_, variant)) = ecx.read_discriminant(&place.into()) else {
-                return Err(ValTreeCreationError::Other);
-            };
+            let variant = ecx.read_discriminant(place).unwrap();
             branches(ecx, place, def.variant(variant).fields.len(), def.is_enum().then_some(variant), num_nodes)
         }
 
@@ -150,156 +176,176 @@ pub(crate) fn const_to_valtree_inner<'tcx>(
         | ty::Infer(_)
         // FIXME(oli-obk): we can probably encode closures just like structs
         | ty::Closure(..)
-        | ty::Generator(..)
-        | ty::GeneratorWitness(..) |ty::GeneratorWitnessMIR(..)=> Err(ValTreeCreationError::NonSupportedType),
+        | ty::CoroutineClosure(..)
+        | ty::Coroutine(..)
+        | ty::CoroutineWitness(..)
+        | ty::UnsafeBinder(_) => Err(ValTreeCreationError::NonSupportedType(ty)),
     }
 }
 
-#[instrument(skip(ecx), level = "debug")]
-fn create_mplace_from_layout<'tcx>(
-    ecx: &mut CompileTimeEvalContext<'tcx, 'tcx>,
-    ty: Ty<'tcx>,
-) -> MPlaceTy<'tcx> {
-    let tcx = ecx.tcx;
-    let param_env = ecx.param_env;
-    let layout = tcx.layout_of(param_env.and(ty)).unwrap();
-    debug!(?layout);
-
-    ecx.allocate(layout, MemoryKind::Stack).unwrap()
-}
-
-// Walks custom DSTs and gets the type of the unsized field and the number of elements
-// in the unsized field.
-fn get_info_on_unsized_field<'tcx>(
-    ty: Ty<'tcx>,
+/// Valtrees don't store the `MemPlaceMeta` that all dynamically sized values have in the interpreter.
+/// This function reconstructs it.
+fn reconstruct_place_meta<'tcx>(
+    layout: TyAndLayout<'tcx>,
     valtree: ty::ValTree<'tcx>,
     tcx: TyCtxt<'tcx>,
-) -> (Ty<'tcx>, usize) {
+) -> MemPlaceMeta {
+    if layout.is_sized() {
+        return MemPlaceMeta::None;
+    }
+
     let mut last_valtree = valtree;
-    let tail = tcx.struct_tail_with_normalize(
-        ty,
+    // Traverse the type, and update `last_valtree` as we go.
+    let tail = tcx.struct_tail_raw(
+        layout.ty,
         |ty| ty,
         || {
             let branches = last_valtree.unwrap_branch();
-            last_valtree = branches[branches.len() - 1];
+            last_valtree = *branches.last().unwrap();
             debug!(?branches, ?last_valtree);
         },
     );
-    let unsized_inner_ty = match tail.kind() {
-        ty::Slice(t) => *t,
-        ty::Str => tail,
-        _ => bug!("expected Slice or Str"),
+    // Sanity-check that we got a tail we support.
+    match tail.kind() {
+        ty::Slice(..) | ty::Str => {}
+        _ => bug!("unsized tail of a valtree must be Slice or Str"),
     };
 
-    // Have to adjust type for ty::Str
-    let unsized_inner_ty = match unsized_inner_ty.kind() {
-        ty::Str => tcx.types.u8,
-        _ => unsized_inner_ty,
-    };
-
-    // Get the number of elements in the unsized field
+    // Get the number of elements in the unsized field.
     let num_elems = last_valtree.unwrap_branch().len();
-
-    (unsized_inner_ty, num_elems)
+    MemPlaceMeta::Meta(Scalar::from_target_usize(num_elems as u64, &tcx))
 }
 
 #[instrument(skip(ecx), level = "debug", ret)]
-fn create_pointee_place<'tcx>(
-    ecx: &mut CompileTimeEvalContext<'tcx, 'tcx>,
-    ty: Ty<'tcx>,
+fn create_valtree_place<'tcx>(
+    ecx: &mut CompileTimeInterpCx<'tcx>,
+    layout: TyAndLayout<'tcx>,
     valtree: ty::ValTree<'tcx>,
 ) -> MPlaceTy<'tcx> {
-    let tcx = ecx.tcx.tcx;
+    let meta = reconstruct_place_meta(layout, valtree, ecx.tcx.tcx);
+    ecx.allocate_dyn(layout, MemoryKind::Stack, meta).unwrap()
+}
 
-    if !ty.is_sized(*ecx.tcx, ty::ParamEnv::empty()) {
-        // We need to create `Allocation`s for custom DSTs
+/// Evaluates a constant and turns it into a type-level constant value.
+pub(crate) fn eval_to_valtree<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    typing_env: ty::TypingEnv<'tcx>,
+    cid: GlobalId<'tcx>,
+) -> EvalToValTreeResult<'tcx> {
+    // Const eval always happens in PostAnalysis mode . See the comment in
+    // `InterpCx::new` for more details.
+    debug_assert_eq!(typing_env.typing_mode, ty::TypingMode::PostAnalysis);
+    let const_alloc = tcx.eval_to_allocation_raw(typing_env.as_query_input(cid))?;
 
-        let (unsized_inner_ty, num_elems) = get_info_on_unsized_field(ty, valtree, tcx);
-        let unsized_inner_ty = match unsized_inner_ty.kind() {
-            ty::Str => tcx.types.u8,
-            _ => unsized_inner_ty,
-        };
-        let unsized_inner_ty_size =
-            tcx.layout_of(ty::ParamEnv::empty().and(unsized_inner_ty)).unwrap().layout.size();
-        debug!(?unsized_inner_ty, ?unsized_inner_ty_size, ?num_elems);
+    // FIXME Need to provide a span to `eval_to_valtree`
+    let ecx = mk_eval_cx_to_read_const_val(
+        tcx,
+        DUMMY_SP,
+        typing_env,
+        // It is absolutely crucial for soundness that
+        // we do not read from mutable memory.
+        CanAccessMutGlobal::No,
+    );
+    let place = ecx.raw_const_to_mplace(const_alloc).unwrap();
+    debug!(?place);
 
-        // for custom DSTs only the last field/element is unsized, but we need to also allocate
-        // space for the other fields/elements
-        let layout = tcx.layout_of(ty::ParamEnv::empty().and(ty)).unwrap();
-        let size_of_sized_part = layout.layout.size();
+    let mut num_nodes = 0;
+    let valtree_result = const_to_valtree_inner(&ecx, &place, &mut num_nodes);
 
-        // Get the size of the memory behind the DST
-        let dst_size = unsized_inner_ty_size.checked_mul(num_elems as u64, &tcx).unwrap();
-
-        let size = size_of_sized_part.checked_add(dst_size, &tcx).unwrap();
-        let align = Align::from_bytes(size.bytes().next_power_of_two()).unwrap();
-        let ptr = ecx.allocate_ptr(size, align, MemoryKind::Stack).unwrap();
-        debug!(?ptr);
-
-        MPlaceTy::from_aligned_ptr_with_meta(
-            ptr.into(),
-            layout,
-            MemPlaceMeta::Meta(Scalar::from_target_usize(num_elems as u64, &tcx)),
-        )
-    } else {
-        create_mplace_from_layout(ecx, ty)
+    match valtree_result {
+        Ok(valtree) => Ok(Ok(valtree)),
+        Err(err) => {
+            let did = cid.instance.def_id();
+            let global_const_id = cid.display(tcx);
+            let span = tcx.hir().span_if_local(did);
+            match err {
+                ValTreeCreationError::NodesOverflow => {
+                    let handled =
+                        tcx.dcx().emit_err(MaxNumNodesInConstErr { span, global_const_id });
+                    Err(ReportedErrorInfo::allowed_in_infallible(handled).into())
+                }
+                ValTreeCreationError::NonSupportedType(ty) => Ok(Err(ty)),
+            }
+        }
     }
 }
 
 /// Converts a `ValTree` to a `ConstValue`, which is needed after mir
 /// construction has finished.
-// FIXME Merge `valtree_to_const_value` and `valtree_into_mplace` into one function
+// FIXME(valtrees): Merge `valtree_to_const_value` and `valtree_into_mplace` into one function
 #[instrument(skip(tcx), level = "debug", ret)]
 pub fn valtree_to_const_value<'tcx>(
     tcx: TyCtxt<'tcx>,
-    param_env_ty: ty::ParamEnvAnd<'tcx, Ty<'tcx>>,
-    valtree: ty::ValTree<'tcx>,
-) -> ConstValue<'tcx> {
+    typing_env: ty::TypingEnv<'tcx>,
+    cv: ty::Value<'tcx>,
+) -> mir::ConstValue<'tcx> {
     // Basic idea: We directly construct `Scalar` values from trivial `ValTree`s
     // (those for constants with type bool, int, uint, float or char).
     // For all other types we create an `MPlace` and fill that by walking
     // the `ValTree` and using `place_projection` and `place_field` to
     // create inner `MPlace`s which are filled recursively.
-    // FIXME Does this need an example?
-
-    let (param_env, ty) = param_env_ty.into_parts();
-    let mut ecx = mk_eval_cx(tcx, DUMMY_SP, param_env, false);
-
-    match ty.kind() {
+    // FIXME: Does this need an example?
+    match *cv.ty.kind() {
         ty::FnDef(..) => {
-            assert!(valtree.unwrap_branch().is_empty());
-            ConstValue::ZeroSized
+            assert!(cv.valtree.unwrap_branch().is_empty());
+            mir::ConstValue::ZeroSized
         }
-        ty::Bool | ty::Int(_) | ty::Uint(_) | ty::Float(_) | ty::Char => match valtree {
-            ty::ValTree::Leaf(scalar_int) => ConstValue::Scalar(Scalar::Int(scalar_int)),
-            ty::ValTree::Branch(_) => bug!(
-                "ValTrees for Bool, Int, Uint, Float or Char should have the form ValTree::Leaf"
-            ),
-        },
-        ty::Ref(_, _, _) | ty::Tuple(_) | ty::Array(_, _) | ty::Adt(..) => {
-            let mut place = match ty.kind() {
-                ty::Ref(_, inner_ty, _) => {
-                    // Need to create a place for the pointee to fill for Refs
-                    create_pointee_place(&mut ecx, *inner_ty, valtree)
+        ty::Bool | ty::Int(_) | ty::Uint(_) | ty::Float(_) | ty::Char | ty::RawPtr(_, _) => {
+            match cv.valtree {
+                ty::ValTree::Leaf(scalar_int) => mir::ConstValue::Scalar(Scalar::Int(scalar_int)),
+                ty::ValTree::Branch(_) => bug!(
+                    "ValTrees for Bool, Int, Uint, Float, Char or RawPtr should have the form ValTree::Leaf"
+                ),
+            }
+        }
+        ty::Pat(ty, _) => {
+            let cv = ty::Value { valtree: cv.valtree, ty };
+            valtree_to_const_value(tcx, typing_env, cv)
+        }
+        ty::Ref(_, inner_ty, _) => {
+            let mut ecx =
+                mk_eval_cx_to_read_const_val(tcx, DUMMY_SP, typing_env, CanAccessMutGlobal::No);
+            let imm = valtree_to_ref(&mut ecx, cv.valtree, inner_ty);
+            let imm = ImmTy::from_immediate(
+                imm,
+                tcx.layout_of(typing_env.as_query_input(cv.ty)).unwrap(),
+            );
+            op_to_const(&ecx, &imm.into(), /* for diagnostics */ false)
+        }
+        ty::Tuple(_) | ty::Array(_, _) | ty::Adt(..) => {
+            let layout = tcx.layout_of(typing_env.as_query_input(cv.ty)).unwrap();
+            if layout.is_zst() {
+                // Fast path to avoid some allocations.
+                return mir::ConstValue::ZeroSized;
+            }
+            if layout.backend_repr.is_scalar()
+                && (matches!(cv.ty.kind(), ty::Tuple(_))
+                    || matches!(cv.ty.kind(), ty::Adt(def, _) if def.is_struct()))
+            {
+                // A Scalar tuple/struct; we can avoid creating an allocation.
+                let branches = cv.valtree.unwrap_branch();
+                // Find the non-ZST field. (There can be aligned ZST!)
+                for (i, &inner_valtree) in branches.iter().enumerate() {
+                    let field = layout.field(&LayoutCx::new(tcx, typing_env), i);
+                    if !field.is_zst() {
+                        let cv = ty::Value { valtree: inner_valtree, ty: field.ty };
+                        return valtree_to_const_value(tcx, typing_env, cv);
+                    }
                 }
-                _ => create_mplace_from_layout(&mut ecx, ty),
-            };
-            debug!(?place);
+                bug!("could not find non-ZST field during in {layout:#?}");
+            }
 
-            valtree_into_mplace(&mut ecx, &mut place, valtree);
-            dump_place(&ecx, place.into());
+            let mut ecx =
+                mk_eval_cx_to_read_const_val(tcx, DUMMY_SP, typing_env, CanAccessMutGlobal::No);
+
+            // Need to create a place for this valtree.
+            let place = create_valtree_place(&mut ecx, layout, cv.valtree);
+
+            valtree_into_mplace(&mut ecx, &place, cv.valtree);
+            dump_place(&ecx, &place);
             intern_const_alloc_recursive(&mut ecx, InternKind::Constant, &place).unwrap();
 
-            match ty.kind() {
-                ty::Ref(_, _, _) => {
-                    let ref_place = place.to_ref(&tcx);
-                    let imm =
-                        ImmTy::from_immediate(ref_place, tcx.layout_of(param_env_ty).unwrap());
-
-                    op_to_const(&ecx, &imm.into())
-                }
-                _ => op_to_const(&ecx, &place.into()),
-            }
+            op_to_const(&ecx, &place.into(), /* for diagnostics */ false)
         }
         ty::Never
         | ty::Error(_)
@@ -312,61 +358,59 @@ pub fn valtree_to_const_value<'tcx>(
         | ty::Placeholder(..)
         | ty::Infer(_)
         | ty::Closure(..)
-        | ty::Generator(..)
-        | ty::GeneratorWitness(..)
-        | ty::GeneratorWitnessMIR(..)
-        | ty::FnPtr(_)
-        | ty::RawPtr(_)
+        | ty::CoroutineClosure(..)
+        | ty::Coroutine(..)
+        | ty::CoroutineWitness(..)
+        | ty::FnPtr(..)
         | ty::Str
         | ty::Slice(_)
-        | ty::Dynamic(..) => bug!("no ValTree should have been created for type {:?}", ty.kind()),
+        | ty::Dynamic(..)
+        | ty::UnsafeBinder(_) => {
+            bug!("no ValTree should have been created for type {:?}", cv.ty.kind())
+        }
     }
+}
+
+/// Put a valtree into memory and return a reference to that.
+fn valtree_to_ref<'tcx>(
+    ecx: &mut CompileTimeInterpCx<'tcx>,
+    valtree: ty::ValTree<'tcx>,
+    pointee_ty: Ty<'tcx>,
+) -> Immediate {
+    let pointee_place = create_valtree_place(ecx, ecx.layout_of(pointee_ty).unwrap(), valtree);
+    debug!(?pointee_place);
+
+    valtree_into_mplace(ecx, &pointee_place, valtree);
+    dump_place(ecx, &pointee_place);
+    intern_const_alloc_recursive(ecx, InternKind::Constant, &pointee_place).unwrap();
+
+    pointee_place.to_ref(&ecx.tcx)
 }
 
 #[instrument(skip(ecx), level = "debug")]
 fn valtree_into_mplace<'tcx>(
-    ecx: &mut CompileTimeEvalContext<'tcx, 'tcx>,
-    place: &mut MPlaceTy<'tcx>,
+    ecx: &mut CompileTimeInterpCx<'tcx>,
+    place: &MPlaceTy<'tcx>,
     valtree: ty::ValTree<'tcx>,
 ) {
     // This will match on valtree and write the value(s) corresponding to the ValTree
     // inside the place recursively.
 
-    let tcx = ecx.tcx.tcx;
     let ty = place.layout.ty;
 
     match ty.kind() {
         ty::FnDef(_, _) => {
             // Zero-sized type, nothing to do.
         }
-        ty::Bool | ty::Int(_) | ty::Uint(_) | ty::Float(_) | ty::Char => {
+        ty::Bool | ty::Int(_) | ty::Uint(_) | ty::Float(_) | ty::Char | ty::RawPtr(..) => {
             let scalar_int = valtree.unwrap_leaf();
             debug!("writing trivial valtree {:?} to place {:?}", scalar_int, place);
-            ecx.write_immediate(Immediate::Scalar(scalar_int.into()), &place.into()).unwrap();
+            ecx.write_immediate(Immediate::Scalar(scalar_int.into()), place).unwrap();
         }
         ty::Ref(_, inner_ty, _) => {
-            let mut pointee_place = create_pointee_place(ecx, *inner_ty, valtree);
-            debug!(?pointee_place);
-
-            valtree_into_mplace(ecx, &mut pointee_place, valtree);
-            dump_place(ecx, pointee_place.into());
-            intern_const_alloc_recursive(ecx, InternKind::Constant, &pointee_place).unwrap();
-
-            let imm = match inner_ty.kind() {
-                ty::Slice(_) | ty::Str => {
-                    let len = valtree.unwrap_branch().len();
-                    let len_scalar = Scalar::from_target_usize(len as u64, &tcx);
-
-                    Immediate::ScalarPair(
-                        Scalar::from_maybe_pointer((*pointee_place).ptr, &tcx),
-                        len_scalar,
-                    )
-                }
-                _ => pointee_place.to_ref(&tcx),
-            };
+            let imm = valtree_to_ref(ecx, valtree, *inner_ty);
             debug!(?imm);
-
-            ecx.write_immediate(imm, &place.into()).unwrap();
+            ecx.write_immediate(imm, place).unwrap();
         }
         ty::Adt(_, _) | ty::Tuple(_) | ty::Array(_, _) | ty::Str | ty::Slice(_) => {
             let branches = valtree.unwrap_branch();
@@ -376,17 +420,17 @@ fn valtree_into_mplace<'tcx>(
                 ty::Adt(def, _) if def.is_enum() => {
                     // First element of valtree corresponds to variant
                     let scalar_int = branches[0].unwrap_leaf();
-                    let variant_idx = VariantIdx::from_u32(scalar_int.try_to_u32().unwrap());
+                    let variant_idx = VariantIdx::from_u32(scalar_int.to_u32());
                     let variant = def.variant(variant_idx);
                     debug!(?variant);
 
                     (
-                        place.project_downcast(ecx, variant_idx).unwrap(),
+                        ecx.project_downcast(place, variant_idx).unwrap(),
                         &branches[1..],
                         Some(variant_idx),
                     )
                 }
-                _ => (*place, branches, None),
+                _ => (place.clone(), branches, None),
             };
             debug!(?place_adjusted, ?branches);
 
@@ -395,70 +439,33 @@ fn valtree_into_mplace<'tcx>(
             for (i, inner_valtree) in branches.iter().enumerate() {
                 debug!(?i, ?inner_valtree);
 
-                let mut place_inner = match ty.kind() {
-                    ty::Str | ty::Slice(_) => ecx.mplace_index(&place, i as u64).unwrap(),
-                    _ if !ty.is_sized(*ecx.tcx, ty::ParamEnv::empty())
-                        && i == branches.len() - 1 =>
-                    {
-                        // Note: For custom DSTs we need to manually process the last unsized field.
-                        // We created a `Pointer` for the `Allocation` of the complete sized version of
-                        // the Adt in `create_pointee_place` and now we fill that `Allocation` with the
-                        // values in the ValTree. For the unsized field we have to additionally add the meta
-                        // data.
-
-                        let (unsized_inner_ty, num_elems) =
-                            get_info_on_unsized_field(ty, valtree, tcx);
-                        debug!(?unsized_inner_ty);
-
-                        let inner_ty = match ty.kind() {
-                            ty::Adt(def, substs) => {
-                                let i = FieldIdx::from_usize(i);
-                                def.variant(FIRST_VARIANT).fields[i].ty(tcx, substs)
-                            }
-                            ty::Tuple(inner_tys) => inner_tys[i],
-                            _ => bug!("unexpected unsized type {:?}", ty),
-                        };
-
-                        let inner_layout =
-                            tcx.layout_of(ty::ParamEnv::empty().and(inner_ty)).unwrap();
-                        debug!(?inner_layout);
-
-                        let offset = place_adjusted.layout.fields.offset(i);
-                        place
-                            .offset_with_meta(
-                                offset,
-                                MemPlaceMeta::Meta(Scalar::from_target_usize(
-                                    num_elems as u64,
-                                    &tcx,
-                                )),
-                                inner_layout,
-                                &tcx,
-                            )
-                            .unwrap()
+                let place_inner = match ty.kind() {
+                    ty::Str | ty::Slice(_) | ty::Array(..) => {
+                        ecx.project_index(place, i as u64).unwrap()
                     }
-                    _ => ecx.mplace_field(&place_adjusted, i).unwrap(),
+                    _ => ecx.project_field(&place_adjusted, i).unwrap(),
                 };
 
                 debug!(?place_inner);
-                valtree_into_mplace(ecx, &mut place_inner, *inner_valtree);
-                dump_place(&ecx, place_inner.into());
+                valtree_into_mplace(ecx, &place_inner, *inner_valtree);
+                dump_place(ecx, &place_inner);
             }
 
             debug!("dump of place_adjusted:");
-            dump_place(ecx, place_adjusted.into());
+            dump_place(ecx, &place_adjusted);
 
             if let Some(variant_idx) = variant_idx {
                 // don't forget filling the place with the discriminant of the enum
-                ecx.write_discriminant(variant_idx, &place.into()).unwrap();
+                ecx.write_discriminant(variant_idx, place).unwrap();
             }
 
             debug!("dump of place after writing discriminant:");
-            dump_place(ecx, place.into());
+            dump_place(ecx, place);
         }
         _ => bug!("shouldn't have created a ValTree for {:?}", ty),
     }
 }
 
-fn dump_place<'tcx>(ecx: &CompileTimeEvalContext<'tcx, 'tcx>, place: PlaceTy<'tcx>) {
-    trace!("{:?}", ecx.dump_place(*place));
+fn dump_place<'tcx>(ecx: &CompileTimeInterpCx<'tcx>, place: &MPlaceTy<'tcx>) {
+    trace!("{:?}", ecx.dump_place(&PlaceTy::from(place.clone())));
 }

@@ -1,5 +1,7 @@
 // We want to control preemption here.
 //@compile-flags: -Zmiri-preemption-rate=0 -Zmiri-disable-stacked-borrows
+// Avoid accidental synchronization via address reuse inside `thread::spawn`.
+//@compile-flags: -Zmiri-address-reuse-cross-thread-rate=0
 
 use std::thread::spawn;
 
@@ -21,7 +23,7 @@ pub fn main() {
 
         let j2 = spawn(move || {
             let c = c; // avoid field capturing
-            *c.0 = 64; //~ ERROR: Data race detected between (1) Write on thread `<unnamed>` and (2) Write on thread `<unnamed>`
+            *c.0 = 64; //~ ERROR: Data race detected between (1) non-atomic write on thread `unnamed-1` and (2) non-atomic write on thread `unnamed-2`
         });
 
         j1.join().unwrap();

@@ -1,6 +1,4 @@
-// run-pass
-
-#![feature(inline_const)]
+//@ run-pass
 
 macro_rules! do_const_block{
     ($val:block) => { const $val }

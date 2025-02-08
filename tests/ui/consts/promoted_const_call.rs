@@ -1,5 +1,4 @@
-#![feature(const_mut_refs)]
-#![feature(const_trait_impl)]
+#![feature(const_trait_impl, const_destruct)]
 
 struct Panic;
 impl const Drop for Panic { fn drop(&mut self) { panic!(); } }

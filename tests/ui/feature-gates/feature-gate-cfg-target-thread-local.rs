@@ -1,5 +1,5 @@
-// ignore-windows
-// aux-build:cfg-target-thread-local.rs
+//@ ignore-windows FIXME(134939): thread_local + no_mangle doesn't work on Windows
+//@ aux-build:cfg-target-thread-local.rs
 
 #![feature(thread_local)]
 
@@ -13,4 +13,5 @@ extern "C" {
 
 fn main() {
     assert_eq!(FOO, 3);
+    //~^ ERROR extern static is unsafe
 }

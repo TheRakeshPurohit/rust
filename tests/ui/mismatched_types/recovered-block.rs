@@ -10,12 +10,6 @@ pub fn foo() -> Foo {
 
     pub Foo { text }
 }
-//~^^ ERROR missing `struct` for struct definition
-
-pub fn bar() -> Foo {
-    fn
-    Foo { text: "".to_string() }
-}
-//~^^ ERROR expected one of `(` or `<`, found `{`
+//~^^ ERROR missing `enum` for enum definition
 
 fn main() {}

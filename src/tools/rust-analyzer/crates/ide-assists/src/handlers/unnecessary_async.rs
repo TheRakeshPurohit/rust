@@ -1,16 +1,18 @@
 use ide_db::{
     assists::{AssistId, AssistKind},
-    base_db::FileId,
     defs::Definition,
-    search::FileReference,
+    search::{FileReference, FileReferenceNode},
     syntax_helpers::node_ext::full_path_of_name_ref,
+    EditionedFileId,
 };
 use syntax::{
-    ast::{self, NameLike, NameRef},
+    ast::{self, NameRef},
     AstNode, SyntaxKind, TextRange,
 };
 
 use crate::{AssistContext, Assists};
+
+// FIXME: This ought to be a diagnostic lint.
 
 // Assist: unnecessary_async
 //
@@ -18,7 +20,7 @@ use crate::{AssistContext, Assists};
 // Looks for calls to the functions and removes the `.await` on the call site.
 //
 // ```
-// pub async f$0n foo() {}
+// pub asy$0nc fn foo() {}
 // pub async fn bar() { foo().await }
 // ```
 // ->
@@ -29,15 +31,9 @@ use crate::{AssistContext, Assists};
 pub(crate) fn unnecessary_async(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
     let function: ast::Fn = ctx.find_node_at_offset()?;
 
-    // Do nothing if the cursor is not on the prototype. This is so that the check does not pollute
-    // when the user asks us for assists when in the middle of the function body.
-    // We consider the prototype to be anything that is before the body of the function.
-    let cursor_position = ctx.offset();
-    if cursor_position >= function.body()?.syntax().text_range().start() {
-        return None;
-    }
-    // Do nothing if the function isn't async.
-    if let None = function.async_token() {
+    // Do nothing if the cursor isn't on the async token.
+    let async_token = function.async_token()?;
+    if !async_token.text_range().contains_inclusive(ctx.offset()) {
         return None;
     }
     // Do nothing if the function has an `await` expression in its body.
@@ -46,7 +42,7 @@ pub(crate) fn unnecessary_async(acc: &mut Assists, ctx: &AssistContext<'_>) -> O
     }
     // Do nothing if the method is a member of trait.
     if let Some(impl_) = function.syntax().ancestors().nth(2).and_then(ast::Impl::cast) {
-        if let Some(_) = impl_.trait_() {
+        if impl_.trait_().is_some() {
             return None;
         }
     }
@@ -76,7 +72,7 @@ pub(crate) fn unnecessary_async(acc: &mut Assists, ctx: &AssistContext<'_>) -> O
                 for await_expr in find_all_references(ctx, &Definition::Function(fn_def))
                     // Keep only references that correspond NameRefs.
                     .filter_map(|(_, reference)| match reference.name {
-                        NameLike::NameRef(nameref) => Some(nameref),
+                        FileReferenceNode::NameRef(nameref) => Some(nameref),
                         _ => None,
                     })
                     // Keep only references that correspond to await expressions
@@ -97,7 +93,7 @@ pub(crate) fn unnecessary_async(acc: &mut Assists, ctx: &AssistContext<'_>) -> O
 fn find_all_references(
     ctx: &AssistContext<'_>,
     def: &Definition,
-) -> impl Iterator<Item = (FileId, FileReference)> {
+) -> impl Iterator<Item = (EditionedFileId, FileReference)> {
     def.usages(&ctx.sema).all().into_iter().flat_map(|(file_id, references)| {
         references.into_iter().map(move |reference| (file_id, reference))
     })
@@ -140,27 +136,22 @@ mod tests {
 
     #[test]
     fn applies_on_empty_function() {
-        check_assist(unnecessary_async, "pub async f$0n f() {}", "pub fn f() {}")
+        check_assist(unnecessary_async, "pub asy$0nc fn f() {}", "pub fn f() {}")
     }
 
     #[test]
     fn applies_and_removes_whitespace() {
-        check_assist(unnecessary_async, "pub async       f$0n f() {}", "pub fn f() {}")
-    }
-
-    #[test]
-    fn does_not_apply_on_non_async_function() {
-        check_assist_not_applicable(unnecessary_async, "pub f$0n f() {}")
+        check_assist(unnecessary_async, "pub async$0       fn f() {}", "pub fn f() {}")
     }
 
     #[test]
     fn applies_on_function_with_a_non_await_expr() {
-        check_assist(unnecessary_async, "pub async f$0n f() { f2() }", "pub fn f() { f2() }")
+        check_assist(unnecessary_async, "pub asy$0nc fn f() { f2() }", "pub fn f() { f2() }")
     }
 
     #[test]
     fn does_not_apply_on_function_with_an_await_expr() {
-        check_assist_not_applicable(unnecessary_async, "pub async f$0n f() { f2().await }")
+        check_assist_not_applicable(unnecessary_async, "pub asy$0nc fn f() { f2().await }")
     }
 
     #[test]
@@ -169,7 +160,7 @@ mod tests {
             unnecessary_async,
             r#"
 pub async fn f4() { }
-pub async f$0n f2() { }
+pub asy$0nc fn f2() { }
 pub async fn f() { f2().await }
 pub async fn f3() { f2().await }"#,
             r#"
@@ -186,7 +177,7 @@ pub async fn f3() { f2() }"#,
             unnecessary_async,
             r#"
 pub async fn f4() { }
-mod a { pub async f$0n f2() { } }
+mod a { pub asy$0nc fn f2() { } }
 pub async fn f() { a::f2().await }
 pub async fn f3() { a::f2().await }"#,
             r#"
@@ -204,7 +195,7 @@ pub async fn f3() { a::f2() }"#,
             // Ensure that it is the first await on the 3rd line that is removed
             r#"
 pub async fn f() { f2().await }
-pub async f$0n f2() -> i32 { 1 }
+pub asy$0nc fn f2() -> i32 { 1 }
 pub async fn f3() { f4(f2().await).await }
 pub async fn f4(i: i32) { }"#,
             r#"
@@ -222,7 +213,7 @@ pub async fn f4(i: i32) { }"#,
             // Ensure that it is the second await on the 3rd line that is removed
             r#"
 pub async fn f() { f2().await }
-pub async f$0n f2(i: i32) { }
+pub async$0 fn f2(i: i32) { }
 pub async fn f3() { f2(f4().await).await }
 pub async fn f4() -> i32 { 1 }"#,
             r#"
@@ -239,7 +230,7 @@ pub async fn f4() -> i32 { 1 }"#,
             unnecessary_async,
             r#"
 pub struct S { }
-impl S { pub async f$0n f2(&self) { } }
+impl S { pub async$0 fn f2(&self) { } }
 pub async fn f(s: &S) { s.f2().await }"#,
             r#"
 pub struct S { }
@@ -252,13 +243,13 @@ pub async fn f(s: &S) { s.f2() }"#,
     fn does_not_apply_on_function_with_a_nested_await_expr() {
         check_assist_not_applicable(
             unnecessary_async,
-            "async f$0n f() { if true { loop { f2().await } } }",
+            "async$0 fn f() { if true { loop { f2().await } } }",
         )
     }
 
     #[test]
-    fn does_not_apply_when_not_on_prototype() {
-        check_assist_not_applicable(unnecessary_async, "pub async fn f() { $0f2() }")
+    fn does_not_apply_when_not_on_async_token() {
+        check_assist_not_applicable(unnecessary_async, "pub async fn$0 f() { f2() }")
     }
 
     #[test]

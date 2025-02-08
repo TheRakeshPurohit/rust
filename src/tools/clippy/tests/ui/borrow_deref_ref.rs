@@ -1,4 +1,3 @@
-//@run-rustfix
 //@aux-build: proc_macros.rs
 
 #![allow(dead_code, unused_variables)]
@@ -71,4 +70,10 @@ mod false_negative {
         // let addr_y = &x as *const _ as usize; // assert fail
         assert_ne!(addr_x, addr_y);
     }
+}
+
+fn issue_13584() {
+    let s = "Hello, world!\n";
+    let p = &raw const *s;
+    let _ = p as *const i8;
 }

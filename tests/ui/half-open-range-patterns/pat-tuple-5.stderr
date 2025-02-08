@@ -1,5 +1,5 @@
 error[E0308]: mismatched types
-  --> $DIR/pat-tuple-5.rs:7:10
+  --> $DIR/pat-tuple-5.rs:5:10
    |
 LL |     match (0, 1) {
    |           ------ this expression has type `({integer}, {integer})`
@@ -9,6 +9,6 @@ LL |         (PAT ..) => {}
    = note: expected tuple `({integer}, {integer})`
                found type `u8`
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0308`.

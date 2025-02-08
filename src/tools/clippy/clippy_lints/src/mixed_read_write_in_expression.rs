@@ -1,11 +1,11 @@
-use clippy_utils::diagnostics::{span_lint, span_lint_and_note};
+use clippy_utils::diagnostics::{span_lint, span_lint_and_then};
+use clippy_utils::macros::root_macro_call_first_node;
 use clippy_utils::{get_parent_expr, path_to_local, path_to_local_id};
-use if_chain::if_chain;
-use rustc_hir::intravisit::{walk_expr, Visitor};
-use rustc_hir::{BinOpKind, Block, Expr, ExprKind, Guard, HirId, Local, Node, Stmt, StmtKind};
+use rustc_hir::intravisit::{Visitor, walk_expr};
+use rustc_hir::{BinOpKind, Block, Expr, ExprKind, HirId, LetStmt, Node, Stmt, StmtKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty;
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -13,16 +13,17 @@ declare_clippy_lint! {
     /// whether the read occurs before or after the write depends on the evaluation
     /// order of sub-expressions.
     ///
-    /// ### Why is this bad?
-    /// It is often confusing to read. As described [here](https://doc.rust-lang.org/reference/expressions.html?highlight=subexpression#evaluation-order-of-operands),
-    /// the operands of these expressions are evaluated before applying the effects of the expression.
+    /// ### Why restrict this?
+    /// While [the evaluation order of sub-expressions] is fully specified in Rust,
+    /// it still may be confusing to read an expression where the evaluation order
+    /// affects its behavior.
     ///
     /// ### Known problems
     /// Code which intentionally depends on the evaluation
     /// order, or which is correct for any evaluation order.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let mut x = 0;
     ///
     /// let a = {
@@ -33,7 +34,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # let mut x = 0;
     /// let tmp = {
     ///     x = 1;
@@ -41,6 +42,8 @@ declare_clippy_lint! {
     /// };
     /// let a = tmp + x;
     /// ```
+    ///
+    /// [order]: (https://doc.rust-lang.org/reference/expressions.html?highlight=subexpression#evaluation-order-of-operands)
     #[clippy::version = "pre 1.29.0"]
     pub MIXED_READ_WRITE_IN_EXPRESSION,
     restriction,
@@ -80,11 +83,13 @@ declare_lint_pass!(EvalOrderDependence => [MIXED_READ_WRITE_IN_EXPRESSION, DIVER
 impl<'tcx> LateLintPass<'tcx> for EvalOrderDependence {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
         // Find a write to a local variable.
-        let var = if_chain! {
-            if let ExprKind::Assign(lhs, ..) | ExprKind::AssignOp(_, lhs, _) = expr.kind;
-            if let Some(var) = path_to_local(lhs);
-            if expr.span.desugaring_kind().is_none();
-            then { var } else { return; }
+        let var = if let ExprKind::Assign(lhs, ..) | ExprKind::AssignOp(_, lhs, _) = expr.kind
+            && let Some(var) = path_to_local(lhs)
+            && expr.span.desugaring_kind().is_none()
+        {
+            var
+        } else {
+            return;
         };
         let mut visitor = ReadVisitor {
             cx,
@@ -96,8 +101,8 @@ impl<'tcx> LateLintPass<'tcx> for EvalOrderDependence {
     }
     fn check_stmt(&mut self, cx: &LateContext<'tcx>, stmt: &'tcx Stmt<'_>) {
         match stmt.kind {
-            StmtKind::Local(local) => {
-                if let Local { init: Some(e), .. } = local {
+            StmtKind::Let(local) => {
+                if let LetStmt { init: Some(e), .. } = local {
                     DivergenceVisitor { cx }.visit_expr(e);
                 }
             },
@@ -111,14 +116,14 @@ struct DivergenceVisitor<'a, 'tcx> {
     cx: &'a LateContext<'tcx>,
 }
 
-impl<'a, 'tcx> DivergenceVisitor<'a, 'tcx> {
+impl<'tcx> DivergenceVisitor<'_, 'tcx> {
     fn maybe_walk_expr(&mut self, e: &'tcx Expr<'_>) {
         match e.kind {
-            ExprKind::Closure { .. } => {},
+            ExprKind::Closure(..) | ExprKind::If(..) | ExprKind::Loop(..) => {},
             ExprKind::Match(e, arms, _) => {
                 self.visit_expr(e);
                 for arm in arms {
-                    if let Some(Guard::If(if_expr)) = arm.guard {
+                    if let Some(if_expr) = arm.guard {
                         self.visit_expr(if_expr);
                     }
                     // make sure top level arm expressions aren't linted
@@ -128,21 +133,48 @@ impl<'a, 'tcx> DivergenceVisitor<'a, 'tcx> {
             _ => walk_expr(self, e),
         }
     }
+
     fn report_diverging_sub_expr(&mut self, e: &Expr<'_>) {
+        if let Some(macro_call) = root_macro_call_first_node(self.cx, e) {
+            if self.cx.tcx.item_name(macro_call.def_id).as_str() == "todo" {
+                return;
+            }
+        }
         span_lint(self.cx, DIVERGING_SUB_EXPRESSION, e.span, "sub-expression diverges");
     }
 }
 
-impl<'a, 'tcx> Visitor<'tcx> for DivergenceVisitor<'a, 'tcx> {
+fn stmt_might_diverge(stmt: &Stmt<'_>) -> bool {
+    !matches!(stmt.kind, StmtKind::Item(..))
+}
+
+impl<'tcx> Visitor<'tcx> for DivergenceVisitor<'_, 'tcx> {
     fn visit_expr(&mut self, e: &'tcx Expr<'_>) {
         match e.kind {
+            // fix #10776
+            ExprKind::Block(block, ..) => match (block.stmts, block.expr) {
+                (stmts, Some(e)) => {
+                    if stmts.iter().all(|stmt| !stmt_might_diverge(stmt)) {
+                        self.visit_expr(e);
+                    }
+                },
+                ([first @ .., stmt], None) => {
+                    if first.iter().all(|stmt| !stmt_might_diverge(stmt)) {
+                        match stmt.kind {
+                            StmtKind::Expr(e) | StmtKind::Semi(e) => self.visit_expr(e),
+                            _ => {},
+                        }
+                    }
+                },
+                _ => {},
+            },
             ExprKind::Continue(_) | ExprKind::Break(_, _) | ExprKind::Ret(_) => self.report_diverging_sub_expr(e),
             ExprKind::Call(func, _) => {
                 let typ = self.cx.typeck_results().expr_ty(func);
                 match typ.kind() {
-                    ty::FnDef(..) | ty::FnPtr(_) => {
+                    ty::FnDef(..) | ty::FnPtr(..) => {
                         let sig = typ.fn_sig(self.cx.tcx);
-                        if self.cx.tcx.erase_late_bound_regions(sig).output().kind() == &ty::Never {
+                        if self.cx.tcx.instantiate_bound_regions_with_erased(sig).output().kind() == &ty::Never {
                             self.report_diverging_sub_expr(e);
                         }
                     },
@@ -183,16 +215,14 @@ impl<'a, 'tcx> Visitor<'tcx> for DivergenceVisitor<'a, 'tcx> {
 ///
 /// When such a read is found, the lint is triggered.
 fn check_for_unsequenced_reads(vis: &mut ReadVisitor<'_, '_>) {
-    let map = &vis.cx.tcx.hir();
     let mut cur_id = vis.write_expr.hir_id;
     loop {
-        let parent_id = map.parent_id(cur_id);
+        let parent_id = vis.cx.tcx.parent_hir_id(cur_id);
         if parent_id == cur_id {
             break;
         }
-        let Some(parent_node) = map.find(parent_id) else { break };
 
-        let stop_early = match parent_node {
+        let stop_early = match vis.cx.tcx.hir_node(parent_id) {
             Node::Expr(expr) => check_expr(vis, expr),
             Node::Stmt(stmt) => check_stmt(vis, stmt),
             Node::Item(_) => {
@@ -229,7 +259,7 @@ fn check_expr<'tcx>(vis: &mut ReadVisitor<'_, 'tcx>, expr: &'tcx Expr<'_>) -> St
         | ExprKind::MethodCall(..)
         | ExprKind::Call(_, _)
         | ExprKind::Assign(..)
-        | ExprKind::Index(_, _)
+        | ExprKind::Index(..)
         | ExprKind::Repeat(_, _)
         | ExprKind::Struct(_, _, _) => {
             walk_expr(vis, expr);
@@ -270,7 +300,7 @@ fn check_stmt<'tcx>(vis: &mut ReadVisitor<'_, 'tcx>, stmt: &'tcx Stmt<'_>) -> St
         StmtKind::Expr(expr) | StmtKind::Semi(expr) => check_expr(vis, expr),
         // If the declaration is of a local variable, check its initializer
         // expression if it has one. Otherwise, keep going.
-        StmtKind::Local(local) => local
+        StmtKind::Let(local) => local
             .init
             .as_ref()
             .map_or(StopEarly::KeepGoing, |expr| check_expr(vis, expr)),
@@ -291,7 +321,7 @@ struct ReadVisitor<'a, 'tcx> {
     last_expr: &'tcx Expr<'tcx>,
 }
 
-impl<'a, 'tcx> Visitor<'tcx> for ReadVisitor<'a, 'tcx> {
+impl<'tcx> Visitor<'tcx> for ReadVisitor<'_, 'tcx> {
     fn visit_expr(&mut self, expr: &'tcx Expr<'_>) {
         if expr.hir_id == self.last_expr.hir_id {
             return;
@@ -300,13 +330,17 @@ impl<'a, 'tcx> Visitor<'tcx> for ReadVisitor<'a, 'tcx> {
         if path_to_local_id(expr, self.var) {
             // Check that this is a read, not a write.
             if !is_in_assignment_position(self.cx, expr) {
-                span_lint_and_note(
+                span_lint_and_then(
                     self.cx,
                     MIXED_READ_WRITE_IN_EXPRESSION,
                     expr.span,
-                    &format!("unsequenced read of `{}`", self.cx.tcx.hir().name(self.var)),
-                    Some(self.write_expr.span),
-                    "whether read occurs before this write depends on evaluation order",
+                    format!("unsequenced read of `{}`", self.cx.tcx.hir().name(self.var)),
+                    |diag| {
+                        diag.span_note(
+                            self.write_expr.span,
+                            "whether read occurs before this write depends on evaluation order",
+                        );
+                    },
                 );
             }
         }

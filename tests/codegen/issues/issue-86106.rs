@@ -1,6 +1,6 @@
-// min-llvm-version: 15.0
-// only-64bit llvm appears to use stores instead of memset on 32bit
-// compile-flags: -C opt-level=3 -Z merge-functions=disabled
+//@ only-64bit llvm appears to use stores instead of memset on 32bit
+//@ compile-flags: -C opt-level=3 -Z merge-functions=disabled
+//@ needs-deterministic-layouts
 
 // The below two functions ensure that both `String::new()` and `"".to_string()`
 // produce the identical code.
@@ -10,9 +10,12 @@
 // CHECK-LABEL: define {{(dso_local )?}}void @string_new
 #[no_mangle]
 pub fn string_new() -> String {
-    // CHECK: store ptr inttoptr
+    // CHECK-NOT: load i8
+    // CHECK: store i{{32|64}}
     // CHECK-NEXT: getelementptr
-    // CHECK-NEXT: call void @llvm.memset
+    // CHECK-NEXT: store ptr
+    // CHECK-NEXT: getelementptr
+    // CHECK-NEXT: store i{{32|64}}
     // CHECK-NEXT: ret void
     String::new()
 }
@@ -20,9 +23,12 @@ pub fn string_new() -> String {
 // CHECK-LABEL: define {{(dso_local )?}}void @empty_to_string
 #[no_mangle]
 pub fn empty_to_string() -> String {
-    // CHECK: store ptr inttoptr
+    // CHECK-NOT: load i8
+    // CHECK: store i{{32|64}}
     // CHECK-NEXT: getelementptr
-    // CHECK-NEXT: call void @llvm.memset
+    // CHECK-NEXT: store ptr
+    // CHECK-NEXT: getelementptr
+    // CHECK-NEXT: store i{{32|64}}
     // CHECK-NEXT: ret void
     "".to_string()
 }
@@ -33,9 +39,12 @@ pub fn empty_to_string() -> String {
 // CHECK-LABEL: @empty_vec
 #[no_mangle]
 pub fn empty_vec() -> Vec<u8> {
-    // CHECK: store ptr inttoptr
+    // CHECK: store i{{32|64}}
+    // CHECK-NOT: load i8
     // CHECK-NEXT: getelementptr
-    // CHECK-NEXT: call void @llvm.memset
+    // CHECK-NEXT: store ptr
+    // CHECK-NEXT: getelementptr
+    // CHECK-NEXT: store i{{32|64}}
     // CHECK-NEXT: ret void
     vec![]
 }
@@ -43,9 +52,12 @@ pub fn empty_vec() -> Vec<u8> {
 // CHECK-LABEL: @empty_vec_clone
 #[no_mangle]
 pub fn empty_vec_clone() -> Vec<u8> {
-    // CHECK: store ptr inttoptr
+    // CHECK: store i{{32|64}}
+    // CHECK-NOT: load i8
     // CHECK-NEXT: getelementptr
-    // CHECK-NEXT: call void @llvm.memset
+    // CHECK-NEXT: store ptr
+    // CHECK-NEXT: getelementptr
+    // CHECK-NEXT: store i{{32|64}}
     // CHECK-NEXT: ret void
     vec![].clone()
 }

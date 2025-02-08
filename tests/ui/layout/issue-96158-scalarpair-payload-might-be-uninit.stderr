@@ -81,6 +81,9 @@ error: layout_of(MissingPayloadField) = Layout {
                        variants: Single {
                            index: 0,
                        },
+                       max_repr_align: None,
+                       unadjusted_abi_align: Align(1 bytes),
+                       randomization_seed: $SEED,
                    },
                    Layout {
                        size: Size(1 bytes),
@@ -88,7 +91,7 @@ error: layout_of(MissingPayloadField) = Layout {
                            abi: Align(1 bytes),
                            pref: $PREF_ALIGN,
                        },
-                       abi: Aggregate {
+                       abi: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -99,11 +102,17 @@ error: layout_of(MissingPayloadField) = Layout {
                        variants: Single {
                            index: 1,
                        },
+                       max_repr_align: None,
+                       unadjusted_abi_align: Align(1 bytes),
+                       randomization_seed: $SEED,
                    },
                ],
            },
+           max_repr_align: None,
+           unadjusted_abi_align: Align(1 bytes),
+           randomization_seed: $SEED,
        }
-  --> $DIR/issue-96158-scalarpair-payload-might-be-uninit.rs:16:1
+  --> $DIR/issue-96158-scalarpair-payload-might-be-uninit.rs:17:1
    |
 LL | pub enum MissingPayloadField {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -193,6 +202,9 @@ error: layout_of(CommonPayloadField) = Layout {
                        variants: Single {
                            index: 0,
                        },
+                       max_repr_align: None,
+                       unadjusted_abi_align: Align(1 bytes),
+                       randomization_seed: $SEED,
                    },
                    Layout {
                        size: Size(2 bytes),
@@ -228,11 +240,17 @@ error: layout_of(CommonPayloadField) = Layout {
                        variants: Single {
                            index: 1,
                        },
+                       max_repr_align: None,
+                       unadjusted_abi_align: Align(1 bytes),
+                       randomization_seed: $SEED,
                    },
                ],
            },
+           max_repr_align: None,
+           unadjusted_abi_align: Align(1 bytes),
+           randomization_seed: $SEED,
        }
-  --> $DIR/issue-96158-scalarpair-payload-might-be-uninit.rs:25:1
+  --> $DIR/issue-96158-scalarpair-payload-might-be-uninit.rs:26:1
    |
 LL | pub enum CommonPayloadField {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -320,6 +338,9 @@ error: layout_of(CommonPayloadFieldIsMaybeUninit) = Layout {
                        variants: Single {
                            index: 0,
                        },
+                       max_repr_align: None,
+                       unadjusted_abi_align: Align(1 bytes),
+                       randomization_seed: $SEED,
                    },
                    Layout {
                        size: Size(2 bytes),
@@ -354,11 +375,17 @@ error: layout_of(CommonPayloadFieldIsMaybeUninit) = Layout {
                        variants: Single {
                            index: 1,
                        },
+                       max_repr_align: None,
+                       unadjusted_abi_align: Align(1 bytes),
+                       randomization_seed: $SEED,
                    },
                ],
            },
+           max_repr_align: None,
+           unadjusted_abi_align: Align(1 bytes),
+           randomization_seed: $SEED,
        }
-  --> $DIR/issue-96158-scalarpair-payload-might-be-uninit.rs:33:1
+  --> $DIR/issue-96158-scalarpair-payload-might-be-uninit.rs:34:1
    |
 LL | pub enum CommonPayloadFieldIsMaybeUninit {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -462,6 +489,9 @@ error: layout_of(NicheFirst) = Layout {
                        variants: Single {
                            index: 0,
                        },
+                       max_repr_align: None,
+                       unadjusted_abi_align: Align(1 bytes),
+                       randomization_seed: $SEED,
                    },
                    Layout {
                        size: Size(0 bytes),
@@ -469,7 +499,7 @@ error: layout_of(NicheFirst) = Layout {
                            abi: Align(1 bytes),
                            pref: $PREF_ALIGN,
                        },
-                       abi: Aggregate {
+                       abi: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -480,6 +510,9 @@ error: layout_of(NicheFirst) = Layout {
                        variants: Single {
                            index: 1,
                        },
+                       max_repr_align: None,
+                       unadjusted_abi_align: Align(1 bytes),
+                       randomization_seed: $SEED,
                    },
                    Layout {
                        size: Size(0 bytes),
@@ -487,7 +520,7 @@ error: layout_of(NicheFirst) = Layout {
                            abi: Align(1 bytes),
                            pref: $PREF_ALIGN,
                        },
-                       abi: Aggregate {
+                       abi: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -498,11 +531,17 @@ error: layout_of(NicheFirst) = Layout {
                        variants: Single {
                            index: 2,
                        },
+                       max_repr_align: None,
+                       unadjusted_abi_align: Align(1 bytes),
+                       randomization_seed: $SEED,
                    },
                ],
            },
+           max_repr_align: None,
+           unadjusted_abi_align: Align(1 bytes),
+           randomization_seed: $SEED,
        }
-  --> $DIR/issue-96158-scalarpair-payload-might-be-uninit.rs:41:1
+  --> $DIR/issue-96158-scalarpair-payload-might-be-uninit.rs:42:1
    |
 LL | pub enum NicheFirst {
    | ^^^^^^^^^^^^^^^^^^^
@@ -606,6 +645,9 @@ error: layout_of(NicheSecond) = Layout {
                        variants: Single {
                            index: 0,
                        },
+                       max_repr_align: None,
+                       unadjusted_abi_align: Align(1 bytes),
+                       randomization_seed: $SEED,
                    },
                    Layout {
                        size: Size(0 bytes),
@@ -613,7 +655,7 @@ error: layout_of(NicheSecond) = Layout {
                            abi: Align(1 bytes),
                            pref: $PREF_ALIGN,
                        },
-                       abi: Aggregate {
+                       abi: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -624,6 +666,9 @@ error: layout_of(NicheSecond) = Layout {
                        variants: Single {
                            index: 1,
                        },
+                       max_repr_align: None,
+                       unadjusted_abi_align: Align(1 bytes),
+                       randomization_seed: $SEED,
                    },
                    Layout {
                        size: Size(0 bytes),
@@ -631,7 +676,7 @@ error: layout_of(NicheSecond) = Layout {
                            abi: Align(1 bytes),
                            pref: $PREF_ALIGN,
                        },
-                       abi: Aggregate {
+                       abi: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -642,11 +687,17 @@ error: layout_of(NicheSecond) = Layout {
                        variants: Single {
                            index: 2,
                        },
+                       max_repr_align: None,
+                       unadjusted_abi_align: Align(1 bytes),
+                       randomization_seed: $SEED,
                    },
                ],
            },
+           max_repr_align: None,
+           unadjusted_abi_align: Align(1 bytes),
+           randomization_seed: $SEED,
        }
-  --> $DIR/issue-96158-scalarpair-payload-might-be-uninit.rs:50:1
+  --> $DIR/issue-96158-scalarpair-payload-might-be-uninit.rs:51:1
    |
 LL | pub enum NicheSecond {
    | ^^^^^^^^^^^^^^^^^^^^

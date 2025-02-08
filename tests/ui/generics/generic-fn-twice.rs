@@ -1,8 +1,7 @@
-// run-pass
+//@ run-pass
 
 
 
-// pretty-expanded FIXME #23616
 
 mod foomod {
     pub fn foo<T>() { }

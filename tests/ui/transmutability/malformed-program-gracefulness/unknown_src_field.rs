@@ -5,18 +5,22 @@
 #![allow(dead_code, incomplete_features, non_camel_case_types)]
 
 mod assert {
-    use std::mem::BikeshedIntrinsicFrom;
-    pub struct Context;
+    use std::mem::TransmuteFrom;
 
-    pub fn is_transmutable<Src, Dst, Context>()
+    pub fn is_transmutable<Src, Dst>()
     where
-        Dst: BikeshedIntrinsicFrom<Src, Context>
+        Dst: TransmuteFrom<Src>
     {}
 }
 
-fn should_gracefully_handle_unknown_dst_field() {
-    struct Context;
-    #[repr(C)] struct Src;
-    #[repr(C)] struct Dst(Missing); //~ cannot find type
-    assert::is_transmutable::<Src, Dst, Context>(); //~ ERROR cannot be safely transmuted
+fn should_gracefully_handle_unknown_src_field() {
+    #[repr(C)] struct Src(Missing); //~ cannot find type
+    #[repr(C)] struct Dst();
+    assert::is_transmutable::<Src, Dst>(); //~ ERROR cannot be safely transmuted
+}
+
+fn should_gracefully_handle_unknown_src_ref_field() {
+    #[repr(C)] struct Src(&'static Missing); //~ cannot find type
+    #[repr(C)] struct Dst(&'static Dst);
+    assert::is_transmutable::<Src, Dst>(); //~ ERROR cannot be safely transmuted
 }

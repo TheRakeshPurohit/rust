@@ -5,14 +5,14 @@
 //! abstract token parsing, and string tokenization as completely separate
 //! layers.
 //!
-//! However, often you do pares text into syntax trees and the glue code for
+//! However, often you do parse text into syntax trees and the glue code for
 //! that needs to live somewhere. Rather than putting it to lexer or parser, we
 //! use a separate shortcuts module for that.
 
 use std::mem;
 
 use crate::{
-    LexedStr, Step,
+    Edition, LexedStr, Step,
     SyntaxKind::{self, *},
 };
 
@@ -24,34 +24,38 @@ pub enum StrStep<'a> {
     Error { msg: &'a str, pos: usize },
 }
 
-impl<'a> LexedStr<'a> {
-    pub fn to_input(&self) -> crate::Input {
+impl LexedStr<'_> {
+    pub fn to_input(&self, edition: Edition) -> crate::Input {
+        let _p = tracing::info_span!("LexedStr::to_input").entered();
         let mut res = crate::Input::default();
         let mut was_joint = false;
         for i in 0..self.len() {
             let kind = self.kind(i);
             if kind.is_trivia() {
                 was_joint = false
+            } else if kind == SyntaxKind::IDENT {
+                let token_text = self.text(i);
+                res.push_ident(
+                    SyntaxKind::from_contextual_keyword(token_text, edition)
+                        .unwrap_or(SyntaxKind::IDENT),
+                )
             } else {
-                if kind == SyntaxKind::IDENT {
-                    let token_text = self.text(i);
-                    let contextual_kw = SyntaxKind::from_contextual_keyword(token_text)
-                        .unwrap_or(SyntaxKind::IDENT);
-                    res.push_ident(contextual_kw);
-                } else {
-                    if was_joint {
-                        res.was_joint();
-                    }
-                    res.push(kind);
-                    // Tag the token as joint if it is float with a fractional part
-                    // we use this jointness to inform the parser about what token split
-                    // event to emit when we encounter a float literal in a field access
-                    if kind == SyntaxKind::FLOAT_NUMBER && !self.text(i).ends_with('.') {
-                        res.was_joint();
-                    }
+                if was_joint {
+                    res.was_joint();
                 }
-
-                was_joint = true;
+                res.push(kind);
+                // Tag the token as joint if it is float with a fractional part
+                // we use this jointness to inform the parser about what token split
+                // event to emit when we encounter a float literal in a field access
+                if kind == SyntaxKind::FLOAT_NUMBER {
+                    if !self.text(i).ends_with('.') {
+                        res.was_joint();
+                    } else {
+                        was_joint = false;
+                    }
+                } else {
+                    was_joint = true;
+                }
             }
         }
         res
@@ -187,7 +191,7 @@ impl Builder<'_, '_> {
 
     fn do_float_split(&mut self, has_pseudo_dot: bool) {
         let text = &self.lexed.range_text(self.pos..self.pos + 1);
-        self.pos += 1;
+
         match text.split_once('.') {
             Some((left, right)) => {
                 assert!(!left.is_empty());
@@ -204,6 +208,7 @@ impl Builder<'_, '_> {
                     assert!(right.is_empty(), "{left}.{right}");
                     self.state = State::Normal;
                 } else {
+                    assert!(!right.is_empty(), "{left}.{right}");
                     (self.sink)(StrStep::Enter { kind: SyntaxKind::NAME_REF });
                     (self.sink)(StrStep::Token { kind: SyntaxKind::INT_NUMBER, text: right });
                     (self.sink)(StrStep::Exit);
@@ -212,8 +217,22 @@ impl Builder<'_, '_> {
                     self.state = State::PendingExit;
                 }
             }
-            None => unreachable!(),
+            None => {
+                // illegal float literal which doesn't have dot in form (like 1e0)
+                // we should emit an error node here
+                (self.sink)(StrStep::Error { msg: "illegal float literal", pos: self.pos });
+                (self.sink)(StrStep::Enter { kind: SyntaxKind::ERROR });
+                (self.sink)(StrStep::Token { kind: SyntaxKind::FLOAT_NUMBER, text });
+                (self.sink)(StrStep::Exit);
+
+                // move up
+                (self.sink)(StrStep::Exit);
+
+                self.state = if has_pseudo_dot { State::Normal } else { State::PendingExit };
+            }
         }
+
+        self.pos += 1;
     }
 }
 
@@ -223,7 +242,8 @@ fn n_attached_trivias<'a>(
 ) -> usize {
     match kind {
         CONST | ENUM | FN | IMPL | MACRO_CALL | MACRO_DEF | MACRO_RULES | MODULE | RECORD_FIELD
-        | STATIC | STRUCT | TRAIT | TUPLE_FIELD | TYPE_ALIAS | UNION | USE | VARIANT => {
+        | STATIC | STRUCT | TRAIT | TUPLE_FIELD | TYPE_ALIAS | UNION | USE | VARIANT
+        | EXTERN_CRATE => {
             let mut res = 0;
             let mut trivias = trivias.enumerate().peekable();
 

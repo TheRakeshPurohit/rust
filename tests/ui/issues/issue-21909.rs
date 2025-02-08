@@ -1,5 +1,4 @@
-// run-pass
-// pretty-expanded FIXME #23616
+//@ check-pass
 
 trait A<X> {
     fn dummy(&self, arg: X);

@@ -8,21 +8,19 @@
 #![allow(dead_code, incomplete_features, non_camel_case_types)]
 
 mod assert {
-    use std::mem::{Assume, BikeshedIntrinsicFrom};
+    use std::mem::{Assume, TransmuteFrom};
 
     pub fn is_transmutable<
         Src,
         Dst,
-        Context,
         const ASSUME_ALIGNMENT: bool,
         const ASSUME_LIFETIMES: bool,
         const ASSUME_SAFETY: bool,
         const ASSUME_VALIDITY: bool,
     >()
     where
-        Dst: BikeshedIntrinsicFrom<
+        Dst: TransmuteFrom<
             Src,
-            Context,
             { from_options(ASSUME_ALIGNMENT, ASSUME_LIFETIMES, ASSUME_SAFETY, ASSUME_VALIDITY) }
         >,
     {}
@@ -43,11 +41,10 @@ mod assert {
 }
 
 fn test() {
-    struct Context;
     #[repr(C)] struct Src;
     #[repr(C)] struct Dst;
-    assert::is_transmutable::<Src, Dst, Context, {0u8}, false, false, false>(); //~ ERROR mismatched types
-    assert::is_transmutable::<Src, Dst, Context, false, {0u8}, false, false>(); //~ ERROR mismatched types
-    assert::is_transmutable::<Src, Dst, Context, false, false, {0u8}, false>(); //~ ERROR mismatched types
-    assert::is_transmutable::<Src, Dst, Context, false, false, false, {0u8}>(); //~ ERROR mismatched types
+    assert::is_transmutable::<Src, Dst, {0u8}, false, false, false>(); //~ ERROR mismatched types
+    assert::is_transmutable::<Src, Dst, false, {0u8}, false, false>(); //~ ERROR mismatched types
+    assert::is_transmutable::<Src, Dst, false, false, {0u8}, false>(); //~ ERROR mismatched types
+    assert::is_transmutable::<Src, Dst, false, false, false, {0u8}>(); //~ ERROR mismatched types
 }

@@ -1,3 +1,10 @@
+//@ revisions: current next
+//@ ignore-compare-mode-next-solver (explicit revisions)
+//@[next] compile-flags: -Znext-solver
+
+use std::fmt::Debug;
+use std::mem::ManuallyDrop;
+
 #[repr(packed)]
 pub struct Good {
     data: u64,
@@ -25,6 +32,46 @@ impl Foo for Packed2 {
             &self.x; //~ ERROR reference to packed field
         }
     }
+}
+
+// Test for #115396
+fn packed_dyn() {
+    #[repr(packed)]
+    struct Unaligned<T: ?Sized>(ManuallyDrop<T>);
+
+    let ref local = Unaligned(ManuallyDrop::new([3, 5, 8u64]));
+    let foo: &Unaligned<dyn Debug> = &*local;
+    println!("{:?}", &*foo.0); //~ ERROR reference to packed field
+    let foo: &Unaligned<[u64]> = &*local;
+    println!("{:?}", &*foo.0); //~ ERROR reference to packed field
+
+    // Even if the actual alignment is 1, we cannot know that when looking at `dyn Debug.`
+    let ref local = Unaligned(ManuallyDrop::new([3, 5, 8u8]));
+    let foo: &Unaligned<dyn Debug> = &*local;
+    println!("{:?}", &*foo.0); //~ ERROR reference to packed field
+    // However, we *can* know the alignment when looking at a slice.
+    let foo: &Unaligned<[u8]> = &*local;
+    println!("{:?}", &*foo.0); // no error!
+}
+
+// Test for #115396
+fn packed_slice_behind_alias() {
+    trait Mirror {
+        type Assoc: ?Sized;
+    }
+    impl<T: ?Sized> Mirror for T {
+        type Assoc = T;
+    }
+
+    struct W<T: ?Sized>(<T as Mirror>::Assoc);
+
+    #[repr(packed)]
+    struct Unaligned<T: ?Sized>(ManuallyDrop<W<T>>);
+
+    // Even if the actual alignment is 1, we cannot know that when looking at `dyn Debug.`
+    let ref local: Unaligned<[_; 3]> = Unaligned(ManuallyDrop::new(W([3, 5, 8u8])));
+    let foo: &Unaligned<[u8]> = local;
+    let x = &foo.0; // Fine, since the tail of `foo` is `[_]`
 }
 
 fn main() {

@@ -1,4 +1,4 @@
-// edition:2021
+//@ edition:2021
 
 #![feature(rustc_attrs)]
 #![allow(unused)]
@@ -34,17 +34,18 @@ fn main() {
     let c = #[rustc_capture_analysis]
     //~^ ERROR: attributes on expressions are experimental
     //~| NOTE: see issue #15701 <https://github.com/rust-lang/rust/issues/15701>
+    //~| NOTE: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
     || {
     //~^ ERROR: First Pass analysis includes:
     //~| ERROR: Min Capture analysis includes:
         let x = &p.a.p.x;
-        //~^ NOTE: Capturing p[(0, 0),(0, 0),(0, 0)] -> ImmBorrow
+        //~^ NOTE: Capturing p[(0, 0),(0, 0),(0, 0)] -> Immutable
         p.b.q.y = 9;
-        //~^ NOTE: Capturing p[(1, 0),(1, 0),(1, 0)] -> MutBorrow
-        //~| NOTE: p[] captured as MutBorrow here
+        //~^ NOTE: Capturing p[(1, 0),(1, 0),(1, 0)] -> Mutable
+        //~| NOTE: p[] captured as Mutable here
         println!("{:?}", p);
-        //~^ NOTE: Capturing p[] -> ImmBorrow
-        //~| NOTE: Min Capture p[] -> MutBorrow
+        //~^ NOTE: Capturing p[] -> Immutable
+        //~| NOTE: Min Capture p[] -> Mutable
         //~| NOTE: p[] used here
     };
 }

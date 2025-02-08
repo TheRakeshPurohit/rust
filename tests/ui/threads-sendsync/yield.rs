@@ -1,8 +1,8 @@
-// run-pass
+//@ run-pass
 
 #![allow(unused_must_use)]
 #![allow(unused_mut)]
-// ignore-emscripten no threads support
+//@ needs-threads
 
 use std::thread;
 
@@ -17,5 +17,9 @@ pub fn main() {
 }
 
 fn child() {
-    println!("4"); thread::yield_now(); println!("5"); thread::yield_now(); println!("6");
+    println!("4");
+    thread::yield_now();
+    println!("5");
+    thread::yield_now();
+    println!("6");
 }

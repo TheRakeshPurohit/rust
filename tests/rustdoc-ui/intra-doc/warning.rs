@@ -1,4 +1,4 @@
-// check-pass
+//@ check-pass
 
        //! Test with [Foo::baz], [Bar::foo], ...
 //~^ WARNING `Foo::baz`
@@ -47,11 +47,11 @@ pub fn d() {}
 
 macro_rules! f {
     ($f:expr) => {
-        #[doc = $f] //~ WARNING `BarF`
+        #[doc = $f]
         pub fn f() {}
     }
 }
-f!("Foo\nbar [BarF] bar\nbaz");
+f!("Foo\nbar [BarF] bar\nbaz"); //~ WARNING `BarF`
 
 /** # for example,
  *

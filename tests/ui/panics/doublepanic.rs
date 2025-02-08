@@ -1,8 +1,8 @@
 #![allow(unreachable_code)]
 
-// run-fail
-// error-pattern:One
-// ignore-emscripten no processes
+//@ run-fail
+//@ error-pattern:One
+//@ needs-subprocess
 
 fn main() {
     panic!("One");

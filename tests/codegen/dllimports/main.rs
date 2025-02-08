@@ -1,9 +1,9 @@
- // This test is for *-windows-msvc only.
-// only-windows
-// ignore-gnu
+// This test is for *-windows-msvc only.
+//@ only-windows
+//@ ignore-gnu
 
-// aux-build:dummy.rs
-// aux-build:wrapper.rs
+//@ aux-build:dummy.rs
+//@ aux-build:wrapper.rs
 
 extern crate wrapper;
 
@@ -20,13 +20,13 @@ extern crate wrapper;
 // CHECK: declare noundef i32 @static_func1(i32 noundef)
 // CHECK: declare noundef i32 @static_func2(i32 noundef)
 
-#[link(name = "dummy", kind="dylib")]
+#[link(name = "dummy", kind = "dylib")]
 extern "C" {
     pub fn dylib_func1(x: i32) -> i32;
     pub static dylib_global1: i32;
 }
 
-#[link(name = "dummy", kind="static")]
+#[link(name = "dummy", kind = "static")]
 extern "C" {
     pub fn static_func1(x: i32) -> i32;
     pub static static_global1: i32;

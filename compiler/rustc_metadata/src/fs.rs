@@ -1,19 +1,18 @@
-use crate::errors::{
-    BinaryOutputToTty, FailedCopyToStdout, FailedCreateEncodedMetadata, FailedCreateFile,
-    FailedCreateTempdir, FailedWriteError,
-};
-use crate::{encode_metadata, EncodedMetadata};
+use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 use rustc_data_structures::temp_dir::MaybeTempDir;
-use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_middle::ty::TyCtxt;
 use rustc_session::config::{OutFileName, OutputType};
 use rustc_session::output::filename_for_metadata;
 use rustc_session::{MetadataKind, Session};
 use tempfile::Builder as TempFileBuilder;
 
-use std::path::{Path, PathBuf};
-use std::{fs, io};
+use crate::errors::{
+    BinaryOutputToTty, FailedCopyToStdout, FailedCreateEncodedMetadata, FailedCreateFile,
+    FailedCreateTempdir, FailedWriteError,
+};
+use crate::{EncodedMetadata, encode_metadata};
 
 // FIXME(eddyb) maybe include the crate name in this?
 pub const METADATA_FILENAME: &str = "lib.rmeta";
@@ -33,15 +32,14 @@ pub fn emit_wrapper_file(
     let result = fs::write(&out_filename, data);
 
     if let Err(err) = result {
-        sess.emit_fatal(FailedWriteError { filename: out_filename, err });
+        sess.dcx().emit_fatal(FailedWriteError { filename: out_filename, err });
     }
 
     out_filename
 }
 
 pub fn encode_and_write_metadata(tcx: TyCtxt<'_>) -> (EncodedMetadata, bool) {
-    let crate_name = tcx.crate_name(LOCAL_CRATE);
-    let out_filename = filename_for_metadata(tcx.sess, crate_name, tcx.output_filenames(()));
+    let out_filename = filename_for_metadata(tcx.sess, tcx.output_filenames(()));
     // To avoid races with another rustc process scanning the output directory,
     // we need to write the file somewhere else and atomically move it to its
     // final destination, with an `fs::rename` call. In order for the rename to
@@ -50,17 +48,17 @@ pub fn encode_and_write_metadata(tcx: TyCtxt<'_>) -> (EncodedMetadata, bool) {
     let metadata_tmpdir = TempFileBuilder::new()
         .prefix("rmeta")
         .tempdir_in(out_filename.parent().unwrap_or_else(|| Path::new("")))
-        .unwrap_or_else(|err| tcx.sess.emit_fatal(FailedCreateTempdir { err }));
+        .unwrap_or_else(|err| tcx.dcx().emit_fatal(FailedCreateTempdir { err }));
     let metadata_tmpdir = MaybeTempDir::new(metadata_tmpdir, tcx.sess.opts.cg.save_temps);
     let metadata_filename = metadata_tmpdir.as_ref().join(METADATA_FILENAME);
 
     // Always create a file at `metadata_filename`, even if we have nothing to write to it.
     // This simplifies the creation of the output `out_filename` when requested.
-    let metadata_kind = tcx.sess.metadata_kind();
+    let metadata_kind = tcx.metadata_kind();
     match metadata_kind {
         MetadataKind::None => {
             std::fs::File::create(&metadata_filename).unwrap_or_else(|err| {
-                tcx.sess.emit_fatal(FailedCreateFile { filename: &metadata_filename, err });
+                tcx.dcx().emit_fatal(FailedCreateFile { filename: &metadata_filename, err });
             });
         }
         MetadataKind::Uncompressed | MetadataKind::Compressed => {
@@ -78,25 +76,22 @@ pub fn encode_and_write_metadata(tcx: TyCtxt<'_>) -> (EncodedMetadata, bool) {
         let filename = match out_filename {
             OutFileName::Real(ref path) => {
                 if let Err(err) = non_durable_rename(&metadata_filename, path) {
-                    tcx.sess.emit_fatal(FailedWriteError { filename: path.to_path_buf(), err });
+                    tcx.dcx().emit_fatal(FailedWriteError { filename: path.to_path_buf(), err });
                 }
                 path.clone()
             }
             OutFileName::Stdout => {
                 if out_filename.is_tty() {
-                    tcx.sess.emit_err(BinaryOutputToTty);
+                    tcx.dcx().emit_err(BinaryOutputToTty);
                 } else if let Err(err) = copy_to_stdout(&metadata_filename) {
-                    tcx.sess
+                    tcx.dcx()
                         .emit_err(FailedCopyToStdout { filename: metadata_filename.clone(), err });
                 }
                 metadata_filename
             }
         };
         if tcx.sess.opts.json_artifact_notifications {
-            tcx.sess
-                .parse_sess
-                .span_diagnostic
-                .emit_artifact_notification(&out_filename.as_path(), "metadata");
+            tcx.dcx().emit_artifact_notification(out_filename.as_path(), "metadata");
         }
         (filename, None)
     } else {
@@ -104,9 +99,9 @@ pub fn encode_and_write_metadata(tcx: TyCtxt<'_>) -> (EncodedMetadata, bool) {
     };
 
     // Load metadata back to memory: codegen may need to include it in object files.
-    let metadata = EncodedMetadata::from_path(metadata_filename.clone(), metadata_tmpdir)
-        .unwrap_or_else(|err| {
-            tcx.sess.emit_fatal(FailedCreateEncodedMetadata { err });
+    let metadata =
+        EncodedMetadata::from_path(metadata_filename, metadata_tmpdir).unwrap_or_else(|err| {
+            tcx.dcx().emit_fatal(FailedCreateEncodedMetadata { err });
         });
 
     let need_metadata_module = metadata_kind == MetadataKind::Compressed;
@@ -133,8 +128,7 @@ pub fn non_durable_rename(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 pub fn copy_to_stdout(from: &Path) -> io::Result<()> {
-    let file = fs::File::open(from)?;
-    let mut reader = io::BufReader::new(file);
+    let mut reader = fs::File::open_buffered(from)?;
     let mut stdout = io::stdout();
     io::copy(&mut reader, &mut stdout)?;
     Ok(())

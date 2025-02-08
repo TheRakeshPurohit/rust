@@ -1,15 +1,18 @@
-use crate::collect::ItemCtxt;
-use rustc_hir as hir;
-use rustc_hir::intravisit::{self, Visitor};
-use rustc_hir::{ForeignItem, ForeignItemKind};
+use rustc_hir::intravisit::{self, Visitor, VisitorExt};
+use rustc_hir::{self as hir, AmbigArg, ForeignItem, ForeignItemKind};
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_infer::traits::{ObligationCause, WellFormedLoc};
+use rustc_middle::bug;
 use rustc_middle::query::Providers;
-use rustc_middle::ty::{self, Region, TyCtxt, TypeFoldable, TypeFolder};
+use rustc_middle::ty::fold::fold_regions;
+use rustc_middle::ty::{self, TyCtxt, TypingMode};
 use rustc_span::def_id::LocalDefId;
 use rustc_trait_selection::traits::{self, ObligationCtxt};
+use tracing::debug;
 
-pub fn provide(providers: &mut Providers) {
+use crate::collect::ItemCtxt;
+
+pub(crate) fn provide(providers: &mut Providers) {
     *providers = Providers { diagnostic_hir_wf_check, ..*providers };
 }
 
@@ -25,11 +28,11 @@ fn diagnostic_hir_wf_check<'tcx>(
         WellFormedLoc::Ty(def_id) => def_id,
         WellFormedLoc::Param { function, param_idx: _ } => function,
     };
-    let hir_id = hir.local_def_id_to_hir_id(def_id);
+    let hir_id = tcx.local_def_id_to_hir_id(def_id);
 
     // HIR wfcheck should only ever happen as part of improving an existing error
-    tcx.sess
-        .delay_span_bug(tcx.def_span(def_id), "Performed HIR wfcheck without an existing error!");
+    tcx.dcx()
+        .span_delayed_bug(tcx.def_span(def_id), "Performed HIR wfcheck without an existing error!");
 
     let icx = ItemCtxt::new(tcx, def_id);
 
@@ -64,11 +67,19 @@ fn diagnostic_hir_wf_check<'tcx>(
     }
 
     impl<'tcx> Visitor<'tcx> for HirWfCheck<'tcx> {
-        fn visit_ty(&mut self, ty: &'tcx hir::Ty<'tcx>) {
-            let infcx = self.tcx.infer_ctxt().build();
-            let ocx = ObligationCtxt::new(&infcx);
+        fn visit_ty(&mut self, ty: &'tcx hir::Ty<'tcx, AmbigArg>) {
+            let infcx = self.tcx.infer_ctxt().build(TypingMode::non_body_analysis());
+            let ocx = ObligationCtxt::new_with_diagnostics(&infcx);
 
-            let tcx_ty = self.icx.to_ty(ty).fold_with(&mut EraseAllBoundRegions { tcx: self.tcx });
+            // We don't handle infer vars but we wouldn't handle them anyway as we're creating a
+            // fresh `InferCtxt` in this function.
+            let tcx_ty = self.icx.lower_ty(ty.as_unambig_ty());
+            // This visitor can walk into binders, resulting in the `tcx_ty` to
+            // potentially reference escaping bound variables. We simply erase
+            // those here.
+            let tcx_ty = fold_regions(self.tcx, tcx_ty, |r, _| {
+                if r.is_bound() { self.tcx.lifetimes.re_erased } else { r }
+            });
             let cause = traits::ObligationCause::new(
                 ty.span,
                 self.def_id,
@@ -79,7 +90,7 @@ fn diagnostic_hir_wf_check<'tcx>(
                 self.tcx,
                 cause,
                 self.param_env,
-                ty::PredicateKind::WellFormed(tcx_ty.into()),
+                ty::PredicateKind::Clause(ty::ClauseKind::WellFormed(tcx_ty.into())),
             ));
 
             for error in ocx.select_all_or_error() {
@@ -116,7 +127,7 @@ fn diagnostic_hir_wf_check<'tcx>(
     // We will walk 'into' this type to try to find
     // a more precise span for our predicate.
     let tys = match loc {
-        WellFormedLoc::Ty(_) => match hir.get(hir_id) {
+        WellFormedLoc::Ty(_) => match tcx.hir_node(hir_id) {
             hir::Node::ImplItem(item) => match item.kind {
                 hir::ImplItemKind::Type(ty) => vec![ty],
                 hir::ImplItemKind::Const(ty, _) => vec![ty],
@@ -130,7 +141,7 @@ fn diagnostic_hir_wf_check<'tcx>(
             hir::Node::Item(item) => match item.kind {
                 hir::ItemKind::TyAlias(ty, _)
                 | hir::ItemKind::Static(ty, _, _)
-                | hir::ItemKind::Const(ty, _) => vec![ty],
+                | hir::ItemKind::Const(ty, _, _) => vec![ty],
                 hir::ItemKind::Impl(impl_) => match &impl_.of_trait {
                     Some(t) => t
                         .path
@@ -139,7 +150,11 @@ fn diagnostic_hir_wf_check<'tcx>(
                         .iter()
                         .flat_map(|seg| seg.args().args)
                         .filter_map(|arg| {
-                            if let hir::GenericArg::Type(ty) = arg { Some(*ty) } else { None }
+                            if let hir::GenericArg::Type(ty) = arg {
+                                Some(ty.as_unambig_ty())
+                            } else {
+                                None
+                            }
                         })
                         .chain([impl_.self_ty])
                         .collect(),
@@ -151,12 +166,24 @@ fn diagnostic_hir_wf_check<'tcx>(
             },
             hir::Node::Field(field) => vec![field.ty],
             hir::Node::ForeignItem(ForeignItem {
-                kind: ForeignItemKind::Static(ty, _), ..
+                kind: ForeignItemKind::Static(ty, _, _), ..
             }) => vec![*ty],
             hir::Node::GenericParam(hir::GenericParam {
                 kind: hir::GenericParamKind::Type { default: Some(ty), .. },
                 ..
             }) => vec![*ty],
+            hir::Node::AnonConst(_) => {
+                if let Some(const_param_id) = tcx.hir().opt_const_param_default_param_def_id(hir_id)
+                    && let hir::Node::GenericParam(hir::GenericParam {
+                        kind: hir::GenericParamKind::Const { ty, .. },
+                        ..
+                    }) = tcx.hir_node_by_def_id(const_param_id)
+                {
+                    vec![*ty]
+                } else {
+                    vec![]
+                }
+            }
             ref node => bug!("Unexpected node {:?}", node),
         },
         WellFormedLoc::Param { function: _, param_idx } => {
@@ -174,28 +201,7 @@ fn diagnostic_hir_wf_check<'tcx>(
         }
     };
     for ty in tys {
-        visitor.visit_ty(ty);
+        visitor.visit_ty_unambig(ty);
     }
     visitor.cause
-}
-
-struct EraseAllBoundRegions<'tcx> {
-    tcx: TyCtxt<'tcx>,
-}
-
-// Higher ranked regions are complicated.
-// To make matters worse, the HIR WF check can instantiate them
-// outside of a `Binder`, due to the way we (ab)use
-// `ItemCtxt::to_ty`. To make things simpler, we just erase all
-// of them, regardless of depth. At worse, this will give
-// us an inaccurate span for an error message, but cannot
-// lead to unsoundness (we call `delay_span_bug` at the start
-// of `diagnostic_hir_wf_check`).
-impl<'tcx> TypeFolder<TyCtxt<'tcx>> for EraseAllBoundRegions<'tcx> {
-    fn interner(&self) -> TyCtxt<'tcx> {
-        self.tcx
-    }
-    fn fold_region(&mut self, r: Region<'tcx>) -> Region<'tcx> {
-        if r.is_late_bound() { self.tcx.lifetimes.re_erased } else { r }
-    }
 }

@@ -1,16 +1,14 @@
-#![feature(platform_intrinsics, repr_simd)]
+#![feature(core_intrinsics, repr_simd)]
 
-extern "platform-intrinsic" {
-    pub(crate) fn simd_reduce_any<T>(x: T) -> bool;
-}
+use std::intrinsics::simd::simd_reduce_any;
 
 #[repr(simd)]
 #[allow(non_camel_case_types)]
-struct i32x2(i32, i32);
+struct i32x2([i32; 2]);
 
 fn main() {
     unsafe {
-        let x = i32x2(0, 1);
+        let x = i32x2([0, 1]);
         simd_reduce_any(x); //~ERROR: must be all-0-bits or all-1-bits
     }
 }

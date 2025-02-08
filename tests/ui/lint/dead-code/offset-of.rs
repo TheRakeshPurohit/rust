@@ -1,4 +1,3 @@
-#![feature(offset_of)]
 #![deny(dead_code)]
 
 use std::mem::offset_of;

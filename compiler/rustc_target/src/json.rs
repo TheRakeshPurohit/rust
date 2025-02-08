@@ -2,7 +2,9 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 pub use serde_json::Value as Json;
-use serde_json::{Map, Number};
+use serde_json::{Map, Number, json};
+
+use crate::spec::TargetMetadata;
 
 pub trait ToJson {
     fn to_json(&self) -> Json;
@@ -92,12 +94,16 @@ impl<A: ToJson> ToJson for Option<A> {
 
 impl ToJson for crate::abi::call::Conv {
     fn to_json(&self) -> Json {
+        let buf: String;
         let s = match self {
             Self::C => "C",
             Self::Rust => "Rust",
-            Self::RustCold => "RustCold",
+            Self::Cold => "Cold",
+            Self::PreserveMost => "PreserveMost",
+            Self::PreserveAll => "PreserveAll",
             Self::ArmAapcs => "ArmAapcs",
             Self::CCmseNonSecureCall => "CCmseNonSecureCall",
+            Self::CCmseNonSecureEntry => "CCmseNonSecureEntry",
             Self::Msp430Intr => "Msp430Intr",
             Self::PtxKernel => "PtxKernel",
             Self::X86Fastcall => "X86Fastcall",
@@ -107,10 +113,31 @@ impl ToJson for crate::abi::call::Conv {
             Self::X86VectorCall => "X86VectorCall",
             Self::X86_64SysV => "X86_64SysV",
             Self::X86_64Win64 => "X86_64Win64",
-            Self::AmdGpuKernel => "AmdGpuKernel",
+            Self::GpuKernel => "GpuKernel",
             Self::AvrInterrupt => "AvrInterrupt",
             Self::AvrNonBlockingInterrupt => "AvrNonBlockingInterrupt",
+            Self::RiscvInterrupt { kind } => {
+                buf = format!("RiscvInterrupt({})", kind.as_str());
+                &buf
+            }
         };
         Json::String(s.to_owned())
+    }
+}
+
+impl ToJson for TargetMetadata {
+    fn to_json(&self) -> Json {
+        json!({
+            "description": self.description,
+            "tier": self.tier,
+            "host_tools": self.host_tools,
+            "std": self.std,
+        })
+    }
+}
+
+impl ToJson for rustc_abi::Endian {
+    fn to_json(&self) -> Json {
+        self.as_str().to_json()
     }
 }

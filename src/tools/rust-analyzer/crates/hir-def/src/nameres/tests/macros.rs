@@ -1,5 +1,9 @@
-use super::*;
+use expect_test::expect;
+
 use itertools::Itertools;
+use span::Edition;
+
+use super::*;
 
 #[test]
 fn macro_rules_are_globally_visible() {
@@ -93,9 +97,9 @@ macro_rules! structs {
             bar: t
 
             crate::bar
-            Bar: t
-            Foo: t
-            bar: t
+            Bar: tg
+            Foo: tg
+            bar: tg
         "#]],
     );
 }
@@ -126,9 +130,9 @@ macro_rules! structs {
             bar: t
 
             crate::bar
-            Bar: t
-            Foo: t
-            bar: t
+            Bar: tg
+            Foo: tg
+            bar: tg
         "#]],
     );
 }
@@ -165,9 +169,9 @@ macro_rules! inner {
             bar: t
 
             crate::bar
-            Bar: t
-            Foo: t
-            bar: t
+            Bar: tg
+            Foo: tg
+            bar: tg
         "#]],
     );
 }
@@ -203,8 +207,8 @@ macro_rules! bar {
         expect![[r#"
             crate
             Foo: t
-            bar: m
-            foo: m
+            bar: mi
+            foo: mi
         "#]],
     );
 }
@@ -251,7 +255,7 @@ mod priv_mod {
             Bar: t v
             Foo: t v
             bar: t
-            foo: t
+            foo: te
 
             crate::bar
             Baz: t v
@@ -318,9 +322,9 @@ macro_rules! baz3 { () => { struct OkBaz3; } }
             OkBaz1: t v
             OkBaz2: t v
             OkBaz3: t v
-            all: t
-            empty: t
-            multiple: t
+            all: te
+            empty: te
+            multiple: te
         "#]],
     );
 }
@@ -551,8 +555,8 @@ fn baz() {}
 "#,
         expect![[r#"
             crate
-            bar: t m
-            baz: t v m
+            bar: ti mi
+            baz: ti v mi
             foo: t m
         "#]],
     );
@@ -583,7 +587,7 @@ mod m {
             crate
             Alias: t v
             Direct: t v
-            foo: t
+            foo: te
         "#]],
     );
 }
@@ -628,9 +632,9 @@ mod m {
             m: t
 
             crate::m
-            alias1: m
-            alias2: m
-            alias3: m
+            alias1: mi
+            alias2: mi
+            alias3: mi
             not_found: _
         "#]],
     );
@@ -682,11 +686,11 @@ pub struct Baz;
 "#,
         expect![[r#"
             crate
-            Bar: t v
-            Baz: t v
+            Bar: ti vi
+            Baz: ti vi
             Foo: t v
-            FooSelf: t v
-            foo: t
+            FooSelf: ti vi
+            foo: te
             m: t
 
             crate::m
@@ -725,7 +729,7 @@ pub struct bar;
 "#,
         expect![[r#"
             crate
-            bar: t v
+            bar: ti vi
         "#]],
     );
 }
@@ -790,7 +794,7 @@ pub trait Clone {}
 "#,
         expect![[r#"
             crate
-            Clone: t m
+            Clone: tg mg
         "#]],
     );
 }
@@ -1071,9 +1075,9 @@ macro_rules! mbe {
 "#,
         expect![[r#"
             crate
-            DummyTrait: m
-            attribute_macro: m
-            function_like_macro: m
+            DummyTrait: mg
+            attribute_macro: mg
+            function_like_macro: mg
         "#]],
     );
 }
@@ -1097,7 +1101,7 @@ pub fn derive_macro_2(_item: TokenStream) -> TokenStream {
     assert_eq!(def_map.data.exported_derives.len(), 1);
     match def_map.data.exported_derives.values().next() {
         Some(helpers) => match &**helpers {
-            [attr] => assert_eq!(attr.display(&db).to_string(), "helper_attr"),
+            [attr] => assert_eq!(attr.display(&db, Edition::CURRENT).to_string(), "helper_attr"),
             _ => unreachable!(),
         },
         _ => unreachable!(),
@@ -1259,6 +1263,164 @@ struct A;
 }
 
 #[test]
+fn nested_include() {
+    check(
+        r#"
+//- minicore: include
+//- /lib.rs
+include!("out_dir/includes.rs");
+
+//- /out_dir/includes.rs
+pub mod company_name {
+    pub mod network {
+        pub mod v1 {
+            include!("company_name.network.v1.rs");
+        }
+    }
+}
+//- /out_dir/company_name.network.v1.rs
+pub struct IpAddress {
+    pub ip_type: &'static str,
+}
+/// Nested message and enum types in `IpAddress`.
+pub mod ip_address {
+    pub enum IpType {
+        IpV4(u32),
+    }
+}
+
+"#,
+        expect![[r#"
+            crate
+            company_name: t
+
+            crate::company_name
+            network: t
+
+            crate::company_name::network
+            v1: t
+
+            crate::company_name::network::v1
+            IpAddress: t
+            ip_address: t
+
+            crate::company_name::network::v1::ip_address
+            IpType: t
+        "#]],
+    );
+}
+
+#[test]
+fn include_with_submod_file() {
+    check(
+        r#"
+//- minicore: include
+//- /lib.rs
+include!("out_dir/includes.rs");
+
+//- /out_dir/includes.rs
+pub mod company_name {
+    pub mod network {
+        pub mod v1;
+    }
+}
+//- /out_dir/company_name/network/v1.rs
+pub struct IpAddress {
+    pub ip_type: &'static str,
+}
+/// Nested message and enum types in `IpAddress`.
+pub mod ip_address {
+    pub enum IpType {
+        IpV4(u32),
+    }
+}
+
+"#,
+        expect![[r#"
+            crate
+            company_name: t
+
+            crate::company_name
+            network: t
+
+            crate::company_name::network
+            v1: t
+
+            crate::company_name::network::v1
+            IpAddress: t
+            ip_address: t
+
+            crate::company_name::network::v1::ip_address
+            IpType: t
+        "#]],
+    );
+}
+
+#[test]
+fn include_many_mods() {
+    check(
+        r#"
+//- /lib.rs
+#[rustc_builtin_macro]
+macro_rules! include { () => {} }
+
+mod nested {
+    include!("out_dir/includes.rs");
+
+    mod different_company {
+        include!("out_dir/different_company/mod.rs");
+    }
+
+    mod util;
+}
+
+//- /nested/util.rs
+pub struct Helper {}
+//- /out_dir/includes.rs
+pub mod company_name {
+    pub mod network {
+        pub mod v1;
+    }
+}
+//- /out_dir/company_name/network/v1.rs
+pub struct IpAddress {}
+//- /out_dir/different_company/mod.rs
+pub mod network;
+//- /out_dir/different_company/network.rs
+pub struct Url {}
+
+"#,
+        expect![[r#"
+            crate
+            nested: t
+
+            crate::nested
+            company_name: t
+            different_company: t
+            util: t
+
+            crate::nested::company_name
+            network: t
+
+            crate::nested::company_name::network
+            v1: t
+
+            crate::nested::company_name::network::v1
+            IpAddress: t
+
+            crate::nested::different_company
+            network: t
+
+            crate::nested::different_company::network
+            Url: t
+
+            crate::nested::util
+            Helper: t
+        "#]],
+    );
+}
+
+#[test]
 fn macro_use_imports_all_macro_types() {
     let db = TestDB::with_files(
         r#"
@@ -1294,8 +1456,8 @@ fn proc_attr(a: TokenStream, b: TokenStream) -> TokenStream { a }
 
     let actual = def_map
         .macro_use_prelude
-        .iter()
-        .map(|(name, _)| name.display(&db).to_string())
+        .keys()
+        .map(|name| name.display(&db, Edition::CURRENT).to_string())
         .sorted()
         .join("\n");
 
@@ -1340,7 +1502,7 @@ pub mod prelude {
             crate
             Ok: t v
             bar: m
-            dep: t
+            dep: te
             foo: m
             ok: v
         "#]],
@@ -1370,13 +1532,13 @@ macro_rules! mk_foo {
 }
     "#,
         expect![[r#"
-        crate
-        a: t
-        lib: t
+            crate
+            a: t
+            lib: te
 
-        crate::a
-        Ok: t v
-    "#]],
+            crate::a
+            Ok: t v
+        "#]],
     );
 }
 
@@ -1427,8 +1589,8 @@ pub mod prelude {
         expect![[r#"
             crate
             Ok: t v
-            bar: m
-            foo: m
+            bar: mi
+            foo: mi
             ok: v
         "#]],
     );

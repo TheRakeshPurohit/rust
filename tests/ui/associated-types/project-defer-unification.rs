@@ -1,4 +1,4 @@
-// run-pass
+//@ run-pass
 
 #![allow(dead_code)]
 #![allow(unused_variables)]
@@ -93,7 +93,7 @@ where Pix: Pixel<Subpixel=u8> + 'static,
 
     let mut indices: ImageBuffer<_,Vec<_>> = loop { };
     for (pixel, idx) in image.pixels().zip(indices.pixels_mut()) {
-        // failured occurred here ^^ because we were requiring that we
+        // failure occurred here ^^ because we were requiring that we
         // could project Pixel or Subpixel from `T_indices` (type of
         // `indices`), but the type is insufficiently constrained
         // until we reach the return below.

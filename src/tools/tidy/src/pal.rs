@@ -30,36 +30,38 @@
 //! platform-specific cfgs are allowed. Not sure yet how to deal with
 //! this in the long term.
 
-use crate::walk::{filter_dirs, walk};
 use std::path::Path;
+
+use crate::walk::{filter_dirs, walk};
 
 // Paths that may contain platform-specific code.
 const EXCEPTION_PATHS: &[&str] = &[
+    "library/windows_targets",
     "library/panic_abort",
     "library/panic_unwind",
     "library/unwind",
     "library/rtstartup", // Not sure what to do about this. magic stuff for mingw
-    "library/term",      // Not sure how to make this crate portable, but test crate needs it.
     "library/test",      // Probably should defer to unstable `std::sys` APIs.
     // The `VaList` implementation must have platform specific code.
     // The Windows implementation of a `va_list` is always a character
     // pointer regardless of the target architecture. As a result,
     // we must use `#[cfg(windows)]` to conditionally compile the
     // correct `VaList` structure for windows.
+    "library/core/src/ffi/va_list.rs",
+    // core::ffi contains platform-specific type and linkage configuration
     "library/core/src/ffi/mod.rs",
-    "library/std/src/sys/", // Platform-specific code for std lives here.
-    "library/std/src/os",   // Platform-specific public interfaces
+    "library/core/src/ffi/primitives.rs",
+    "library/std/src/sys", // Platform-specific code for std lives here.
+    "library/std/src/os",  // Platform-specific public interfaces
     // Temporary `std` exceptions
     // FIXME: platform-specific code should be moved to `sys`
     "library/std/src/io/copy.rs",
     "library/std/src/io/stdio.rs",
-    "library/std/src/f32.rs",
-    "library/std/src/f64.rs",
+    "library/std/src/lib.rs", // for miniz_oxide leaking docs, which itself workaround
     "library/std/src/path.rs",
     "library/std/src/sys_common", // Should only contain abstractions over platforms
     "library/std/src/net/test.rs", // Utility helpers for tests
-    "library/std/src/personality.rs",
-    "library/std/src/personality/",
+    "library/std/src/io/error.rs", // Repr unpacked needed for UEFI
 ];
 
 pub fn check(path: &Path, bad: &mut bool) {

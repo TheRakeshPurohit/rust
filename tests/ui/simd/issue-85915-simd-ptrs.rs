@@ -1,9 +1,9 @@
-// run-pass
-// ignore-emscripten
+//@ run-pass
+//@ ignore-emscripten
 
 // Short form of the generic gather/scatter tests,
 // verifying simd([*const T; N]) and simd([*mut T; N]) pass typeck and work.
-#![feature(repr_simd, platform_intrinsics)]
+#![feature(repr_simd, intrinsics)]
 #![allow(non_camel_case_types)]
 
 #[repr(simd)]
@@ -22,10 +22,12 @@ struct f32x4([f32; 4]);
 #[derive(Copy, Clone, PartialEq, Debug)]
 struct i32x4([i32; 4]);
 
-extern "platform-intrinsic" {
-    fn simd_gather<T, U, V>(x: T, y: U, z: V) -> T;
-    fn simd_scatter<T, U, V>(x: T, y: U, z: V) -> ();
-}
+
+#[rustc_intrinsic]
+unsafe fn simd_gather<T, U, V>(x: T, y: U, z: V) -> T;
+
+#[rustc_intrinsic]
+unsafe fn simd_scatter<T, U, V>(x: T, y: U, z: V) -> ();
 
 fn main() {
     let mut x = [0_f32, 1., 2., 3., 4., 5., 6., 7.];

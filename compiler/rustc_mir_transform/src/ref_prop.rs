@@ -1,15 +1,17 @@
+use std::borrow::Cow;
+
 use rustc_data_structures::fx::FxHashSet;
-use rustc_index::bit_set::BitSet;
 use rustc_index::IndexVec;
+use rustc_index::bit_set::DenseBitSet;
+use rustc_middle::bug;
 use rustc_middle::mir::visit::*;
 use rustc_middle::mir::*;
 use rustc_middle::ty::TyCtxt;
-use rustc_mir_dataflow::impls::MaybeStorageDead;
-use rustc_mir_dataflow::storage::always_storage_live_locals;
 use rustc_mir_dataflow::Analysis;
+use rustc_mir_dataflow::impls::{MaybeStorageDead, always_storage_live_locals};
+use tracing::{debug, instrument};
 
 use crate::ssa::{SsaLocals, StorageLiveLocals};
-use crate::MirPass;
 
 /// Propagate references using SSA analysis.
 ///
@@ -44,7 +46,7 @@ use crate::MirPass;
 ///
 /// # Liveness
 ///
-/// When performing a substitution, we must take care not to introduce uses of dangling locals.
+/// When performing an instantiation, we must take care not to introduce uses of dangling locals.
 /// To ensure this, we walk the body with the `MaybeStorageDead` dataflow analysis:
 /// - if we want to replace `*x` by reborrow `*y` and `y` may be dead, we allow replacement and
 ///   mark storage statements on `y` for removal;
@@ -55,7 +57,7 @@ use crate::MirPass;
 ///
 /// For `&mut` borrows, we also need to preserve the uniqueness property:
 /// we must avoid creating a state where we interleave uses of `*_1` and `_2`.
-/// To do it, we only perform full substitution of mutable borrows:
+/// To do it, we only perform full instantiation of mutable borrows:
 /// we replace either all or none of the occurrences of `*_1`.
 ///
 /// Some care has to be taken when `_1` is copied in other locals.
@@ -63,15 +65,15 @@ use crate::MirPass;
 ///   _3 = *_1;
 ///   _4 = _1
 ///   _5 = *_4
-/// In such cases, fully substituting `_1` means fully substituting all of the copies.
+/// In such cases, fully instantiating `_1` means fully instantiating all of the copies.
 ///
 /// For immutable borrows, we do not need to preserve such uniqueness property,
-/// so we perform all the possible substitutions without removing the `_1 = &_2` statement.
-pub struct ReferencePropagation;
+/// so we perform all the possible instantiations without removing the `_1 = &_2` statement.
+pub(super) struct ReferencePropagation;
 
-impl<'tcx> MirPass<'tcx> for ReferencePropagation {
+impl<'tcx> crate::MirPass<'tcx> for ReferencePropagation {
     fn is_enabled(&self, sess: &rustc_session::Session) -> bool {
-        sess.mir_opt_level() >= 4
+        sess.mir_opt_level() >= 2
     }
 
     #[instrument(level = "trace", skip(self, tcx, body))]
@@ -79,10 +81,15 @@ impl<'tcx> MirPass<'tcx> for ReferencePropagation {
         debug!(def_id = ?body.source.def_id());
         while propagate_ssa(tcx, body) {}
     }
+
+    fn is_required(&self) -> bool {
+        false
+    }
 }
 
 fn propagate_ssa<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) -> bool {
-    let ssa = SsaLocals::new(body);
+    let typing_env = body.typing_env(tcx);
+    let ssa = SsaLocals::new(tcx, body, typing_env);
 
     let mut replacer = compute_replacement(tcx, body, &ssa);
     debug!(?replacer.targets);
@@ -108,7 +115,7 @@ enum Value<'tcx> {
 }
 
 /// For each local, save the place corresponding to `*local`.
-#[instrument(level = "trace", skip(tcx, body))]
+#[instrument(level = "trace", skip(tcx, body, ssa))]
 fn compute_replacement<'tcx>(
     tcx: TyCtxt<'tcx>,
     body: &Body<'tcx>,
@@ -121,16 +128,15 @@ fn compute_replacement<'tcx>(
 
     // Compute `MaybeStorageDead` dataflow to check that we only replace when the pointee is
     // definitely live.
-    let mut maybe_dead = MaybeStorageDead::new(always_live_locals)
-        .into_engine(tcx, body)
-        .iterate_to_fixpoint()
+    let mut maybe_dead = MaybeStorageDead::new(Cow::Owned(always_live_locals))
+        .iterate_to_fixpoint(tcx, body, None)
         .into_results_cursor(body);
 
     // Map for each local to the pointee.
     let mut targets = IndexVec::from_elem(Value::Unknown, &body.local_decls);
     // Set of locals for which we will remove their storage statement. This is useful for
     // reborrowed references.
-    let mut storage_to_remove = BitSet::new_empty(body.local_decls.len());
+    let mut storage_to_remove = DenseBitSet::new_empty(body.local_decls.len());
 
     let fully_replacable_locals = fully_replacable_locals(ssa);
 
@@ -175,7 +181,7 @@ fn compute_replacement<'tcx>(
         } else {
             // This is a proper dereference. We can only allow it if `target` is live.
             maybe_dead.seek_after_primary_effect(loc);
-            let maybe_dead = maybe_dead.contains(target.local);
+            let maybe_dead = maybe_dead.get().contains(target.local);
             !maybe_dead
         }
     };
@@ -210,18 +216,21 @@ fn compute_replacement<'tcx>(
             // have been visited before.
             Rvalue::Use(Operand::Copy(place) | Operand::Move(place))
             | Rvalue::CopyForDeref(place) => {
-                if let Some(rhs) = place.as_local() && ssa.is_ssa(rhs) {
+                if let Some(rhs) = place.as_local()
+                    && ssa.is_ssa(rhs)
+                {
                     let target = targets[rhs];
                     // Only see through immutable reference and pointers, as we do not know yet if
                     // mutable references are fully replaced.
                     if !needs_unique && matches!(target, Value::Pointer(..)) {
                         targets[local] = target;
                     } else {
-                        targets[local] = Value::Pointer(tcx.mk_place_deref(rhs.into()), needs_unique);
+                        targets[local] =
+                            Value::Pointer(tcx.mk_place_deref(rhs.into()), needs_unique);
                     }
                 }
             }
-            Rvalue::Ref(_, _, place) | Rvalue::AddressOf(_, place) => {
+            Rvalue::Ref(_, _, place) | Rvalue::RawPtr(_, place) => {
                 let mut place = *place;
                 // Try to see through `place` in order to collapse reborrow chains.
                 if place.projection.first() == Some(&PlaceElem::Deref)
@@ -246,11 +255,8 @@ fn compute_replacement<'tcx>(
 
     debug!(?targets);
 
-    let mut finder = ReplacementFinder {
-        targets: &mut targets,
-        can_perform_opt,
-        allowed_replacements: FxHashSet::default(),
-    };
+    let mut finder =
+        ReplacementFinder { targets, can_perform_opt, allowed_replacements: FxHashSet::default() };
     let reachable_blocks = traversal::reachable_as_bitset(body);
     for (bb, bbdata) in body.basic_blocks.iter_enumerated() {
         // Only visit reachable blocks as we rely on dataflow.
@@ -262,20 +268,19 @@ fn compute_replacement<'tcx>(
     let allowed_replacements = finder.allowed_replacements;
     return Replacer {
         tcx,
-        targets,
+        targets: finder.targets,
         storage_to_remove,
         allowed_replacements,
-        fully_replacable_locals,
         any_replacement: false,
     };
 
-    struct ReplacementFinder<'a, 'tcx, F> {
-        targets: &'a mut IndexVec<Local, Value<'tcx>>,
+    struct ReplacementFinder<'tcx, F> {
+        targets: IndexVec<Local, Value<'tcx>>,
         can_perform_opt: F,
         allowed_replacements: FxHashSet<(Local, Location)>,
     }
 
-    impl<'tcx, F> Visitor<'tcx> for ReplacementFinder<'_, 'tcx, F>
+    impl<'tcx, F> Visitor<'tcx> for ReplacementFinder<'tcx, F>
     where
         F: FnMut(Place<'tcx>, Location) -> bool,
     {
@@ -323,8 +328,8 @@ fn compute_replacement<'tcx>(
 ///
 /// We consider a local to be replacable iff it's only used in a `Deref` projection `*_local` or
 /// non-use position (like storage statements and debuginfo).
-fn fully_replacable_locals(ssa: &SsaLocals) -> BitSet<Local> {
-    let mut replacable = BitSet::new_empty(ssa.num_locals());
+fn fully_replacable_locals(ssa: &SsaLocals) -> DenseBitSet<Local> {
+    let mut replacable = DenseBitSet::new_empty(ssa.num_locals());
 
     // First pass: for each local, whether its uses can be fully replaced.
     for local in ssa.locals() {
@@ -339,14 +344,13 @@ fn fully_replacable_locals(ssa: &SsaLocals) -> BitSet<Local> {
     replacable
 }
 
-/// Utility to help performing subtitution of `*pattern` by `target`.
+/// Utility to help performing substitution of `*pattern` by `target`.
 struct Replacer<'tcx> {
     tcx: TyCtxt<'tcx>,
     targets: IndexVec<Local, Value<'tcx>>,
-    storage_to_remove: BitSet<Local>,
+    storage_to_remove: DenseBitSet<Local>,
     allowed_replacements: FxHashSet<(Local, Location)>,
     any_replacement: bool,
-    fully_replacable_locals: BitSet<Local>,
 }
 
 impl<'tcx> MutVisitor<'tcx> for Replacer<'tcx> {
@@ -355,7 +359,10 @@ impl<'tcx> MutVisitor<'tcx> for Replacer<'tcx> {
     }
 
     fn visit_var_debug_info(&mut self, debuginfo: &mut VarDebugInfo<'tcx>) {
-        if let VarDebugInfoContents::Place(ref mut place) = debuginfo.value
+        // If the debuginfo is a pointer to another place:
+        // - if it's a reborrow, see through it;
+        // - if it's a direct borrow, increase `debuginfo.references`.
+        while let VarDebugInfoContents::Place(ref mut place) = debuginfo.value
             && place.projection.is_empty()
             && let Value::Pointer(target, _) = self.targets[place.local]
             && target.projection.iter().all(|p| p.can_use_in_debuginfo())
@@ -363,34 +370,37 @@ impl<'tcx> MutVisitor<'tcx> for Replacer<'tcx> {
             if let Some((&PlaceElem::Deref, rest)) = target.projection.split_last() {
                 *place = Place::from(target.local).project_deeper(rest, self.tcx);
                 self.any_replacement = true;
-            } else if self.fully_replacable_locals.contains(place.local)
-                && let Some(references) = debuginfo.references.checked_add(1)
-            {
-                debuginfo.references = references;
-                *place = target;
-                self.any_replacement = true;
+            } else {
+                break;
             }
         }
+
+        // Simplify eventual projections left inside `debuginfo`.
+        self.super_var_debug_info(debuginfo);
     }
 
     fn visit_place(&mut self, place: &mut Place<'tcx>, ctxt: PlaceContext, loc: Location) {
-        if place.projection.first() != Some(&PlaceElem::Deref) {
-            return;
-        }
-
         loop {
-            if let Value::Pointer(target, _) = self.targets[place.local] {
-                let perform_opt = matches!(ctxt, PlaceContext::NonUse(_))
-                    || self.allowed_replacements.contains(&(target.local, loc));
-
-                if perform_opt {
-                    *place = target.project_deeper(&place.projection[1..], self.tcx);
-                    self.any_replacement = true;
-                    continue;
-                }
+            if place.projection.first() != Some(&PlaceElem::Deref) {
+                return;
             }
 
-            break;
+            let Value::Pointer(target, _) = self.targets[place.local] else { return };
+
+            let perform_opt = match ctxt {
+                PlaceContext::NonUse(NonUseContext::VarDebugInfo) => {
+                    target.projection.iter().all(|p| p.can_use_in_debuginfo())
+                }
+                PlaceContext::NonUse(_) => true,
+                _ => self.allowed_replacements.contains(&(target.local, loc)),
+            };
+
+            if !perform_opt {
+                return;
+            }
+
+            *place = target.project_deeper(&place.projection[1..], self.tcx);
+            self.any_replacement = true;
         }
     }
 

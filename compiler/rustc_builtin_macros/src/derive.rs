@@ -1,16 +1,19 @@
-use crate::cfg_eval::cfg_eval;
-use crate::errors;
-
 use rustc_ast as ast;
-use rustc_ast::{GenericParamKind, ItemKind, MetaItemKind, NestedMetaItem, StmtKind};
-use rustc_expand::base::{Annotatable, ExpandResult, ExtCtxt, Indeterminate, MultiItemModifier};
+use rustc_ast::{GenericParamKind, ItemKind, MetaItemInner, MetaItemKind, StmtKind};
+use rustc_expand::base::{
+    Annotatable, DeriveResolution, ExpandResult, ExtCtxt, Indeterminate, MultiItemModifier,
+};
 use rustc_feature::AttributeTemplate;
 use rustc_parse::validate_attr;
 use rustc_session::Session;
-use rustc_span::symbol::{sym, Ident};
-use rustc_span::Span;
+use rustc_span::{ErrorGuaranteed, Ident, Span, sym};
 
-pub(crate) struct Expander(pub bool);
+use crate::cfg_eval::cfg_eval;
+use crate::errors;
+
+pub(crate) struct Expander {
+    pub is_const: bool,
+}
 
 impl MultiItemModifier for Expander {
     fn expand(
@@ -22,7 +25,7 @@ impl MultiItemModifier for Expander {
         _: bool,
     ) -> ExpandResult<Vec<Annotatable>, Annotatable> {
         let sess = ecx.sess;
-        if report_bad_target(sess, &item, span) {
+        if report_bad_target(sess, &item, span).is_err() {
             // We don't want to pass inappropriate targets to derive macros to avoid
             // follow up errors, all other errors below are recoverable.
             return ExpandResult::Ready(vec![item]);
@@ -34,31 +37,37 @@ impl MultiItemModifier for Expander {
                 let template =
                     AttributeTemplate { list: Some("Trait1, Trait2, ..."), ..Default::default() };
                 validate_attr::check_builtin_meta_item(
-                    &sess.parse_sess,
-                    &meta_item,
+                    &sess.psess,
+                    meta_item,
                     ast::AttrStyle::Outer,
                     sym::derive,
                     template,
+                    true,
                 );
 
                 let mut resolutions = match &meta_item.kind {
                     MetaItemKind::List(list) => {
                         list.iter()
-                            .filter_map(|nested_meta| match nested_meta {
-                                NestedMetaItem::MetaItem(meta) => Some(meta),
-                                NestedMetaItem::Lit(lit) => {
+                            .filter_map(|meta_item_inner| match meta_item_inner {
+                                MetaItemInner::MetaItem(meta) => Some(meta),
+                                MetaItemInner::Lit(lit) => {
                                     // Reject `#[derive("Debug")]`.
-                                    report_unexpected_meta_item_lit(sess, &lit);
+                                    report_unexpected_meta_item_lit(sess, lit);
                                     None
                                 }
                             })
                             .map(|meta| {
                                 // Reject `#[derive(Debug = "value", Debug(abc))]`, but recover the
                                 // paths.
-                                report_path_args(sess, &meta);
+                                report_path_args(sess, meta);
                                 meta.path.clone()
                             })
-                            .map(|path| (path, dummy_annotatable(), None, self.0))
+                            .map(|path| DeriveResolution {
+                                path,
+                                item: dummy_annotatable(),
+                                exts: None,
+                                is_const: self.is_const,
+                            })
                             .collect()
                     }
                     _ => vec![],
@@ -67,15 +76,15 @@ impl MultiItemModifier for Expander {
                 // Do not configure or clone items unless necessary.
                 match &mut resolutions[..] {
                     [] => {}
-                    [(_, first_item, ..), others @ ..] => {
-                        *first_item = cfg_eval(
+                    [first, others @ ..] => {
+                        first.item = cfg_eval(
                             sess,
                             features,
                             item.clone(),
                             ecx.current_expansion.lint_node_id,
                         );
-                        for (_, item, _, _) in others {
-                            *item = first_item.clone();
+                        for other in others {
+                            other.item = first.item.clone();
                         }
                     }
                 }
@@ -103,7 +112,11 @@ fn dummy_annotatable() -> Annotatable {
     })
 }
 
-fn report_bad_target(sess: &Session, item: &Annotatable, span: Span) -> bool {
+fn report_bad_target(
+    sess: &Session,
+    item: &Annotatable,
+    span: Span,
+) -> Result<(), ErrorGuaranteed> {
     let item_kind = match item {
         Annotatable::Item(item) => Some(&item.kind),
         Annotatable::Stmt(stmt) => match &stmt.kind {
@@ -116,9 +129,9 @@ fn report_bad_target(sess: &Session, item: &Annotatable, span: Span) -> bool {
     let bad_target =
         !matches!(item_kind, Some(ItemKind::Struct(..) | ItemKind::Enum(..) | ItemKind::Union(..)));
     if bad_target {
-        sess.emit_err(errors::BadDeriveTarget { span, item: item.span() });
+        return Err(sess.dcx().emit_err(errors::BadDeriveTarget { span, item: item.span() }));
     }
-    bad_target
+    Ok(())
 }
 
 fn report_unexpected_meta_item_lit(sess: &Session, lit: &ast::MetaItemLit) {
@@ -130,7 +143,7 @@ fn report_unexpected_meta_item_lit(sess: &Session, lit: &ast::MetaItemLit) {
         }
         _ => errors::BadDeriveLitHelp::Other,
     };
-    sess.emit_err(errors::BadDeriveLit { span: lit.span, help });
+    sess.dcx().emit_err(errors::BadDeriveLit { span: lit.span, help });
 }
 
 fn report_path_args(sess: &Session, meta: &ast::MetaItem) {
@@ -139,10 +152,10 @@ fn report_path_args(sess: &Session, meta: &ast::MetaItem) {
     match meta.kind {
         MetaItemKind::Word => {}
         MetaItemKind::List(..) => {
-            sess.emit_err(errors::DerivePathArgsList { span });
+            sess.dcx().emit_err(errors::DerivePathArgsList { span });
         }
         MetaItemKind::NameValue(..) => {
-            sess.emit_err(errors::DerivePathArgsValue { span });
+            sess.dcx().emit_err(errors::DerivePathArgsValue { span });
         }
     }
 }

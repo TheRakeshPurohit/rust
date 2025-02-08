@@ -1,3 +1,8 @@
+interface_abi_required_feature =
+    target feature `{$feature}` must be {$enabled} to ensure that the ABI of the current target can be implemented correctly
+    .note = this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+interface_abi_required_feature_issue = for more information, see issue #116344 <https://github.com/rust-lang/rust/issues/116344>
+
 interface_cant_emit_mir =
     could not emit MIR: {$error}
 
@@ -48,6 +53,3 @@ interface_rustc_error_unexpected_annotation =
 
 interface_temps_dir_error =
     failed to find or create the directory specified by `--temps-dir`
-
-interface_unsupported_crate_type_for_target =
-    dropping unsupported crate type `{$crate_type}` for target `{$target_triple}`

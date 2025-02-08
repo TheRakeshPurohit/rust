@@ -9,9 +9,9 @@ LL |         Err(last_error)
    |
 help: consider assigning a value
    |
-LL |         let mut last_error: Box<dyn std::error::Error> = todo!();
-   |                                                        +++++++++
+LL |         let mut last_error: Box<dyn std::error::Error> = Box::new(/* value */);
+   |                                                        +++++++++++++++++++++++
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0381`.

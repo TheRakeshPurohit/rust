@@ -1,4 +1,4 @@
-// compile-flags -Wrust-2021-incompatible-closure-captures
+#![warn(rust_2021_incompatible_closure_captures)]
 
 fn main() {}
 

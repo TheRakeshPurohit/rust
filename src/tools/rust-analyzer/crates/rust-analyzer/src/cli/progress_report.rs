@@ -4,41 +4,29 @@
 use std::io::{self, Write};
 
 /// A Simple ASCII Progress Bar
-pub(crate) struct ProgressReport {
+pub(crate) struct ProgressReport<'a> {
     curr: f32,
     text: String,
     hidden: bool,
 
     len: u64,
     pos: u64,
-    msg: String,
+    msg: Option<Box<dyn Fn() -> String + 'a>>,
 }
 
-impl ProgressReport {
-    pub(crate) fn new(len: u64) -> ProgressReport {
-        ProgressReport {
-            curr: 0.0,
-            text: String::new(),
-            hidden: false,
-            len,
-            pos: 0,
-            msg: String::new(),
-        }
+impl<'a> ProgressReport<'a> {
+    pub(crate) fn new(len: u64) -> ProgressReport<'a> {
+        ProgressReport { curr: 0.0, text: String::new(), hidden: false, len, pos: 0, msg: None }
     }
 
-    pub(crate) fn hidden() -> ProgressReport {
-        ProgressReport {
-            curr: 0.0,
-            text: String::new(),
-            hidden: true,
-            len: 0,
-            pos: 0,
-            msg: String::new(),
-        }
+    pub(crate) fn hidden() -> ProgressReport<'a> {
+        ProgressReport { curr: 0.0, text: String::new(), hidden: true, len: 0, pos: 0, msg: None }
     }
 
-    pub(crate) fn set_message(&mut self, msg: &str) {
-        self.msg = msg.to_string();
+    pub(crate) fn set_message(&mut self, msg: impl Fn() -> String + 'a) {
+        if !self.hidden {
+            self.msg = Some(Box::new(msg));
+        }
         self.tick();
     }
 
@@ -67,7 +55,12 @@ impl ProgressReport {
             return;
         }
         let percent = (self.curr * 100.0) as u32;
-        let text = format!("{}/{} {percent:3>}% {}", self.pos, self.len, self.msg);
+        let text = format!(
+            "{}/{} {percent:3>}% {}",
+            self.pos,
+            self.len,
+            self.msg.as_ref().map_or_else(String::new, |it| it())
+        );
         self.update_text(&text);
     }
 
@@ -99,11 +92,11 @@ impl ProgressReport {
 
         let _ = io::stdout().write(output.as_bytes());
         let _ = io::stdout().flush();
-        self.text = text.to_string();
+        text.clone_into(&mut self.text);
     }
 
     fn set_value(&mut self, value: f32) {
-        self.curr = f32::max(0.0, f32::min(1.0, value));
+        self.curr = value.clamp(0.0, 1.0);
     }
 
     fn clear(&mut self) {

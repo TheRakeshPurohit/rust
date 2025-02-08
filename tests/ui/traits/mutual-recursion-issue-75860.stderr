@@ -1,13 +1,9 @@
-error[E0275]: overflow evaluating the requirement `Option<_>: Sized`
-  --> $DIR/mutual-recursion-issue-75860.rs:11:5
+error[E0275]: overflow assigning `_` to `Option<_>`
+  --> $DIR/mutual-recursion-issue-75860.rs:9:33
    |
-LL |     iso(left, right)
-   |     ^^^
-   |
-   = help: consider increasing the recursion limit by adding a `#![recursion_limit = "256"]` attribute to your crate (`mutual_recursion_issue_75860`)
-note: required by a bound in `Option`
-  --> $SRC_DIR/core/src/option.rs:LL:COL
+LL |     let left = |o_a: Option<_>| o_a.unwrap();
+   |                                 ^^^
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0275`.

@@ -43,8 +43,7 @@ fn _macros() {
     macro_rules! noop_expr { ($e:expr) => {}; }
 
     noop_expr!((let 0 = 1));
-    //~^ ERROR `let` expressions in this position are unstable [E0658]
-    //~| ERROR expected expression, found `let` statement
+    //~^ ERROR expected expression, found `let` statement
 
     macro_rules! use_expr {
         ($e:expr) => {
@@ -53,10 +52,9 @@ fn _macros() {
         }
     }
     #[cfg(FALSE)] (let 0 = 1);
-    //~^ ERROR `let` expressions in this position are unstable [E0658]
-    //~| ERROR expected expression, found `let` statement
+    //~^ ERROR expected expression, found `let` statement
     use_expr!(let 0 = 1);
-    //~^ ERROR no rules expected the token `let`
+    //~^ ERROR no rules expected keyword `let`
 }
 
 fn main() {}

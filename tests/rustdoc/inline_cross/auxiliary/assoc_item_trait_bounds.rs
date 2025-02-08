@@ -1,3 +1,5 @@
+use std::ops::AsyncFnMut;
+
 pub trait Main {
     type Item;
 
@@ -16,6 +18,7 @@ pub trait Main {
     type Out12: for<'w> Helper<B<'w> = std::borrow::Cow<'w, str>, A<'w> = bool>;
     type Out13: for<'fst, 'snd> Aid<'snd, Result<'fst> = &'fst mut str>;
     type Out14<P: Copy + Eq, Q: ?Sized>;
+    type Out15: AsyncFnMut(i32) -> bool;
 
     fn make<F>(_: F, _: impl FnMut(&str) -> bool)
     where
@@ -43,4 +46,21 @@ pub trait Helper {
 
 pub trait Aid<'src> {
     type Result<'inter: 'src>;
+}
+
+pub trait Implementee {
+    type Alias<T: Eq>
+    where
+        String: From<T>;
+}
+
+pub struct Implementor;
+
+impl Implementee for Implementor {
+    type Alias<T: Eq> = T
+    where
+        String: From<T>,
+        // We will check that this bound doesn't get turned into an item bound since
+        // associated types in impls are not allowed to have any.
+        Self::Alias<T>: From<Self::Alias<T>>;
 }

@@ -1,4 +1,4 @@
-// run-pass
+//@ run-pass
 
 #![allow(dead_code)]
 
@@ -9,5 +9,5 @@ pub fn main() {
     }
 
     let f = Foo { foo: 10 };
-    format!("{:?}", f);
+    let _ = format!("{:?}", f);
 }

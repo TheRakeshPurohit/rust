@@ -13,6 +13,7 @@
 #![allow(dead_code)]
 
 use std::hash::Hash;
+use std::mem;
 
 use rustc_data_structures::fx::FxHashMap;
 
@@ -132,7 +133,7 @@ where
     /// the associated `UniIndex` from ALL `UniValMap`s.
     ///
     /// Example of such behavior:
-    /// ```
+    /// ```rust,ignore (private type can't be doctested)
     /// let mut keymap = UniKeyMap::<char>::default();
     /// let mut valmap = UniValMap::<char>::default();
     /// // Insert 'a' -> _ -> 'A'
@@ -187,13 +188,16 @@ impl<V> UniValMap<V> {
         self.data.get_mut(idx.idx as usize).and_then(Option::as_mut)
     }
 
-    /// Delete any value associated with this index. Ok even if the index
-    /// has no associated value.
-    pub fn remove(&mut self, idx: UniIndex) {
+    /// Delete any value associated with this index.
+    /// Returns None if the value was not present, otherwise
+    /// returns the previously stored value.
+    pub fn remove(&mut self, idx: UniIndex) -> Option<V> {
         if idx.idx as usize >= self.data.len() {
-            return;
+            return None;
         }
-        self.data[idx.idx as usize] = None;
+        let mut res = None;
+        mem::swap(&mut res, &mut self.data[idx.idx as usize]);
+        res
     }
 }
 
@@ -212,14 +216,15 @@ impl<'a, V> UniValMap<V> {
 
 impl<'a, V> UniEntry<'a, V> {
     /// Insert in the map and get the value.
-    pub fn or_insert_with<F>(&mut self, default: F) -> &mut V
-    where
-        F: FnOnce() -> V,
-    {
+    pub fn or_insert(&mut self, default: V) -> &mut V {
         if self.inner.is_none() {
-            *self.inner = Some(default());
+            *self.inner = Some(default);
         }
         self.inner.as_mut().unwrap()
+    }
+
+    pub fn get(&self) -> Option<&V> {
+        self.inner.as_ref()
     }
 }
 

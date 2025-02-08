@@ -269,18 +269,22 @@
 //!
 //! * [DOT language](https://www.graphviz.org/doc/info/lang.html)
 
+// tidy-alphabetical-start
+#![allow(internal_features)]
 #![doc(
     html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/",
     test(attr(allow(unused_variables), deny(warnings)))
 )]
-#![deny(rustc::untranslatable_diagnostic)]
-#![deny(rustc::diagnostic_outside_of_impl)]
-
-use LabelText::*;
+#![doc(rust_logo)]
+#![feature(rustdoc_internals)]
+#![warn(unreachable_pub)]
+// tidy-alphabetical-end
 
 use std::borrow::Cow;
 use std::io;
 use std::io::prelude::*;
+
+use LabelText::*;
 
 /// The text for a graphviz label on a node or edge.
 pub enum LabelText<'a> {
@@ -518,33 +522,6 @@ impl<'a> LabelText<'a> {
             EscStr(ref s) => format!("\"{}\"", LabelText::escape_str(s)),
             HtmlStr(ref s) => format!("<{s}>"),
         }
-    }
-
-    /// Decomposes content into string suitable for making EscStr that
-    /// yields same content as self. The result obeys the law
-    /// render(`lt`) == render(`EscStr(lt.pre_escaped_content())`) for
-    /// all `lt: LabelText`.
-    fn pre_escaped_content(self) -> Cow<'a, str> {
-        match self {
-            EscStr(s) => s,
-            LabelStr(s) => {
-                if s.contains('\\') {
-                    s.escape_default().to_string().into()
-                } else {
-                    s
-                }
-            }
-            HtmlStr(s) => s,
-        }
-    }
-
-    /// Puts `suffix` on a line below this label, with a blank line separator.
-    pub fn suffix_line(self, suffix: LabelText<'_>) -> LabelText<'static> {
-        let mut prefix = self.pre_escaped_content().into_owned();
-        let suffix = suffix.pre_escaped_content();
-        prefix.push_str(r"\n\n");
-        prefix.push_str(&suffix);
-        EscStr(prefix.into())
     }
 }
 

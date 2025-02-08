@@ -19,7 +19,14 @@
 //! -k list/and@1 fallback/likelysubtags@1 fallback/parents@1 fallback/supplement/co@1 \
 //! --cldr-tag latest --icuexport-tag latest -o src/data
 //! ```
+
+// tidy-alphabetical-start
 #![allow(elided_lifetimes_in_paths)]
+#![allow(internal_features)]
+#![doc(rust_logo)]
+#![feature(rustdoc_internals)]
+// #![warn(unreachable_pub)] // don't use because this crate is mostly generated code
+// tidy-alphabetical-end
 
 mod data {
     include!("data/mod.rs");

@@ -6,7 +6,7 @@ use rustc_errors::Applicability;
 use rustc_hir::Expr;
 use rustc_lint::LateContext;
 use rustc_middle::ty;
-use rustc_span::{sym, Span};
+use rustc_span::{Span, sym};
 
 use super::CLONED_INSTEAD_OF_COPIED;
 
@@ -32,7 +32,7 @@ pub fn check(cx: &LateContext<'_>, expr: &Expr<'_>, recv: &Expr<'_>, span: Span,
         // &T where T: Copy
         ty::Ref(_, ty, _) if is_copy(cx, *ty) => {},
         _ => return,
-    };
+    }
     span_lint_and_sugg(
         cx,
         CLONED_INSTEAD_OF_COPIED,

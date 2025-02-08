@@ -1,15 +1,15 @@
 // This test makes sure that functions get annotated with the proper
 // "tune-cpu" attribute in LLVM.
 
-// no-prefer-dynamic
+//@ no-prefer-dynamic
 //
-// compile-flags: -C no-prepopulate-passes -C panic=abort -C linker-plugin-lto -Cpasses=name-anon-globals -Z tune-cpu=generic
+//@ compile-flags: -C no-prepopulate-passes -C panic=abort -C linker-plugin-lto -Cpasses=name-anon-globals -Z tune-cpu=generic -Copt-level=0
 
 #![crate_type = "staticlib"]
 
 // CHECK-LABEL: define {{.*}} @exported() {{.*}} #0
 #[no_mangle]
-pub extern fn exported() {
+pub extern "C" fn exported() {
     not_exported();
 }
 

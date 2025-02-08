@@ -1,4 +1,5 @@
-// build-pass
+//@ build-pass
+//@ compile-flags: -Znext-solver
 
 #![feature(const_trait_impl)]
 

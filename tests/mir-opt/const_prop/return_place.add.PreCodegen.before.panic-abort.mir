@@ -14,3 +14,5 @@ fn add() -> u32 {
         return;
     }
 }
+
+ALLOC0 (size: 8, align: 4) { .. }

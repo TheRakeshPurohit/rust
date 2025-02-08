@@ -25,7 +25,7 @@ pub(crate) fn make_raw_string(acc: &mut Assists, ctx: &AssistContext<'_>) -> Opt
     if token.is_raw() {
         return None;
     }
-    let value = token.value()?;
+    let value = token.value().ok()?;
     let target = token.syntax().text_range();
     acc.add(
         AssistId("make_raw_string", AssistKind::RefactorRewrite),
@@ -64,7 +64,7 @@ pub(crate) fn make_usual_string(acc: &mut Assists, ctx: &AssistContext<'_>) -> O
     if !token.is_raw() {
         return None;
     }
-    let value = token.value()?;
+    let value = token.value().ok()?;
     let target = token.syntax().text_range();
     acc.add(
         AssistId("make_usual_string", AssistKind::RefactorRewrite),
@@ -158,9 +158,8 @@ pub(crate) fn remove_hash(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use crate::tests::{check_assist, check_assist_not_applicable, check_assist_target};
-
     use super::*;
+    use crate::tests::{check_assist, check_assist_not_applicable, check_assist_target};
 
     #[test]
     fn make_raw_string_target() {
@@ -399,12 +398,12 @@ string"###;
     }
 
     #[test]
-    fn remove_hash_doesnt_work() {
+    fn remove_hash_does_not_work() {
         check_assist_not_applicable(remove_hash, r#"fn f() { let s = $0"random string"; }"#);
     }
 
     #[test]
-    fn remove_hash_no_hash_doesnt_work() {
+    fn remove_hash_no_hash_does_not_work() {
         check_assist_not_applicable(remove_hash, r#"fn f() { let s = $0r"random string"; }"#);
     }
 

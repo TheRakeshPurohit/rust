@@ -1,5 +1,5 @@
 #![allow(incomplete_features)]
-#![feature(adt_const_params, structural_match)]
+#![feature(adt_const_params, unsized_const_params)]
 
 union Union {
     a: u8,
@@ -11,12 +11,11 @@ impl PartialEq for Union {
     }
 }
 impl Eq for Union {}
-impl std::marker::StructuralEq for Union {}
 
-impl std::marker::ConstParamTy for Union {}
-//~^ ERROR the type `Union` does not `#[derive(PartialEq)]`
+impl std::marker::UnsizedConstParamTy for Union {}
+//~^ ERROR the trait `ConstParamTy` may not be implemented for this type
 
-#[derive(std::marker::ConstParamTy)]
+#[derive(std::marker::UnsizedConstParamTy)]
 //~^ ERROR this trait cannot be derived for unions
 union UnionDerive {
     a: u8,
@@ -28,7 +27,5 @@ impl PartialEq for UnionDerive {
     }
 }
 impl Eq for UnionDerive {}
-impl std::marker::StructuralEq for UnionDerive {}
-
 
 fn main() {}

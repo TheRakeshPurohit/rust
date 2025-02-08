@@ -1,5 +1,5 @@
-// build-pass (FIXME(62277): could be check-pass?)
-// aux-build:test-macros.rs
+//@ check-pass
+//@ proc-macro: test-macros.rs
 
 extern crate test_macros;
 

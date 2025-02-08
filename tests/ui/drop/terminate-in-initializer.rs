@@ -1,6 +1,6 @@
-// run-pass
-// needs-unwind
-// ignore-emscripten no threads support
+//@ run-pass
+//@ needs-unwind
+//@ needs-threads
 
 // Issue #787
 // Don't try to clean up uninitialized locals

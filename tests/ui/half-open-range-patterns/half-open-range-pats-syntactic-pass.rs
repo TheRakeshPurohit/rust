@@ -1,8 +1,6 @@
-// check-pass
+//@ check-pass
 
 // Test the parsing of half-open ranges.
-
-#![feature(exclusive_range_pattern)]
 
 fn main() {}
 

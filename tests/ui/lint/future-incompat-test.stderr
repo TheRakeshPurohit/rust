@@ -4,6 +4,4 @@ warning: unused variable: `x`
    |
 LL |     let x = 1;
    |         ^ help: if this is intentional, prefix it with an underscore: `_x`
-   |
-   = note: `-A unused-variables` implied by `-A unused`
 

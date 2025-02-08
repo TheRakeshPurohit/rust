@@ -1,6 +1,5 @@
-use crate::fmt;
 use crate::iter::{FusedIterator, TrustedLen};
-use crate::marker;
+use crate::{fmt, marker};
 
 /// Creates an iterator that yields nothing.
 ///
@@ -27,6 +26,7 @@ pub const fn empty<T>() -> Empty<T> {
 /// This `struct` is created by the [`empty()`] function. See its documentation for more.
 #[must_use = "iterators are lazy and do nothing unless consumed"]
 #[stable(feature = "iter_empty", since = "1.2.0")]
+#[rustc_diagnostic_item = "IterEmpty"]
 pub struct Empty<T>(marker::PhantomData<fn() -> T>);
 
 #[stable(feature = "core_impl_debug", since = "1.9.0")]

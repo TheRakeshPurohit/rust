@@ -1,7 +1,11 @@
-//@run-rustfix
-
-#![allow(clippy::needless_borrow, clippy::ptr_arg)]
-#![warn(clippy::unnecessary_to_owned)]
+#![allow(
+    clippy::needless_borrow,
+    clippy::needless_borrows_for_generic_args,
+    clippy::ptr_arg,
+    clippy::manual_async_fn,
+    clippy::needless_lifetimes
+)]
+#![warn(clippy::unnecessary_to_owned, clippy::redundant_clone)]
 
 use std::borrow::Cow;
 use std::ffi::{CStr, CString, OsStr, OsString};
@@ -23,6 +27,7 @@ impl AsRef<str> for X {
     }
 }
 
+#[allow(clippy::to_string_trait_impl)]
 impl ToString for X {
     fn to_string(&self) -> String {
         self.0.to_string()
@@ -152,6 +157,25 @@ fn main() {
     require_path(&std::path::PathBuf::from("x"));
     require_str(&String::from("x"));
     require_slice(&[String::from("x")]);
+
+    let slice = [0u8; 1024];
+    let _ref_str: &str = core::str::from_utf8(&slice).expect("not UTF-8");
+    let _ref_str: &str = core::str::from_utf8(b"foo").unwrap();
+    let _ref_str: &str = core::str::from_utf8(b"foo".as_slice()).unwrap();
+    // Expression is of type `&String`, can't suggest `str::from_utf8` here
+    let _ref_string = &String::from_utf8(b"foo".to_vec()).unwrap();
+    macro_rules! arg_from_macro {
+        () => {
+            b"foo".to_vec()
+        };
+    }
+    macro_rules! string_from_utf8_from_macro {
+        () => {
+            &String::from_utf8(b"foo".to_vec()).unwrap()
+        };
+    }
+    let _ref_str: &str = &String::from_utf8(arg_from_macro!()).unwrap();
+    let _ref_str: &str = string_from_utf8_from_macro!();
 }
 
 fn require_c_str(_: &CStr) {}
@@ -261,6 +285,7 @@ mod issue_8507 {
         }
     }
 
+    #[allow(clippy::to_string_trait_impl)]
     impl ToString for Y {
         fn to_string(&self) -> String {
             self.0.to_string()
@@ -334,6 +359,7 @@ mod issue_9317 {
 
     struct Bytes {}
 
+    #[allow(clippy::to_string_trait_impl)]
     impl ToString for Bytes {
         fn to_string(&self) -> String {
             "123".to_string()
@@ -473,4 +499,95 @@ mod issue_10021 {
         let base_iri = Iri::parse(url.to_owned())?;
         Ok(())
     }
+}
+
+mod issue_10033 {
+    #![allow(dead_code)]
+    use std::fmt::Display;
+    use std::ops::Deref;
+
+    fn _main() {
+        let f = Foo;
+
+        // Not actually unnecessary - this calls `Foo`'s `Display` impl, not `str`'s (even though `Foo` does
+        // deref to `str`)
+        foo(&f.to_string());
+    }
+
+    fn foo(s: &str) {
+        println!("{}", s);
+    }
+
+    struct Foo;
+
+    impl Deref for Foo {
+        type Target = str;
+
+        fn deref(&self) -> &Self::Target {
+            "str"
+        }
+    }
+
+    impl Display for Foo {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "Foo")
+        }
+    }
+}
+
+mod issue_11952 {
+    use core::future::{Future, IntoFuture};
+
+    fn foo<'a, T: AsRef<[u8]>>(x: T, y: &'a i32) -> impl 'a + Future<Output = Result<(), ()>> {
+        async move {
+            let _y = y;
+            Ok(())
+        }
+    }
+
+    fn bar() {
+        IntoFuture::into_future(foo([], &0));
+    }
+}
+
+fn borrow_checks() {
+    use std::borrow::Borrow;
+    use std::collections::HashSet;
+
+    fn inner(a: &[&str]) {
+        let mut s = HashSet::from([vec!["a"]]);
+        s.remove(a); //~ ERROR: unnecessary use of `to_vec`
+    }
+
+    let mut s = HashSet::from(["a".to_string()]);
+    s.remove("b"); //~ ERROR: unnecessary use of `to_owned`
+    s.remove("b"); //~ ERROR: unnecessary use of `to_string`
+    // Should not warn.
+    s.remove("b");
+
+    let mut s = HashSet::from([vec!["a"]]);
+    s.remove(["b"].as_slice()); //~ ERROR: unnecessary use of `to_vec`
+    s.remove((&["b"]).as_slice()); //~ ERROR: unnecessary use of `to_vec`
+
+    // Should not warn.
+    s.remove(&["b"].to_vec().clone());
+    s.remove(["a"].as_slice());
+
+    trait SetExt {
+        fn foo<Q: Borrow<str>>(&self, _: &String);
+    }
+
+    impl<K> SetExt for HashSet<K> {
+        fn foo<Q: Borrow<str>>(&self, _: &String) {}
+    }
+
+    // Should not lint!
+    HashSet::<i32>::new().foo::<&str>(&"".to_owned());
+    HashSet::<String>::new().get(&1.to_string());
+}
+
+fn issue13624() -> impl IntoIterator {
+    let cow: Cow<'_, Vec<String>> = Cow::Owned(vec![String::from("foo")]);
+
+    cow.into_owned().into_iter()
 }

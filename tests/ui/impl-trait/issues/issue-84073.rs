@@ -29,5 +29,6 @@ where
 }
 
 fn main() {
-    Race::new(|race| race.when()); //~ ERROR type annotations needed
+    Race::new(|race| race.when());
+    //~^ ERROR overflow assigning `_` to `Option<_>`
 }

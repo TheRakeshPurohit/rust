@@ -1,13 +1,21 @@
-// run-pass
+//@ run-pass
 
-// ignore-wasm32-bare networking not available
-// ignore-sgx ToSocketAddrs cannot be used for DNS Resolution
-// ignore-fuchsia Req. test-harness networking privileges
+//@ ignore-wasm32 networking not available
+//@ ignore-sgx ToSocketAddrs cannot be used for DNS Resolution
+//@ ignore-fuchsia Req. test-harness networking privileges
 
 use std::net::ToSocketAddrs;
 
-fn is_sync<T>(_: T) where T: Sync {}
-fn is_send<T>(_: T) where T: Send {}
+fn is_sync<T>(_: T)
+where
+    T: Sync,
+{
+}
+fn is_send<T>(_: T)
+where
+    T: Send,
+{
+}
 
 macro_rules! all_sync_send {
     ($ctor:expr, $($iter:ident),+) => ({

@@ -1,10 +1,8 @@
-//@run-rustfix
 #![warn(clippy::empty_drop)]
 #![allow(unused)]
 
 // should cause an error
 struct Foo;
-
 
 
 // shouldn't cause an error
@@ -18,7 +16,6 @@ impl Drop for Bar {
 
 // should error
 struct Baz;
-
 
 
 fn main() {}

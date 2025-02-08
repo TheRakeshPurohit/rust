@@ -1,11 +1,10 @@
+use rustc_hir::{Expr, ExprKind, HirId, Stmt, StmtKind};
+use rustc_middle::query::Key;
+use rustc_middle::ty::{self, Ty};
+use rustc_session::{declare_lint, declare_lint_pass};
+
 use crate::lints::MappingToUnit;
 use crate::{LateContext, LateLintPass, LintContext};
-
-use rustc_hir::{Expr, ExprKind, HirId, Stmt, StmtKind};
-use rustc_middle::{
-    query::Key,
-    ty::{self, Ty},
-};
 
 declare_lint! {
     /// The `map_unit_fn` lint checks for `Iterator::map` receive
@@ -61,39 +60,25 @@ impl<'tcx> LateLintPass<'tcx> for MapUnitFn {
                         let fn_ty = cx.tcx.fn_sig(id).skip_binder();
                         let ret_ty = fn_ty.output().skip_binder();
                         if is_unit_type(ret_ty) {
-                            cx.emit_spanned_lint(
-                                MAP_UNIT_FN,
-                                span,
-                                MappingToUnit {
-                                    function_label: cx
-                                        .tcx
-                                        .span_of_impl(*id)
-                                        .unwrap_or(default_span),
-                                    argument_label: args[0].span,
-                                    map_label: arg_ty.default_span(cx.tcx),
-                                    suggestion: path.ident.span,
-                                    replace: "for_each".to_string(),
-                                },
-                            )
+                            cx.emit_span_lint(MAP_UNIT_FN, span, MappingToUnit {
+                                function_label: cx.tcx.span_of_impl(*id).unwrap_or(default_span),
+                                argument_label: args[0].span,
+                                map_label: arg_ty.default_span(cx.tcx),
+                                suggestion: path.ident.span,
+                                replace: "for_each".to_string(),
+                            })
                         }
                     } else if let ty::Closure(id, subs) = arg_ty.kind() {
                         let cl_ty = subs.as_closure().sig();
                         let ret_ty = cl_ty.output().skip_binder();
                         if is_unit_type(ret_ty) {
-                            cx.emit_spanned_lint(
-                                MAP_UNIT_FN,
-                                span,
-                                MappingToUnit {
-                                    function_label: cx
-                                        .tcx
-                                        .span_of_impl(*id)
-                                        .unwrap_or(default_span),
-                                    argument_label: args[0].span,
-                                    map_label: arg_ty.default_span(cx.tcx),
-                                    suggestion: path.ident.span,
-                                    replace: "for_each".to_string(),
-                                },
-                            )
+                            cx.emit_span_lint(MAP_UNIT_FN, span, MappingToUnit {
+                                function_label: cx.tcx.span_of_impl(*id).unwrap_or(default_span),
+                                argument_label: args[0].span,
+                                map_label: arg_ty.default_span(cx.tcx),
+                                suggestion: path.ident.span,
+                                replace: "for_each".to_string(),
+                            })
                         }
                     }
                 }

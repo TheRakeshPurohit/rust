@@ -1,13 +1,11 @@
-// run-pass
-
-#![feature(trait_upcasting)]
+//@ run-pass
 
 trait Foo: PartialEq<i32> + std::fmt::Debug + Send + Sync {
     fn a(&self) -> i32 {
         10
     }
 
-    fn z(&self) -> i32 {
+    fn z(&self) -> i32 { //~ WARN methods `z` and `y` are never used
         11
     }
 
@@ -21,7 +19,7 @@ trait Bar: Foo {
         20
     }
 
-    fn w(&self) -> i32 {
+    fn w(&self) -> i32 { //~ WARN method `w` is never used
         21
     }
 }

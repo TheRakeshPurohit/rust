@@ -1,19 +1,19 @@
-// revisions: current next
-//[next] compile-flags: -Ztrait-solver=next
+//@ revisions: current next
+//@ ignore-compare-mode-next-solver (explicit revisions)
+//@[next] compile-flags: -Znext-solver
 
 #![feature(transmutability)]
 mod assert {
-    use std::mem::{Assume, BikeshedIntrinsicFrom};
-    pub struct Context;
+    use std::mem::{Assume, TransmuteFrom};
 
     pub fn is_transmutable<Src, Dst>()
     where
-        Dst: BikeshedIntrinsicFrom<Src, Context, { Assume::SAFETY }>
+        Dst: TransmuteFrom<Src, { Assume::SAFETY }>
     {}
 
     pub fn is_maybe_transmutable<Src, Dst>()
     where
-        Dst: BikeshedIntrinsicFrom<Src, Context, { Assume::SAFETY.and(Assume::VALIDITY) }>
+        Dst: TransmuteFrom<Src, { Assume::SAFETY.and(Assume::VALIDITY) }>
     {}
 }
 

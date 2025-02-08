@@ -3,7 +3,10 @@
 // requires us to normalize the `Base<<() as Proj>::S>` to `Base<()>` when
 // comparing the supertrait `Derived<()>` to the expected trait.
 
-// build-pass
+//@ build-pass
+//@ revisions: current next
+//@ ignore-compare-mode-next-solver (explicit revisions)
+//@[next] compile-flags: -Znext-solver
 
 trait Proj {
     type S;

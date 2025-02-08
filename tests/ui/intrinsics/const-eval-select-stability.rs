@@ -13,9 +13,9 @@ const fn nothing(){}
 
 #[stable(since = "1.0", feature = "hey")]
 #[rustc_const_stable(since = "1.0", feature = "const_hey")]
-pub const unsafe fn hey() {
+pub const fn hey() {
     const_eval_select((), nothing, log);
-    //~^ ERROR `const_eval_select` is not yet stable as a const fn
+    //~^ ERROR cannot use `#[feature(const_eval_select)]`
 }
 
 fn main() {}

@@ -1,20 +1,14 @@
 // Tests for this module
-#[cfg(all(test, not(target_os = "emscripten")))]
+#[cfg(all(test, not(any(target_os = "emscripten", all(target_os = "wasi", target_env = "p1")))))]
 mod tests;
-
-use crate::io;
-use crate::iter;
-use crate::mem;
-use crate::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use crate::option;
-use crate::slice;
-use crate::sys::net::netc as c;
-use crate::sys_common::net::LookupHost;
-use crate::sys_common::{FromInner, IntoInner};
-use crate::vec;
 
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
+
+use crate::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use crate::sys::net::{LookupHost, netc as c};
+use crate::sys_common::{FromInner, IntoInner};
+use crate::{io, iter, mem, option, slice, vec};
 
 impl FromInner<c::sockaddr_in> for SocketAddrV4 {
     fn from_inner(addr: c::sockaddr_in) -> SocketAddrV4 {

@@ -171,12 +171,13 @@
 /// still be live when `T` gets dropped. The exact details of this analysis are not yet
 /// stably guaranteed and **subject to change**. Currently, the analysis works as follows:
 /// - If `T` has no drop glue, then trivially nothing is required to be live. This is the case if
-///   neither `T` nor any of its (recursive) fields have a destructor (`impl Drop`). [`PhantomData`]
-///   and [`ManuallyDrop`] are considered to never have a destructor, no matter their field type.
+///   neither `T` nor any of its (recursive) fields have a destructor (`impl Drop`). [`PhantomData`],
+///   arrays of length 0 and [`ManuallyDrop`] are considered to never have a destructor, no matter
+///   their field type.
 /// - If `T` has drop glue, then, for all types `U` that are *owned* by any field of `T`,
 ///   recursively add the types and lifetimes that need to be live when `U` gets dropped. The set of
 ///   owned types is determined by recursively traversing `T`:
-///   - Recursively descend through `PhantomData`, `Box`, tuples, and arrays (including arrays of
+///   - Recursively descend through `PhantomData`, `Box`, tuples, and arrays (excluding arrays of
 ///     length 0).
 ///   - Stop at reference and raw pointer types as well as function pointers and function items;
 ///     they do not own anything.
@@ -203,6 +204,7 @@
 #[lang = "drop"]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[const_trait]
+#[rustc_const_unstable(feature = "const_destruct", issue = "133214")]
 pub trait Drop {
     /// Executes the destructor for this type.
     ///
@@ -217,8 +219,13 @@ pub trait Drop {
     ///
     /// # Panics
     ///
-    /// Given that a [`panic!`] will call `drop` as it unwinds, any [`panic!`]
-    /// in a `drop` implementation will likely abort.
+    /// Implementations should generally avoid [`panic!`]ing, because `drop()` may itself be called
+    /// during unwinding due to a panic, and if the `drop()` panics in that situation (a “double
+    /// panic”), this will likely abort the program. It is possible to check [`panicking()`] first,
+    /// which may be desirable for a `Drop` implementation that is reporting a bug of the kind
+    /// “you didn't finish using this before it was dropped”; but most types should simply clean up
+    /// their owned allocations or other resources and return normally from `drop()`, regardless of
+    /// what state they are in.
     ///
     /// Note that even if this panics, the value is considered to be dropped;
     /// you must not cause `drop` to be called again. This is normally automatically
@@ -227,8 +234,16 @@ pub trait Drop {
     ///
     /// [E0040]: ../../error_codes/E0040.html
     /// [`panic!`]: crate::panic!
+    /// [`panicking()`]: ../../std/thread/fn.panicking.html
     /// [`mem::drop`]: drop
     /// [`ptr::drop_in_place`]: crate::ptr::drop_in_place
     #[stable(feature = "rust1", since = "1.0.0")]
     fn drop(&mut self);
+}
+
+/// Fallback function to call surface level `Drop::drop` function
+#[allow(drop_bounds)]
+#[lang = "fallback_surface_drop"]
+pub(crate) fn fallback_surface_drop<T: Drop + ?Sized>(x: &mut T) {
+    <T as Drop>::drop(x)
 }

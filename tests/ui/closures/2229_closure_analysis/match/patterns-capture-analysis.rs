@@ -1,4 +1,4 @@
-// edition:2021
+//@ edition:2021
 
 #![feature(rustc_attrs)]
 #![feature(stmt_expr_attributes)]
@@ -13,8 +13,8 @@ fn test_1_should_capture() {
     //~^ First Pass analysis includes:
     //~| Min Capture analysis includes:
         match variant {
-        //~^ NOTE: Capturing variant[] -> ImmBorrow
-        //~| NOTE: Min Capture variant[] -> ImmBorrow
+        //~^ NOTE: Capturing variant[] -> Immutable
+        //~| NOTE: Min Capture variant[] -> Immutable
             Some(_) => {}
             _ => {}
         }
@@ -64,9 +64,9 @@ fn test_6_should_capture_single_variant() {
     //~^ First Pass analysis includes:
     //~| Min Capture analysis includes:
         match variant {
-            //~^ NOTE: Capturing variant[] -> ImmBorrow
-            //~| NOTE: Capturing variant[(0, 0)] -> ImmBorrow
-            //~| NOTE: Min Capture variant[] -> ImmBorrow
+            //~^ NOTE: Capturing variant[] -> Immutable
+            //~| NOTE: Capturing variant[(0, 0)] -> Immutable
+            //~| NOTE: Min Capture variant[] -> Immutable
             SingleVariant::Points(a) => {
                 println!("{:?}", a);
             }
@@ -84,6 +84,31 @@ fn test_4_should_not_capture_array() {
     //~^ First Pass analysis includes:
         match array {
             [_,_,_] => {}
+        }
+    };
+    c();
+
+    // We also do not need to capture an array
+    // behind a reference (#112607)
+    let array: &[i32; 3] = &[0; 3];
+    let c = #[rustc_capture_analysis]
+    || {
+    //~^ First Pass analysis includes:
+        match array {
+            [_, _, _] => {}
+        }
+    };
+    c();
+
+    // We should still not insert a read if the array is inside an
+    // irrefutable pattern
+    struct Foo<T>(T);
+    let f = &Foo(&[10; 3]);
+    let c = #[rustc_capture_analysis]
+    || {
+    //~^ First Pass analysis includes:
+        match f {
+            Foo([_, _, _]) => ()
         }
     };
     c();
@@ -106,8 +131,8 @@ fn test_5_should_capture_multi_variant() {
     //~^ First Pass analysis includes:
     //~| Min Capture analysis includes:
         match variant {
-        //~^ NOTE: Capturing variant[] -> ImmBorrow
-        //~| NOTE: Min Capture variant[] -> ImmBorrow
+        //~^ NOTE: Capturing variant[] -> Immutable
+        //~| NOTE: Min Capture variant[] -> Immutable
             MVariant::A => {}
             _ => {}
         }
@@ -124,8 +149,8 @@ fn test_7_should_capture_slice_len() {
     //~^ First Pass analysis includes:
     //~| Min Capture analysis includes:
         match slice {
-            //~^ NOTE: Capturing slice[] -> ImmBorrow
-            //~| NOTE: Min Capture slice[] -> ImmBorrow
+            //~^ NOTE: Capturing slice[] -> Immutable
+            //~| NOTE: Min Capture slice[] -> Immutable
             [_,_,_] => {},
             _ => {}
         }
@@ -136,8 +161,8 @@ fn test_7_should_capture_slice_len() {
     //~^ First Pass analysis includes:
     //~| Min Capture analysis includes:
         match slice {
-            //~^ NOTE: Capturing slice[] -> ImmBorrow
-            //~| NOTE: Min Capture slice[] -> ImmBorrow
+            //~^ NOTE: Capturing slice[] -> Immutable
+            //~| NOTE: Min Capture slice[] -> Immutable
             [] => {},
             _ => {}
         }
@@ -148,8 +173,8 @@ fn test_7_should_capture_slice_len() {
     //~^ First Pass analysis includes:
     //~| Min Capture analysis includes:
         match slice {
-            //~^ NOTE: Capturing slice[] -> ImmBorrow
-            //~| NOTE: Min Capture slice[] -> ImmBorrow
+            //~^ NOTE: Capturing slice[] -> Immutable
+            //~| NOTE: Min Capture slice[] -> Immutable
             [_, .. ,_] => {},
             _ => {}
         }

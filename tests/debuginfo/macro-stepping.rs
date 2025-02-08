@@ -1,17 +1,17 @@
-// ignore-windows
-// ignore-android
-// ignore-aarch64
-// min-lldb-version: 310
-// ignore-gdb // Test temporarily ignored due to debuginfo tests being disabled, see PR 47155
+//@ ignore-android
+//@ ignore-aarch64
+//@ min-lldb-version: 1800
+//@ min-gdb-version: 13.0
 
-// aux-build:macro-stepping.rs
+//@ aux-build:macro-stepping.rs
 
 #![allow(unused)]
 
 #[macro_use]
 extern crate macro_stepping; // exports new_scope!()
 
-// compile-flags:-g
+//@ compile-flags:-g -Zmir-enable-passes=-SingleUseConsts
+// SingleUseConsts shouldn't need to be disabled, see #128945
 
 // === GDB TESTS ===================================================================================
 
@@ -56,37 +56,38 @@ extern crate macro_stepping; // exports new_scope!()
 // lldb-command:run
 // lldb-command:next
 // lldb-command:frame select
-// lldb-check:[...]#loc1[...]
+// lldb-check:[...] #loc1 [...]
 // lldb-command:next
 // lldb-command:frame select
-// lldb-check:[...]#loc2[...]
+// lldb-check:[...] #loc2 [...]
 // lldb-command:next
 // lldb-command:frame select
-// lldb-check:[...]#loc3[...]
+// lldb-check:[...] #loc3 [...]
 // lldb-command:next
 // lldb-command:frame select
-// lldb-check:[...]#loc4[...]
+// lldb-check:[...] #loc4 [...]
 // lldb-command:next
 // lldb-command:frame select
-// lldb-check:[...]#loc5[...]
+// lldb-check:[...] #loc5 [...]
 
 // lldb-command:continue
 // lldb-command:step
 // lldb-command:frame select
-// lldb-check:[...]#inc-loc1[...]
+// lldb-check:[...] #inc-loc1 [...]
 // lldb-command:next
 // lldb-command:frame select
-// lldb-check:[...]#inc-loc2[...]
+// lldb-check:[...] #inc-loc2 [...]
 // lldb-command:next
 // lldb-command:frame select
-// lldb-check:[...]#inc-loc1[...]
+// lldb-check:[...] #inc-loc1 [...]
 // lldb-command:next
 // lldb-command:frame select
-// lldb-check:[...]#inc-loc2[...]
+// lldb-check:[...] #inc-loc2 [...]
 // lldb-command:next
 // lldb-command:frame select
-// lldb-check:[...]#inc-loc3[...]
+// lldb-check:[...] #inc-loc3 [...]
 
+#[collapse_debuginfo(yes)]
 macro_rules! foo {
     () => {
         let a = 1; opaque(a);
@@ -95,6 +96,7 @@ macro_rules! foo {
     };
 }
 
+#[collapse_debuginfo(yes)]
 macro_rules! foo2 {
     () => {
         foo!();

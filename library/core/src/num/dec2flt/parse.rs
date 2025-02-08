@@ -1,6 +1,6 @@
 //! Functions to parse floating-point numbers.
 
-use crate::num::dec2flt::common::{is_8digits, ByteSlice};
+use crate::num::dec2flt::common::{ByteSlice, is_8digits};
 use crate::num::dec2flt::float::RawFloat;
 use crate::num::dec2flt::number::Number;
 
@@ -51,9 +51,7 @@ fn try_parse_19digits(s_ref: &mut &[u8], x: &mut u64) {
     let mut s = *s_ref;
 
     while *x < MIN_19DIGIT_INT {
-        // FIXME: Can't use s.split_first() here yet,
-        // see https://github.com/rust-lang/rust/issues/109328
-        if let [c, s_next @ ..] = s {
+        if let Some((c, s_next)) = s.split_first() {
             let digit = c.wrapping_sub(b'0');
 
             if digit < 10 {

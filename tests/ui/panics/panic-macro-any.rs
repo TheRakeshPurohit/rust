@@ -1,6 +1,7 @@
-// run-fail
-// error-pattern:panicked at 'Box<dyn Any>'
-// ignore-emscripten no processes
+//@ run-fail
+//@ error-pattern:panicked
+//@ error-pattern:Box<dyn Any>
+//@ needs-subprocess
 
 #![allow(non_fmt_panics)]
 

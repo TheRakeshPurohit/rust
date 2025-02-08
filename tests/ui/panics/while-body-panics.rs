@@ -1,8 +1,8 @@
 #![allow(while_true)]
 
-// run-fail
-// error-pattern:quux
-// ignore-emscripten no processes
+//@ run-fail
+//@ error-pattern:quux
+//@ needs-subprocess
 
 fn main() {
     let _x: isize = {

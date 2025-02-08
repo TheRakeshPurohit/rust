@@ -1,20 +1,26 @@
-use smallvec::SmallVec;
 use std::fmt;
 
-use rustc_middle::mir::interpret::{alloc_range, AllocId, AllocRange, InterpError};
+use rustc_abi::Size;
+use rustc_data_structures::fx::FxHashSet;
 use rustc_span::{Span, SpanData};
-use rustc_target::abi::Size;
+use smallvec::SmallVec;
 
-use crate::borrow_tracker::{
-    stacked_borrows::{err_sb_ub, Permission},
-    AccessKind, GlobalStateInner, ProtectorKind,
-};
+use crate::borrow_tracker::{GlobalStateInner, ProtectorKind};
 use crate::*;
+
+/// Error reporting
+fn err_sb_ub<'tcx>(
+    msg: String,
+    help: Vec<String>,
+    history: Option<TagHistory>,
+) -> InterpErrorKind<'tcx> {
+    err_machine_stop!(TerminationInfo::StackedBorrowsUb { msg, help, history })
+}
 
 #[derive(Clone, Debug)]
 pub struct AllocHistory {
     id: AllocId,
-    base: (Item, Span),
+    root: (Item, Span),
     creations: smallvec::SmallVec<[Creation; 1]>,
     invalidations: smallvec::SmallVec<[Invalidation; 1]>,
     protectors: smallvec::SmallVec<[Protection; 1]>,
@@ -61,12 +67,15 @@ struct Invalidation {
 #[derive(Clone, Debug)]
 enum InvalidationCause {
     Access(AccessKind),
-    Retag(Permission, RetagCause),
+    Retag(Permission, RetagInfo),
 }
 
 impl Invalidation {
     fn generate_diagnostic(&self) -> (String, SpanData) {
-        let message = if let InvalidationCause::Retag(_, RetagCause::FnEntry) = self.cause {
+        let message = if matches!(
+            self.cause,
+            InvalidationCause::Retag(_, RetagInfo { cause: RetagCause::FnEntry, .. })
+        ) {
             // For a FnEntry retag, our Span points at the caller.
             // See `DiagnosticCx::log_invalidation`.
             format!(
@@ -87,8 +96,8 @@ impl fmt::Display for InvalidationCause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             InvalidationCause::Access(kind) => write!(f, "{kind}"),
-            InvalidationCause::Retag(perm, kind) =>
-                write!(f, "{perm:?} {retag}", retag = kind.summary()),
+            InvalidationCause::Retag(perm, info) =>
+                write!(f, "{perm:?} {retag}", retag = info.summary()),
         }
     }
 }
@@ -106,51 +115,47 @@ pub struct TagHistory {
     pub protected: Option<(String, SpanData)>,
 }
 
-pub struct DiagnosticCxBuilder<'ecx, 'mir, 'tcx> {
+pub struct DiagnosticCxBuilder<'ecx, 'tcx> {
     operation: Operation,
-    machine: &'ecx MiriMachine<'mir, 'tcx>,
+    machine: &'ecx MiriMachine<'tcx>,
 }
 
-pub struct DiagnosticCx<'history, 'ecx, 'mir, 'tcx> {
+pub struct DiagnosticCx<'history, 'ecx, 'tcx> {
     operation: Operation,
-    machine: &'ecx MiriMachine<'mir, 'tcx>,
+    machine: &'ecx MiriMachine<'tcx>,
     history: &'history mut AllocHistory,
     offset: Size,
 }
 
-impl<'ecx, 'mir, 'tcx> DiagnosticCxBuilder<'ecx, 'mir, 'tcx> {
+impl<'ecx, 'tcx> DiagnosticCxBuilder<'ecx, 'tcx> {
     pub fn build<'history>(
         self,
         history: &'history mut AllocHistory,
         offset: Size,
-    ) -> DiagnosticCx<'history, 'ecx, 'mir, 'tcx> {
+    ) -> DiagnosticCx<'history, 'ecx, 'tcx> {
         DiagnosticCx { operation: self.operation, machine: self.machine, history, offset }
     }
 
     pub fn retag(
-        machine: &'ecx MiriMachine<'mir, 'tcx>,
-        cause: RetagCause,
+        machine: &'ecx MiriMachine<'tcx>,
+        info: RetagInfo,
         new_tag: BorTag,
         orig_tag: ProvenanceExtra,
         range: AllocRange,
     ) -> Self {
         let operation =
-            Operation::Retag(RetagOp { cause, new_tag, orig_tag, range, permission: None });
+            Operation::Retag(RetagOp { info, new_tag, orig_tag, range, permission: None });
 
         DiagnosticCxBuilder { machine, operation }
     }
 
-    pub fn read(
-        machine: &'ecx MiriMachine<'mir, 'tcx>,
-        tag: ProvenanceExtra,
-        range: AllocRange,
-    ) -> Self {
+    pub fn read(machine: &'ecx MiriMachine<'tcx>, tag: ProvenanceExtra, range: AllocRange) -> Self {
         let operation = Operation::Access(AccessOp { kind: AccessKind::Read, tag, range });
         DiagnosticCxBuilder { machine, operation }
     }
 
     pub fn write(
-        machine: &'ecx MiriMachine<'mir, 'tcx>,
+        machine: &'ecx MiriMachine<'tcx>,
         tag: ProvenanceExtra,
         range: AllocRange,
     ) -> Self {
@@ -158,14 +163,14 @@ impl<'ecx, 'mir, 'tcx> DiagnosticCxBuilder<'ecx, 'mir, 'tcx> {
         DiagnosticCxBuilder { machine, operation }
     }
 
-    pub fn dealloc(machine: &'ecx MiriMachine<'mir, 'tcx>, tag: ProvenanceExtra) -> Self {
+    pub fn dealloc(machine: &'ecx MiriMachine<'tcx>, tag: ProvenanceExtra) -> Self {
         let operation = Operation::Dealloc(DeallocOp { tag });
         DiagnosticCxBuilder { machine, operation }
     }
 }
 
-impl<'history, 'ecx, 'mir, 'tcx> DiagnosticCx<'history, 'ecx, 'mir, 'tcx> {
-    pub fn unbuild(self) -> DiagnosticCxBuilder<'ecx, 'mir, 'tcx> {
+impl<'history, 'ecx, 'tcx> DiagnosticCx<'history, 'ecx, 'tcx> {
+    pub fn unbuild(self) -> DiagnosticCxBuilder<'ecx, 'tcx> {
         DiagnosticCxBuilder { machine: self.machine, operation: self.operation }
     }
 }
@@ -179,7 +184,7 @@ enum Operation {
 
 #[derive(Debug, Clone)]
 struct RetagOp {
-    cause: RetagCause,
+    info: RetagInfo,
     new_tag: BorTag,
     orig_tag: ProvenanceExtra,
     range: AllocRange,
@@ -187,9 +192,15 @@ struct RetagOp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RetagInfo {
+    pub cause: RetagCause,
+    pub in_field: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RetagCause {
     Normal,
-    FnReturnPlace,
+    InPlaceFnPassing,
     FnEntry,
     TwoPhase,
 }
@@ -207,21 +218,30 @@ struct DeallocOp {
 }
 
 impl AllocHistory {
-    pub fn new(id: AllocId, item: Item, machine: &MiriMachine<'_, '_>) -> Self {
+    pub fn new(id: AllocId, item: Item, machine: &MiriMachine<'_>) -> Self {
         Self {
             id,
-            base: (item, machine.current_span()),
+            root: (item, machine.current_span()),
             creations: SmallVec::new(),
             invalidations: SmallVec::new(),
             protectors: SmallVec::new(),
         }
     }
+
+    pub fn retain(&mut self, live_tags: &FxHashSet<BorTag>) {
+        self.invalidations.retain(|event| live_tags.contains(&event.tag));
+        self.creations.retain(|event| live_tags.contains(&event.retag.new_tag));
+        self.protectors.retain(|event| live_tags.contains(&event.tag));
+    }
 }
 
-impl<'history, 'ecx, 'mir, 'tcx> DiagnosticCx<'history, 'ecx, 'mir, 'tcx> {
+impl<'history, 'ecx, 'tcx> DiagnosticCx<'history, 'ecx, 'tcx> {
     pub fn start_grant(&mut self, perm: Permission) {
         let Operation::Retag(op) = &mut self.operation else {
-            unreachable!("start_grant must only be called during a retag, this is: {:?}", self.operation)
+            unreachable!(
+                "start_grant must only be called during a retag, this is: {:?}",
+                self.operation
+            )
         };
         op.permission = Some(perm);
 
@@ -255,11 +275,11 @@ impl<'history, 'ecx, 'mir, 'tcx> DiagnosticCx<'history, 'ecx, 'mir, 'tcx> {
     pub fn log_invalidation(&mut self, tag: BorTag) {
         let mut span = self.machine.current_span();
         let (range, cause) = match &self.operation {
-            Operation::Retag(RetagOp { cause, range, permission, .. }) => {
-                if *cause == RetagCause::FnEntry {
+            Operation::Retag(RetagOp { info, range, permission, .. }) => {
+                if info.cause == RetagCause::FnEntry {
                     span = self.machine.caller_span();
                 }
-                (*range, InvalidationCause::Retag(permission.unwrap(), *cause))
+                (*range, InvalidationCause::Retag(permission.unwrap(), *info))
             }
             Operation::Access(AccessOp { kind, range, .. }) =>
                 (*range, InvalidationCause::Access(*kind)),
@@ -286,7 +306,8 @@ impl<'history, 'ecx, 'mir, 'tcx> DiagnosticCx<'history, 'ecx, 'mir, 'tcx> {
         tag: BorTag,
         protector_tag: Option<BorTag>,
     ) -> Option<TagHistory> {
-        let Some(created) = self.history
+        let Some(created) = self
+            .history
             .creations
             .iter()
             .rev()
@@ -315,22 +336,27 @@ impl<'history, 'ecx, 'mir, 'tcx> DiagnosticCx<'history, 'ecx, 'mir, 'tcx> {
                         None
                     }
                 })
-            }).or_else(|| {
-                // If we didn't find a retag that created this tag, it might be the base tag of
+            })
+            .or_else(|| {
+                // If we didn't find a retag that created this tag, it might be the root tag of
                 // this allocation.
-                if self.history.base.0.tag() == tag {
+                if self.history.root.0.tag() == tag {
                     Some((
-                        format!("{tag:?} was created here, as the base tag for {:?}", self.history.id),
-                        self.history.base.1.data()
+                        format!(
+                            "{tag:?} was created here, as the root tag for {:?}",
+                            self.history.id
+                        ),
+                        self.history.root.1.data(),
                     ))
                 } else {
                     None
                 }
-            }) else {
-                // But if we don't have a creation event, this is related to a wildcard, and there
-                // is really nothing we can do to help.
-                return None;
-            };
+            })
+        else {
+            // But if we don't have a creation event, this is related to a wildcard, and there
+            // is really nothing we can do to help.
+            return None;
+        };
 
         let invalidated = self.history.invalidations.iter().rev().find_map(|event| {
             if event.tag == tag { Some(event.generate_diagnostic()) } else { None }
@@ -350,7 +376,7 @@ impl<'history, 'ecx, 'mir, 'tcx> DiagnosticCx<'history, 'ecx, 'mir, 'tcx> {
 
     /// Report a descriptive error when `new` could not be granted from `derived_from`.
     #[inline(never)] // This is only called on fatal code paths
-    pub(super) fn grant_error(&self, stack: &Stack) -> InterpError<'tcx> {
+    pub(super) fn grant_error(&self, stack: &Stack) -> InterpErrorKind<'tcx> {
         let Operation::Retag(op) = &self.operation else {
             unreachable!("grant_error should only be called during a retag")
         };
@@ -363,16 +389,20 @@ impl<'history, 'ecx, 'mir, 'tcx> DiagnosticCx<'history, 'ecx, 'mir, 'tcx> {
             self.history.id,
             self.offset.bytes(),
         );
+        let mut helps = vec![operation_summary(&op.info.summary(), self.history.id, op.range)];
+        if op.info.in_field {
+            helps.push(format!("errors for retagging in fields are fairly new; please reach out to us (e.g. at <https://rust-lang.zulipchat.com/#narrow/stream/269128-miri>) if you find this error troubling"));
+        }
         err_sb_ub(
             format!("{action}{}", error_cause(stack, op.orig_tag)),
-            Some(operation_summary(&op.cause.summary(), self.history.id, op.range)),
+            helps,
             op.orig_tag.and_then(|orig_tag| self.get_logs_relevant_to(orig_tag, None)),
         )
     }
 
     /// Report a descriptive error when `access` is not permitted based on `tag`.
     #[inline(never)] // This is only called on fatal code paths
-    pub(super) fn access_error(&self, stack: &Stack) -> InterpError<'tcx> {
+    pub(super) fn access_error(&self, stack: &Stack) -> InterpErrorKind<'tcx> {
         // Deallocation and retagging also do an access as part of their thing, so handle that here, too.
         let op = match &self.operation {
             Operation::Access(op) => op,
@@ -388,49 +418,38 @@ impl<'history, 'ecx, 'mir, 'tcx> DiagnosticCx<'history, 'ecx, 'mir, 'tcx> {
         );
         err_sb_ub(
             format!("{action}{}", error_cause(stack, op.tag)),
-            Some(operation_summary("an access", self.history.id, op.range)),
+            vec![operation_summary("an access", self.history.id, op.range)],
             op.tag.and_then(|tag| self.get_logs_relevant_to(tag, None)),
         )
     }
 
     #[inline(never)] // This is only called on fatal code paths
-    pub(super) fn protector_error(&self, item: &Item, kind: ProtectorKind) -> InterpError<'tcx> {
+    pub(super) fn protector_error(
+        &self,
+        item: &Item,
+        kind: ProtectorKind,
+    ) -> InterpErrorKind<'tcx> {
         let protected = match kind {
             ProtectorKind::WeakProtector => "weakly protected",
             ProtectorKind::StrongProtector => "strongly protected",
         };
-        let call_id = self
-            .machine
-            .threads
-            .all_stacks()
-            .flatten()
-            .map(|frame| {
-                frame.extra.borrow_tracker.as_ref().expect("we should have borrow tracking data")
-            })
-            .find(|frame| frame.protected_tags.contains(&item.tag()))
-            .map(|frame| frame.call_id)
-            .unwrap(); // FIXME: Surely we should find something, but a panic seems wrong here?
         match self.operation {
             Operation::Dealloc(_) =>
-                err_sb_ub(
-                    format!("deallocating while item {item:?} is {protected} by call {call_id:?}",),
-                    None,
-                    None,
-                ),
+                err_sb_ub(format!("deallocating while item {item:?} is {protected}",), vec![], None),
             Operation::Retag(RetagOp { orig_tag: tag, .. })
             | Operation::Access(AccessOp { tag, .. }) =>
                 err_sb_ub(
                     format!(
-                        "not granting access to tag {tag:?} because that would remove {item:?} which is {protected} because it is an argument of call {call_id:?}",
+                        "not granting access to tag {tag:?} because that would remove {item:?} which is {protected}",
                     ),
-                    None,
+                    vec![],
                     tag.and_then(|tag| self.get_logs_relevant_to(tag, Some(item.tag()))),
                 ),
         }
     }
 
     #[inline(never)] // This is only called on fatal code paths
-    pub fn dealloc_error(&self, stack: &Stack) -> InterpError<'tcx> {
+    pub fn dealloc_error(&self, stack: &Stack) -> InterpErrorKind<'tcx> {
         let Operation::Dealloc(op) = &self.operation else {
             unreachable!("dealloc_error should only be called during a deallocation")
         };
@@ -441,7 +460,7 @@ impl<'history, 'ecx, 'mir, 'tcx> DiagnosticCx<'history, 'ecx, 'mir, 'tcx> {
                 alloc_id = self.history.id,
                 cause = error_cause(stack, op.tag),
             ),
-            None,
+            vec![],
             op.tag.and_then(|tag| self.get_logs_relevant_to(tag, None)),
         )
     }
@@ -487,14 +506,18 @@ fn error_cause(stack: &Stack, prov_extra: ProvenanceExtra) -> &'static str {
     }
 }
 
-impl RetagCause {
+impl RetagInfo {
     fn summary(&self) -> String {
-        match self {
+        let mut s = match self.cause {
             RetagCause::Normal => "retag",
             RetagCause::FnEntry => "function-entry retag",
-            RetagCause::FnReturnPlace => "return-place retag",
+            RetagCause::InPlaceFnPassing => "in-place function argument/return passing protection",
             RetagCause::TwoPhase => "two-phase retag",
         }
-        .to_string()
+        .to_string();
+        if self.in_field {
+            s.push_str(" (of a reference/box inside this compound value)");
+        }
+        s
     }
 }

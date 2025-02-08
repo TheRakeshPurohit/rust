@@ -1,18 +1,20 @@
 #![feature(rustc_private)]
 
 extern crate rustc_driver;
+extern crate rustc_log;
+extern crate rustc_session;
 
+extern crate rustc_errors;
 use std::env;
 use std::error::Error;
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::Path;
-use std::path::PathBuf;
-
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use mdbook::book::{parse_summary, BookItem, Chapter};
+use mdbook::book::{BookItem, Chapter, parse_summary};
 use mdbook::{Config, MDBook};
+use rustc_errors::codes::DIAGNOSTICS;
 
 enum OutputFormat {
     HTML,
@@ -36,7 +38,7 @@ fn render_markdown(output_path: &Path) -> Result<(), Box<dyn Error>> {
 
     write!(output_file, "# Rust Compiler Error Index\n")?;
 
-    for (err_code, description) in rustc_error_codes::DIAGNOSTICS.iter() {
+    for (err_code, description) in DIAGNOSTICS.iter() {
         write!(output_file, "## {}\n{}\n", err_code, description)?
     }
 
@@ -83,7 +85,7 @@ This page lists all the error codes emitted by the Rust compiler.
 "
     );
 
-    let err_codes = rustc_error_codes::DIAGNOSTICS;
+    let err_codes = DIAGNOSTICS;
     let mut chapters = Vec::with_capacity(err_codes.len());
 
     for (err_code, explanation) in err_codes.iter() {
@@ -170,7 +172,9 @@ fn parse_args() -> (OutputFormat, PathBuf) {
 }
 
 fn main() {
-    rustc_driver::init_env_logger("RUST_LOG");
+    let handler =
+        rustc_session::EarlyDiagCtxt::new(rustc_session::config::ErrorOutputType::default());
+    rustc_driver::init_logger(&handler, rustc_log::LoggerConfig::from_env("RUST_LOG"));
     let (format, dst) = parse_args();
     let result = main_with_result(format, &dst);
     if let Err(e) = result {

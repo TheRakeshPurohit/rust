@@ -1,12 +1,12 @@
-use hir::{db::ExpandDatabase, InFile};
+use hir::{db::ExpandDatabase, HirFileIdExt, InFile};
 use ide_db::source_change::SourceChange;
+use ide_db::text_edit::TextEdit;
 use syntax::{
     ast::{self, HasArgList},
     AstNode, TextRange,
 };
-use text_edit::TextEdit;
 
-use crate::{fix, Assist, Diagnostic, DiagnosticsContext, Severity};
+use crate::{fix, Assist, Diagnostic, DiagnosticCode, DiagnosticsContext};
 
 // Diagnostic: replace-filter-map-next-with-find-map
 //
@@ -15,12 +15,12 @@ pub(crate) fn replace_filter_map_next_with_find_map(
     ctx: &DiagnosticsContext<'_>,
     d: &hir::ReplaceFilterMapNextWithFindMap,
 ) -> Diagnostic {
-    Diagnostic::new(
-        "replace-filter-map-next-with-find-map",
+    Diagnostic::new_with_syntax_node_ptr(
+        ctx,
+        DiagnosticCode::Clippy("filter_map_next"),
         "replace filter_map(..).next() with find_map(..)",
-        ctx.sema.diagnostics_display_range(InFile::new(d.file, d.next_expr.clone().into())).range,
+        InFile::new(d.file, d.next_expr.into()),
     )
-    .severity(Severity::WeakWarning)
     .with_fixes(fixes(ctx, d))
 }
 
@@ -61,10 +61,10 @@ mod tests {
     };
 
     #[track_caller]
-    pub(crate) fn check_diagnostics(ra_fixture: &str) {
+    pub(crate) fn check_diagnostics(#[rust_analyzer::rust_fixture] ra_fixture: &str) {
         let mut config = DiagnosticsConfig::test_sample();
-        config.disabled.insert("inactive-code".to_string());
-        config.disabled.insert("unresolved-method".to_string());
+        config.disabled.insert("inactive-code".to_owned());
+        config.disabled.insert("E0599".to_owned());
         check_diagnostics_with_config(config, ra_fixture)
     }
 
@@ -74,8 +74,23 @@ mod tests {
             r#"
 //- minicore: iterators
 fn foo() {
-    let m = core::iter::repeat(()).filter_map(|()| Some(92)).next();
-}         //^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ 💡 weak: replace filter_map(..).next() with find_map(..)
+    let _m = core::iter::repeat(()).filter_map(|()| Some(92)).next();
+}          //^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ 💡 weak: replace filter_map(..).next() with find_map(..)
+"#,
+        );
+    }
+
+    #[test]
+    fn replace_filter_map_next_dont_work_for_not_sized_issues_16596() {
+        check_diagnostics(
+            r#"
+//- minicore: iterators, dispatch_from_dyn
+fn foo() {
+    let mut j = [0].into_iter();
+    let i: &mut dyn Iterator<Item = i32>  = &mut j;
+    let dummy_fn = |v| (v > 0).then_some(v + 1);
+    let _res = i.filter_map(dummy_fn).next();
+}
 "#,
         );
     }
@@ -117,7 +132,7 @@ fn foo() {
 fn foo() {
     let mut m = core::iter::repeat(())
         .filter_map(|()| Some(92));
-    let n = m.next();
+    let _n = m.next();
 }
 "#,
         );
@@ -138,5 +153,34 @@ fn foo() {
 }
 "#,
         )
+    }
+
+    #[test]
+    fn respect_lint_attributes_for_clippy_equivalent() {
+        check_diagnostics(
+            r#"
+//- minicore: iterators
+
+fn foo() {
+    #[allow(clippy::filter_map_next)]
+    let _m = core::iter::repeat(()).filter_map(|()| Some(92)).next();
+}
+
+#[deny(clippy::filter_map_next)]
+fn foo() {
+    let _m = core::iter::repeat(()).filter_map(|()| Some(92)).next();
+}          //^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ 💡 error: replace filter_map(..).next() with find_map(..)
+
+fn foo() {
+    let _m = core::iter::repeat(()).filter_map(|()| Some(92)).next();
+}          //^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ 💡 weak: replace filter_map(..).next() with find_map(..)
+
+#[warn(clippy::filter_map_next)]
+fn foo() {
+    let _m = core::iter::repeat(()).filter_map(|()| Some(92)).next();
+}          //^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ 💡 warn: replace filter_map(..).next() with find_map(..)
+
+"#,
+        );
     }
 }

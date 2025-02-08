@@ -1,10 +1,9 @@
 //! This file provides snippet completions, like `pd` => `eprintln!(...)`.
 
-use hir::Documentation;
-use ide_db::{imports::insert_use::ImportScope, SnippetCap};
+use ide_db::{documentation::Documentation, imports::insert_use::ImportScope, SnippetCap};
 
 use crate::{
-    context::{ExprCtx, ItemListKind, PathCompletionCtx, Qualified},
+    context::{ItemListKind, PathCompletionCtx, PathExprCtx, Qualified},
     item::Builder,
     CompletionContext, CompletionItem, CompletionItemKind, Completions, SnippetScope,
 };
@@ -13,7 +12,7 @@ pub(crate) fn complete_expr_snippet(
     acc: &mut Completions,
     ctx: &CompletionContext<'_>,
     path_ctx: &PathCompletionCtx,
-    &ExprCtx { in_block_expr, .. }: &ExprCtx,
+    &PathExprCtx { in_block_expr, .. }: &PathExprCtx,
 ) {
     if !matches!(path_ctx.qualified, Qualified::No) {
         return;
@@ -119,7 +118,8 @@ macro_rules! $1 {
 }
 
 fn snippet(ctx: &CompletionContext<'_>, cap: SnippetCap, label: &str, snippet: &str) -> Builder {
-    let mut item = CompletionItem::new(CompletionItemKind::Snippet, ctx.source_range(), label);
+    let mut item =
+        CompletionItem::new(CompletionItemKind::Snippet, ctx.source_range(), label, ctx.edition);
     item.insert_snippet(cap, snippet);
     item
 }
@@ -130,9 +130,7 @@ fn add_custom_completions(
     cap: SnippetCap,
     scope: SnippetScope,
 ) -> Option<()> {
-    if ImportScope::find_insert_use_container(&ctx.token.parent()?, &ctx.sema).is_none() {
-        return None;
-    }
+    ImportScope::find_insert_use_container(&ctx.token.parent()?, &ctx.sema)?;
     ctx.config.prefix_snippets().filter(|(_, snip)| snip.scope == scope).for_each(
         |(trigger, snip)| {
             let imports = match snip.imports(ctx) {

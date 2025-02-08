@@ -1,12 +1,11 @@
 use clippy_utils::diagnostics::span_lint_and_sugg;
 use clippy_utils::source::snippet;
-use clippy_utils::{is_expr_path_def_path, is_lint_allowed, peel_blocks_with_stmt, SpanlessEq};
-use if_chain::if_chain;
+use clippy_utils::{SpanlessEq, is_expr_path_def_path, is_lint_allowed, peel_blocks_with_stmt};
 use rustc_errors::Applicability;
-use rustc_hir as hir;
 use rustc_hir::{Closure, Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
+use rustc_span::Span;
 
 use std::borrow::{Borrow, Cow};
 
@@ -73,50 +72,48 @@ declare_clippy_lint! {
 declare_lint_pass!(CollapsibleCalls => [COLLAPSIBLE_SPAN_LINT_CALLS]);
 
 impl<'tcx> LateLintPass<'tcx> for CollapsibleCalls {
-    fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx hir::Expr<'_>) {
+    fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
         if is_lint_allowed(cx, COLLAPSIBLE_SPAN_LINT_CALLS, expr.hir_id) {
             return;
         }
 
-        if_chain! {
-            if let ExprKind::Call(func, and_then_args) = expr.kind;
-            if is_expr_path_def_path(cx, func, &["clippy_utils", "diagnostics", "span_lint_and_then"]);
-            if and_then_args.len() == 5;
-            if let ExprKind::Closure(&Closure { body, .. }) = &and_then_args[4].kind;
-            let body = cx.tcx.hir().body(body);
-            let only_expr = peel_blocks_with_stmt(body.value);
-            if let ExprKind::MethodCall(ps, recv, span_call_args, _) = &only_expr.kind;
-            if let ExprKind::Path(..) = recv.kind;
-            then {
-                let and_then_snippets = get_and_then_snippets(cx, and_then_args);
-                let mut sle = SpanlessEq::new(cx).deny_side_effects();
-                match ps.ident.as_str() {
-                    "span_suggestion" if sle.eq_expr(&and_then_args[2], &span_call_args[0]) => {
-                        suggest_suggestion(
-                            cx,
-                            expr,
-                            &and_then_snippets,
-                            &span_suggestion_snippets(cx, span_call_args),
-                        );
-                    },
-                    "span_help" if sle.eq_expr(&and_then_args[2], &span_call_args[0]) => {
-                        let help_snippet = snippet(cx, span_call_args[1].span, r#""...""#);
-                        suggest_help(cx, expr, &and_then_snippets, help_snippet.borrow(), true);
-                    },
-                    "span_note" if sle.eq_expr(&and_then_args[2], &span_call_args[0]) => {
-                        let note_snippet = snippet(cx, span_call_args[1].span, r#""...""#);
-                        suggest_note(cx, expr, &and_then_snippets, note_snippet.borrow(), true);
-                    },
-                    "help" => {
-                        let help_snippet = snippet(cx, span_call_args[0].span, r#""...""#);
-                        suggest_help(cx, expr, &and_then_snippets, help_snippet.borrow(), false);
-                    },
-                    "note" => {
-                        let note_snippet = snippet(cx, span_call_args[0].span, r#""...""#);
-                        suggest_note(cx, expr, &and_then_snippets, note_snippet.borrow(), false);
-                    },
-                    _ => (),
-                }
+        if let ExprKind::Call(func, [call_cx, call_lint, call_sp, call_msg, call_f]) = expr.kind
+            && is_expr_path_def_path(cx, func, &["clippy_utils", "diagnostics", "span_lint_and_then"])
+            && let ExprKind::Closure(&Closure { body, .. }) = call_f.kind
+            && let body = cx.tcx.hir().body(body)
+            && let only_expr = peel_blocks_with_stmt(body.value)
+            && let ExprKind::MethodCall(ps, recv, span_call_args, _) = &only_expr.kind
+            && let ExprKind::Path(..) = recv.kind
+        {
+            let and_then_snippets =
+                get_and_then_snippets(cx, call_cx.span, call_lint.span, call_sp.span, call_msg.span);
+            let mut sle = SpanlessEq::new(cx).deny_side_effects();
+            match ps.ident.as_str() {
+                "span_suggestion" if sle.eq_expr(call_sp, &span_call_args[0]) => {
+                    suggest_suggestion(
+                        cx,
+                        expr,
+                        &and_then_snippets,
+                        &span_suggestion_snippets(cx, span_call_args),
+                    );
+                },
+                "span_help" if sle.eq_expr(call_sp, &span_call_args[0]) => {
+                    let help_snippet = snippet(cx, span_call_args[1].span, r#""...""#);
+                    suggest_help(cx, expr, &and_then_snippets, help_snippet.borrow(), true);
+                },
+                "span_note" if sle.eq_expr(call_sp, &span_call_args[0]) => {
+                    let note_snippet = snippet(cx, span_call_args[1].span, r#""...""#);
+                    suggest_note(cx, expr, &and_then_snippets, note_snippet.borrow(), true);
+                },
+                "help" => {
+                    let help_snippet = snippet(cx, span_call_args[0].span, r#""...""#);
+                    suggest_help(cx, expr, &and_then_snippets, help_snippet.borrow(), false);
+                },
+                "note" => {
+                    let note_snippet = snippet(cx, span_call_args[0].span, r#""...""#);
+                    suggest_note(cx, expr, &and_then_snippets, note_snippet.borrow(), false);
+                },
+                _ => (),
             }
         }
     }
@@ -129,11 +126,17 @@ struct AndThenSnippets<'a> {
     msg: Cow<'a, str>,
 }
 
-fn get_and_then_snippets<'a, 'hir>(cx: &LateContext<'_>, and_then_snippets: &'hir [Expr<'hir>]) -> AndThenSnippets<'a> {
-    let cx_snippet = snippet(cx, and_then_snippets[0].span, "cx");
-    let lint_snippet = snippet(cx, and_then_snippets[1].span, "..");
-    let span_snippet = snippet(cx, and_then_snippets[2].span, "span");
-    let msg_snippet = snippet(cx, and_then_snippets[3].span, r#""...""#);
+fn get_and_then_snippets(
+    cx: &LateContext<'_>,
+    cx_span: Span,
+    lint_span: Span,
+    span_span: Span,
+    msg_span: Span,
+) -> AndThenSnippets<'static> {
+    let cx_snippet = snippet(cx, cx_span, "cx");
+    let lint_snippet = snippet(cx, lint_span, "..");
+    let span_snippet = snippet(cx, span_span, "span");
+    let msg_snippet = snippet(cx, msg_span, r#""...""#);
 
     AndThenSnippets {
         cx: cx_snippet,

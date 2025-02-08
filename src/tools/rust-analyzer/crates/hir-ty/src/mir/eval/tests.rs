@@ -1,12 +1,13 @@
-use base_db::{fixture::WithFixture, FileId};
 use hir_def::db::DefDatabase;
+use span::{Edition, EditionedFileId};
 use syntax::{TextRange, TextSize};
+use test_fixture::WithFixture;
 
 use crate::{db::HirDatabase, test_db::TestDB, Interner, Substitution};
 
 use super::{interpret_mir, MirEvalError};
 
-fn eval_main(db: &TestDB, file_id: FileId) -> Result<(String, String), MirEvalError> {
+fn eval_main(db: &TestDB, file_id: EditionedFileId) -> Result<(String, String), MirEvalError> {
     let module_id = db.module_for_file(file_id);
     let def_map = module_id.def_map(db);
     let scope = &def_map[module_id.local_id].scope;
@@ -14,7 +15,7 @@ fn eval_main(db: &TestDB, file_id: FileId) -> Result<(String, String), MirEvalEr
         .declarations()
         .find_map(|x| match x {
             hir_def::ModuleDefId::FunctionId(x) => {
-                if db.function_data(x).name.display(db).to_string() == "main" {
+                if db.function_data(x).name.display(db, Edition::CURRENT).to_string() == "main" {
                     Some(x)
                 } else {
                     None
@@ -29,17 +30,22 @@ fn eval_main(db: &TestDB, file_id: FileId) -> Result<(String, String), MirEvalEr
             Substitution::empty(Interner),
             db.trait_environment(func_id.into()),
         )
-        .map_err(|e| MirEvalError::MirLowerError(func_id.into(), e))?;
-    let (result, stdout, stderr) = interpret_mir(db, &body, false);
+        .map_err(|e| MirEvalError::MirLowerError(func_id, e))?;
+
+    let (result, output) = interpret_mir(db, body, false, None)?;
     result?;
-    Ok((stdout, stderr))
+    Ok((output.stdout().into_owned(), output.stderr().into_owned()))
 }
 
-fn check_pass(ra_fixture: &str) {
+fn check_pass(#[rust_analyzer::rust_fixture] ra_fixture: &str) {
     check_pass_and_stdio(ra_fixture, "", "");
 }
 
-fn check_pass_and_stdio(ra_fixture: &str, expected_stdout: &str, expected_stderr: &str) {
+fn check_pass_and_stdio(
+    #[rust_analyzer::rust_fixture] ra_fixture: &str,
+    expected_stdout: &str,
+    expected_stderr: &str,
+) {
     let (db, file_ids) = TestDB::with_many_files(ra_fixture);
     let file_id = *file_ids.last().unwrap();
     let x = eval_main(&db, file_id);
@@ -48,8 +54,8 @@ fn check_pass_and_stdio(ra_fixture: &str, expected_stdout: &str, expected_stderr
             let mut err = String::new();
             let line_index = |size: TextSize| {
                 let mut size = u32::from(size) as usize;
-                let mut lines = ra_fixture.lines().enumerate();
-                while let Some((i, l)) = lines.next() {
+                let lines = ra_fixture.lines().enumerate();
+                for (i, l) in lines {
                     if let Some(x) = size.checked_sub(l.len()) {
                         size = x;
                     } else {
@@ -61,7 +67,7 @@ fn check_pass_and_stdio(ra_fixture: &str, expected_stdout: &str, expected_stderr
             let span_formatter = |file, range: TextRange| {
                 format!("{:?} {:?}..{:?}", file, line_index(range.start()), line_index(range.end()))
             };
-            e.pretty_print(&mut err, &db, span_formatter).unwrap();
+            e.pretty_print(&mut err, &db, span_formatter, Edition::CURRENT).unwrap();
             panic!("Error in interpreting: {err}");
         }
         Ok((stdout, stderr)) => {
@@ -69,6 +75,13 @@ fn check_pass_and_stdio(ra_fixture: &str, expected_stdout: &str, expected_stderr
             assert_eq!(stderr, expected_stderr);
         }
     }
+}
+
+fn check_panic(#[rust_analyzer::rust_fixture] ra_fixture: &str, expected_panic: &str) {
+    let (db, file_ids) = TestDB::with_many_files(ra_fixture);
+    let file_id = *file_ids.last().unwrap();
+    let e = eval_main(&db, file_id).unwrap_err();
+    assert_eq!(e.is_panic().unwrap_or_else(|| panic!("unexpected error: {e:?}")), expected_panic);
 }
 
 #[test]
@@ -83,6 +96,43 @@ fn main() {
     let x = foo(2, 3);
 }
         "#,
+    );
+}
+
+#[test]
+fn panic_fmt() {
+    // panic!
+    // -> panic_2021 (builtin macro redirection)
+    //   -> #[lang = "panic_fmt"] core::panicking::panic_fmt (hooked by CTFE for redirection)
+    //   -> core::panicking::const_panic_fmt
+    //     -> #[rustc_const_panic_str] core::panicking::panic_display (hooked by CTFE for builtin panic)
+    //       -> Err(ConstEvalError::Panic)
+    check_panic(
+        r#"
+//- minicore: fmt, panic
+fn main() {
+    panic!("hello, world!");
+}
+    "#,
+        "hello, world!",
+    );
+}
+
+#[test]
+fn panic_display() {
+    // panic!
+    // -> panic_2021 (builtin macro redirection)
+    //   -> #[rustc_const_panic_str] core::panicking::panic_display (hooked by CTFE for builtin panic)
+    //     -> Err(ConstEvalError::Panic)
+    check_panic(
+        r#"
+//- minicore: fmt, panic
+
+fn main() {
+    panic!("{}", "hello, world!");
+}
+    "#,
+        "hello, world!",
     );
 }
 
@@ -179,6 +229,50 @@ fn main() {
     }
 }
     "#,
+    );
+}
+
+#[test]
+fn drop_struct_field() {
+    check_pass(
+        r#"
+//- minicore: drop, add, option, cell, builtin_impls
+
+use core::cell::Cell;
+
+fn should_not_reach() {
+    _ // FIXME: replace this function with panic when that works
+}
+
+struct X<'a>(&'a Cell<i32>);
+impl<'a> Drop for X<'a> {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() + 1)
+    }
+}
+
+struct Tuple<'a>(X<'a>, X<'a>, X<'a>);
+
+fn main() {
+    let s = Cell::new(0);
+    {
+        let x0 = X(&s);
+        let xt = Tuple(x0, X(&s), X(&s));
+        let x1 = xt.1;
+        if s.get() != 0 {
+            should_not_reach();
+        }
+        drop(xt.0);
+        if s.get() != 1 {
+            should_not_reach();
+        }
+    }
+    // FIXME: this should be 3
+    if s.get() != 2 {
+        should_not_reach();
+    }
+}
+"#,
     );
 }
 
@@ -309,7 +403,7 @@ extern "C" {
     fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32;
 }
 
-fn my_cmp(x: &[u8], y: &[u8]) -> i32 {
+fn my_cmp(x: &[u8; 3], y: &[u8; 3]) -> i32 {
     memcmp(x as *const u8, y as *const u8, x.len())
 }
 
@@ -614,6 +708,121 @@ fn main() {
 }
 
 #[test]
+fn self_with_capital_s() {
+    check_pass(
+        r#"
+//- minicore: fn, add, copy
+
+struct S1;
+
+impl S1 {
+    fn f() {
+        Self;
+    }
+}
+
+struct S2 {
+    f1: i32,
+}
+
+impl S2 {
+    fn f() {
+        Self { f1: 5 };
+    }
+}
+
+struct S3(i32);
+
+impl S3 {
+    fn f() {
+        Self(2);
+        Self;
+        let this = Self;
+        this(2);
+    }
+}
+
+fn main() {
+    S1::f();
+    S2::f();
+    S3::f();
+}
+        "#,
+    );
+}
+
+#[test]
+fn syscalls() {
+    check_pass(
+        r#"
+//- minicore: option
+
+extern "C" {
+    pub unsafe extern "C" fn syscall(num: i64, ...) -> i64;
+}
+
+const SYS_getrandom: i64 = 318;
+
+fn should_not_reach() {
+    _ // FIXME: replace this function with panic when that works
+}
+
+fn main() {
+    let mut x: i32 = 0;
+    let r = syscall(SYS_getrandom, &mut x, 4usize, 0);
+    if r != 4 {
+        should_not_reach();
+    }
+}
+
+"#,
+    )
+}
+
+#[test]
+fn posix_getenv() {
+    check_pass(
+        r#"
+//- minicore: sized
+//- /main.rs env:foo=bar
+
+type c_char = u8;
+
+extern "C" {
+    pub fn getenv(s: *const c_char) -> *mut c_char;
+}
+
+fn should_not_reach() {
+    _ // FIXME: replace this function with panic when that works
+}
+
+fn main() {
+    let result = getenv(b"foo\0" as *const _);
+    if *result != b'b' {
+        should_not_reach();
+    }
+    let result = (result as usize + 1) as *const c_char;
+    if *result != b'a' {
+        should_not_reach();
+    }
+    let result = (result as usize + 1) as *const c_char;
+    if *result != b'r' {
+        should_not_reach();
+    }
+    let result = (result as usize + 1) as *const c_char;
+    if *result != 0 {
+        should_not_reach();
+    }
+    let result = getenv(b"not found\0" as *const _);
+    if result as usize != 0 {
+        should_not_reach();
+    }
+}
+"#,
+    );
+}
+
+#[test]
 fn posix_tls() {
     check_pass(
         r#"
@@ -645,7 +854,7 @@ fn main() {
 fn regression_14966() {
     check_pass(
         r#"
-//- minicore: fn, copy, coerce_unsized
+//- minicore: fn, copy, coerce_unsized, dispatch_from_dyn
 trait A<T> {
     fn a(&self) {}
 }
@@ -672,5 +881,34 @@ fn main() {
     C::c(&());
 }
 "#,
+    );
+}
+
+#[test]
+fn long_str_eq_same_prefix() {
+    check_pass_and_stdio(
+        r#"
+//- minicore: slice, index, coerce_unsized
+
+type pthread_key_t = u32;
+type c_void = u8;
+type c_int = i32;
+
+extern "C" {
+    pub fn write(fd: i32, buf: *const u8, count: usize) -> usize;
+}
+
+fn main() {
+    // More than 16 bytes, the size of `i128`.
+    let long_str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab";
+    let output = match long_str {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" => b"true" as &[u8],
+        _ => b"false",
+    };
+    write(1, &output[0], output.len());
+}
+        "#,
+        "false",
+        "",
     );
 }

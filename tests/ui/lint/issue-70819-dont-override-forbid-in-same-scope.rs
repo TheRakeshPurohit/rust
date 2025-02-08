@@ -12,16 +12,16 @@
 // effort for bug like this, which 1. end users are unlikely to run into in the
 // first place, and 2. they won't see the redundant output anyway.
 
-// compile-flags: -Z deduplicate-diagnostics=yes
+//@ compile-flags: -Z deduplicate-diagnostics=yes
 
 #![forbid(forbidden_lint_groups)]
 
 fn forbid_first(num: i32) -> i32 {
     #![forbid(unused)]
     #![deny(unused)]
-    //~^ ERROR: deny(unused) incompatible with previous forbid
-    //~| WARNING being phased out
     #![warn(unused)]
+    //~^ ERROR: warn(unused) incompatible with previous forbid
+    //~| WARNING being phased out
     #![allow(unused)]
 
     num * num

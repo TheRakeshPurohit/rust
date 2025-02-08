@@ -1,7 +1,7 @@
-use crate::convert::From;
 use crate::fmt;
 use crate::marker::{PhantomData, Unsize};
 use crate::ops::{CoerceUnsized, DispatchFromDyn};
+use crate::pin::PinCoerceUnsized;
 use crate::ptr::NonNull;
 
 /// A wrapper around a raw non-null `*mut T` that indicates that the possessor
@@ -33,7 +33,7 @@ use crate::ptr::NonNull;
 #[doc(hidden)]
 #[repr(transparent)]
 // Lang item used experimentally by Miri to define the semantics of `Unique`.
-#[cfg_attr(not(bootstrap), lang = "ptr_unique")]
+#[lang = "ptr_unique"]
 pub struct Unique<T: ?Sized> {
     pointer: NonNull<T>,
     // NOTE: this marker has no consequences for variance, but is necessary
@@ -107,6 +107,13 @@ impl<T: ?Sized> Unique<T> {
         self.pointer.as_ptr()
     }
 
+    /// Acquires the underlying `*mut` pointer.
+    #[must_use = "`self` will be dropped if the result is not used"]
+    #[inline]
+    pub const fn as_non_null_ptr(self) -> NonNull<T> {
+        self.pointer
+    }
+
     /// Dereferences the content.
     ///
     /// The resulting lifetime is bound to self so this behaves "as if"
@@ -139,7 +146,7 @@ impl<T: ?Sized> Unique<T> {
     pub const fn cast<U>(self) -> Unique<U> {
         // FIXME(const-hack): replace with `From`
         // SAFETY: is `NonNull`
-        unsafe { Unique::new_unchecked(self.pointer.cast().as_ptr()) }
+        Unique { pointer: self.pointer.cast(), _marker: PhantomData }
     }
 }
 
@@ -159,6 +166,9 @@ impl<T: ?Sized, U: ?Sized> CoerceUnsized<Unique<U>> for Unique<T> where T: Unsiz
 
 #[unstable(feature = "ptr_internals", issue = "none")]
 impl<T: ?Sized, U: ?Sized> DispatchFromDyn<Unique<U>> for Unique<T> where T: Unsize<U> {}
+
+#[unstable(feature = "pin_coerce_unsized_trait", issue = "123430")]
+unsafe impl<T: ?Sized> PinCoerceUnsized for Unique<T> {}
 
 #[unstable(feature = "ptr_internals", issue = "none")]
 impl<T: ?Sized> fmt::Debug for Unique<T> {

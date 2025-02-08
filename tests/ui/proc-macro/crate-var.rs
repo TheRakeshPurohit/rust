@@ -1,6 +1,6 @@
-// run-pass
-// aux-build:double.rs
-// aux-build:external-crate-var.rs
+//@ run-pass
+//@ proc-macro: double.rs
+//@ aux-build:external-crate-var.rs
 
 #![allow(unused)]
 

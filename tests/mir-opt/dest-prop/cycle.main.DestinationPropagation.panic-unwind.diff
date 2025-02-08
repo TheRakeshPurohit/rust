@@ -24,18 +24,18 @@
   
       bb0: {
 -         StorageLive(_1);
--         _1 = val() -> bb1;
+-         _1 = val() -> [return: bb1, unwind continue];
 +         nop;
-+         _6 = val() -> bb1;
++         _6 = val() -> [return: bb1, unwind continue];
       }
   
       bb1: {
 -         StorageLive(_2);
--         _2 = _1;
+-         _2 = copy _1;
 -         StorageLive(_3);
--         _3 = _2;
+-         _3 = copy _2;
 -         StorageLive(_4);
--         _4 = _3;
+-         _4 = copy _3;
 -         _1 = move _4;
 -         StorageDead(_4);
 +         nop;
@@ -48,10 +48,10 @@
 +         nop;
           StorageLive(_5);
 -         StorageLive(_6);
--         _6 = _1;
+-         _6 = copy _1;
 +         nop;
 +         nop;
-          _5 = std::mem::drop::<i32>(move _6) -> bb2;
+          _5 = std::mem::drop::<i32>(move _6) -> [return: bb2, unwind continue];
       }
   
       bb2: {

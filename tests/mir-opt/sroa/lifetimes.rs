@@ -1,6 +1,6 @@
-// unit-test: ScalarReplacementOfAggregates
-// compile-flags: -Cpanic=abort
-// no-prefer-dynamic
+//@ test-mir-pass: ScalarReplacementOfAggregates
+//@ compile-flags: -Cpanic=abort
+//@ no-prefer-dynamic
 
 trait Err {
     type Err;
@@ -15,10 +15,11 @@ struct Foo<T: Err> {
 
 // EMIT_MIR lifetimes.foo.ScalarReplacementOfAggregates.diff
 fn foo<T: Err>() {
-    let foo: Foo<T> = Foo {
-        x: Ok(Box::new(5_u32)),
-        y: 7_u32,
-    };
+    // CHECK-LABEL: fn foo(
+
+    // CHECK-NOT: [foo:_.*]: Foo
+    // CHECK-NOT: Box<dyn std::fmt::Display + 'static>
+    let foo: Foo<T> = Foo { x: Ok(Box::new(5_u32)), y: 7_u32 };
 
     let x = foo.x;
     let y = foo.y;

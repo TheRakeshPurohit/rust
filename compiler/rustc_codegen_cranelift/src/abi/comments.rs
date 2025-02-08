@@ -3,8 +3,7 @@
 
 use std::borrow::Cow;
 
-use rustc_middle::mir;
-use rustc_target::abi::call::PassMode;
+use rustc_target::callconv::PassMode;
 
 use crate::prelude::*;
 
@@ -80,14 +79,7 @@ pub(super) fn add_local_place_comments<'tcx>(
         return;
     }
     let TyAndLayout { ty, layout } = place.layout();
-    let rustc_target::abi::LayoutS {
-        size,
-        align,
-        abi: _,
-        variants: _,
-        fields: _,
-        largest_niche: _,
-    } = layout.0.0;
+    let rustc_abi::LayoutData { size, align, .. } = layout.0.0;
 
     let (kind, extra) = place.debug_comment();
 

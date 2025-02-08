@@ -1,4 +1,4 @@
-use clippy_utils::consts::{constant, Constant};
+use clippy_utils::consts::{ConstEvalCtxt, Constant};
 use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::{is_integer_literal, is_path_diagnostic_item};
 use rustc_hir::{Expr, ExprKind};
@@ -28,35 +28,40 @@ pub(super) fn check<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>, arg: &'t
         return false;
     }
 
-    match arg.kind {
+    let casts_peeled = peel_casts(arg);
+    match casts_peeled.kind {
         // Catching:
         // transmute over constants that resolve to `null`.
-        ExprKind::Path(ref _qpath) if matches!(constant(cx, cx.typeck_results(), arg), Some(Constant::RawPtr(0))) => {
+        ExprKind::Path(ref _qpath)
+            if matches!(ConstEvalCtxt::new(cx).eval(casts_peeled), Some(Constant::RawPtr(0))) =>
+        {
             lint_expr(cx, expr);
             true
         },
-
-        // Catching:
-        // `std::mem::transmute(0 as *const i32)`
-        ExprKind::Cast(inner_expr, _cast_ty) if is_integer_literal(inner_expr, 0) => {
-            lint_expr(cx, expr);
-            true
-        },
-
         // Catching:
         // `std::mem::transmute(std::ptr::null::<i32>())`
         ExprKind::Call(func1, []) if is_path_diagnostic_item(cx, func1, sym::ptr_null) => {
             lint_expr(cx, expr);
             true
         },
-
         _ => {
             // FIXME:
             // Also catch transmutations of variables which are known nulls.
             // To do this, MIR const propagation seems to be the better tool.
             // Whenever MIR const prop routines are more developed, this will
             // become available. As of this writing (25/03/19) it is not yet.
+            if is_integer_literal(casts_peeled, 0) {
+                lint_expr(cx, expr);
+                return true;
+            }
             false
         },
+    }
+}
+
+fn peel_casts<'tcx>(expr: &'tcx Expr<'tcx>) -> &'tcx Expr<'tcx> {
+    match &expr.kind {
+        ExprKind::Cast(inner_expr, _) => peel_casts(inner_expr),
+        _ => expr,
     }
 }

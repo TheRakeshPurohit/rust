@@ -1,11 +1,9 @@
-use std::{
-    fmt::{self, Display},
-    path::Path,
-};
+use std::fmt::{self, Display};
+use std::path::Path;
 
 use dynamic_suggestions::DYNAMIC_SUGGESTIONS;
 use glob::Pattern;
-use static_suggestions::STATIC_SUGGESTIONS;
+use static_suggestions::static_suggestions;
 
 mod dynamic_suggestions;
 mod static_suggestions;
@@ -33,13 +31,15 @@ pub fn get_suggestions<T: AsRef<str>>(modified_files: &[T]) -> Vec<Suggestion> {
     let mut suggestions = Vec::new();
 
     // static suggestions
-    for sug in STATIC_SUGGESTIONS.iter() {
-        let glob = Pattern::new(&sug.0).expect("Found invalid glob pattern!");
+    for (globs, sugs) in static_suggestions().iter() {
+        let globs = globs
+            .iter()
+            .map(|glob| Pattern::new(glob).expect("Found invalid glob pattern!"))
+            .collect::<Vec<_>>();
+        let matches_some_glob = |file: &str| globs.iter().any(|glob| glob.matches(file));
 
-        for file in modified_files {
-            if glob.matches(file.as_ref()) {
-                suggestions.extend_from_slice(&sug.1);
-            }
+        if modified_files.iter().map(AsRef::as_ref).any(matches_some_glob) {
+            suggestions.extend_from_slice(sugs);
         }
     }
 

@@ -4,11 +4,10 @@
 //! conflicts between multiple such attributes attached to the same
 //! item.
 
-use crate::hir;
-use crate::{Item, ItemKind, TraitItem, TraitItemKind};
+use std::fmt::{self, Display};
 
 use crate::def::DefKind;
-use std::fmt::{self, Display};
+use crate::{Item, ItemKind, TraitItem, TraitItemKind, hir};
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum GenericParamKind {
@@ -35,8 +34,6 @@ pub enum Target {
     ForeignMod,
     GlobalAsm,
     TyAlias,
-    OpaqueTy,
-    ImplTraitPlaceholder,
     Enum,
     Variant,
     Struct,
@@ -68,25 +65,53 @@ impl Display for Target {
 }
 
 impl Target {
+    pub fn is_associated_item(self) -> bool {
+        match self {
+            Target::AssocConst | Target::AssocTy | Target::Method(_) => true,
+            Target::ExternCrate
+            | Target::Use
+            | Target::Static
+            | Target::Const
+            | Target::Fn
+            | Target::Closure
+            | Target::Mod
+            | Target::ForeignMod
+            | Target::GlobalAsm
+            | Target::TyAlias
+            | Target::Enum
+            | Target::Variant
+            | Target::Struct
+            | Target::Field
+            | Target::Union
+            | Target::Trait
+            | Target::TraitAlias
+            | Target::Impl
+            | Target::Expression
+            | Target::Statement
+            | Target::Arm
+            | Target::ForeignFn
+            | Target::ForeignStatic
+            | Target::ForeignTy
+            | Target::GenericParam(_)
+            | Target::MacroDef
+            | Target::Param
+            | Target::PatField
+            | Target::ExprField => false,
+        }
+    }
+
     pub fn from_item(item: &Item<'_>) -> Target {
         match item.kind {
             ItemKind::ExternCrate(..) => Target::ExternCrate,
             ItemKind::Use(..) => Target::Use,
-            ItemKind::Static(..) => Target::Static,
+            ItemKind::Static { .. } => Target::Static,
             ItemKind::Const(..) => Target::Const,
-            ItemKind::Fn(..) => Target::Fn,
+            ItemKind::Fn { .. } => Target::Fn,
             ItemKind::Macro(..) => Target::MacroDef,
             ItemKind::Mod(..) => Target::Mod,
             ItemKind::ForeignMod { .. } => Target::ForeignMod,
             ItemKind::GlobalAsm(..) => Target::GlobalAsm,
             ItemKind::TyAlias(..) => Target::TyAlias,
-            ItemKind::OpaqueTy(ref opaque) => {
-                if opaque.in_trait {
-                    Target::ImplTraitPlaceholder
-                } else {
-                    Target::OpaqueTy
-                }
-            }
             ItemKind::Enum(..) => Target::Enum,
             ItemKind::Struct(..) => Target::Struct,
             ItemKind::Union(..) => Target::Union,
@@ -101,7 +126,7 @@ impl Target {
         match def_kind {
             DefKind::ExternCrate => Target::ExternCrate,
             DefKind::Use => Target::Use,
-            DefKind::Static(..) => Target::Static,
+            DefKind::Static { .. } => Target::Static,
             DefKind::Const => Target::Const,
             DefKind::Fn => Target::Fn,
             DefKind::Macro(..) => Target::MacroDef,
@@ -109,8 +134,6 @@ impl Target {
             DefKind::ForeignMod => Target::ForeignMod,
             DefKind::GlobalAsm => Target::GlobalAsm,
             DefKind::TyAlias => Target::TyAlias,
-            DefKind::OpaqueTy => Target::OpaqueTy,
-            DefKind::ImplTraitPlaceholder => Target::ImplTraitPlaceholder,
             DefKind::Enum => Target::Enum,
             DefKind::Struct => Target::Struct,
             DefKind::Union => Target::Union,
@@ -164,8 +187,6 @@ impl Target {
             Target::ForeignMod => "foreign module",
             Target::GlobalAsm => "global asm",
             Target::TyAlias => "type alias",
-            Target::OpaqueTy => "opaque type",
-            Target::ImplTraitPlaceholder => "opaque type in trait",
             Target::Enum => "enum",
             Target::Variant => "enum variant",
             Target::Struct => "struct",

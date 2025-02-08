@@ -4,7 +4,7 @@ note: external requirements
 LL |     with_signature(cell, t, |cell, t| require(cell, t));
    |                             ^^^^^^^^^
    |
-   = note: defining type: no_relationships_late::<'?1, '?2, T>::{closure#0} with closure substs [
+   = note: defining type: no_relationships_late::<'?1, '?2, T>::{closure#0} with closure args [
                i32,
                extern "rust-call" fn((std::cell::Cell<&'?3 ()>, T)),
                (),
@@ -26,11 +26,13 @@ LL | |     T: Anything<'b, 'c>,
 error[E0309]: the associated type `<T as Anything<'?5, '?6>>::AssocType` may not live long enough
   --> $DIR/projection-two-region-trait-bound-closure.rs:38:39
    |
+LL | fn no_relationships_late<'a, 'b, 'c, T>(cell: Cell<&'a ()>, t: T)
+   |                          -- the associated type `<T as Anything<'?5, '?6>>::AssocType` must be valid for the lifetime `'a` as defined here...
+...
 LL |     with_signature(cell, t, |cell, t| require(cell, t));
-   |                                       ^^^^^^^^^^^^^^^^
+   |                                       ^^^^^^^^^^^^^^^^ ...so that the type `<T as Anything<'?5, '?6>>::AssocType` will meet its required lifetime bounds
    |
    = help: consider adding an explicit lifetime bound `<T as Anything<'?5, '?6>>::AssocType: 'a`...
-   = note: ...so that the type `<T as Anything<'?5, '?6>>::AssocType` will meet its required lifetime bounds
 
 note: external requirements
   --> $DIR/projection-two-region-trait-bound-closure.rs:48:29
@@ -38,7 +40,7 @@ note: external requirements
 LL |     with_signature(cell, t, |cell, t| require(cell, t));
    |                             ^^^^^^^^^
    |
-   = note: defining type: no_relationships_early::<'?1, '?2, '?3, T>::{closure#0} with closure substs [
+   = note: defining type: no_relationships_early::<'?1, '?2, '?3, T>::{closure#0} with closure args [
                i32,
                extern "rust-call" fn((std::cell::Cell<&'?4 ()>, T)),
                (),
@@ -60,11 +62,13 @@ LL | |     'a: 'a,
 error[E0309]: the associated type `<T as Anything<'?6, '?7>>::AssocType` may not live long enough
   --> $DIR/projection-two-region-trait-bound-closure.rs:48:39
    |
+LL | fn no_relationships_early<'a, 'b, 'c, T>(cell: Cell<&'a ()>, t: T)
+   |                           -- the associated type `<T as Anything<'?6, '?7>>::AssocType` must be valid for the lifetime `'a` as defined here...
+...
 LL |     with_signature(cell, t, |cell, t| require(cell, t));
-   |                                       ^^^^^^^^^^^^^^^^
+   |                                       ^^^^^^^^^^^^^^^^ ...so that the type `<T as Anything<'?6, '?7>>::AssocType` will meet its required lifetime bounds
    |
    = help: consider adding an explicit lifetime bound `<T as Anything<'?6, '?7>>::AssocType: 'a`...
-   = note: ...so that the type `<T as Anything<'?6, '?7>>::AssocType` will meet its required lifetime bounds
 
 note: external requirements
   --> $DIR/projection-two-region-trait-bound-closure.rs:61:29
@@ -72,7 +76,7 @@ note: external requirements
 LL |     with_signature(cell, t, |cell, t| require(cell, t));
    |                             ^^^^^^^^^
    |
-   = note: defining type: projection_outlives::<'?1, '?2, '?3, T>::{closure#0} with closure substs [
+   = note: defining type: projection_outlives::<'?1, '?2, '?3, T>::{closure#0} with closure args [
                i32,
                extern "rust-call" fn((std::cell::Cell<&'?4 ()>, T)),
                (),
@@ -97,7 +101,7 @@ note: external requirements
 LL |     with_signature(cell, t, |cell, t| require(cell, t));
    |                             ^^^^^^^^^
    |
-   = note: defining type: elements_outlive1::<'?1, '?2, '?3, T>::{closure#0} with closure substs [
+   = note: defining type: elements_outlive1::<'?1, '?2, '?3, T>::{closure#0} with closure args [
                i32,
                extern "rust-call" fn((std::cell::Cell<&'?4 ()>, T)),
                (),
@@ -122,7 +126,7 @@ note: external requirements
 LL |     with_signature(cell, t, |cell, t| require(cell, t));
    |                             ^^^^^^^^^
    |
-   = note: defining type: elements_outlive2::<'?1, '?2, '?3, T>::{closure#0} with closure substs [
+   = note: defining type: elements_outlive2::<'?1, '?2, '?3, T>::{closure#0} with closure args [
                i32,
                extern "rust-call" fn((std::cell::Cell<&'?4 ()>, T)),
                (),
@@ -147,7 +151,7 @@ note: external requirements
 LL |     with_signature(cell, t, |cell, t| require(cell, t));
    |                             ^^^^^^^^^
    |
-   = note: defining type: two_regions::<'?1, T>::{closure#0} with closure substs [
+   = note: defining type: two_regions::<'?1, T>::{closure#0} with closure args [
                i32,
                extern "rust-call" fn((std::cell::Cell<&'?2 ()>, T)),
                (),
@@ -178,7 +182,7 @@ LL |     with_signature(cell, t, |cell, t| require(cell, t));
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ argument requires that `'b` must outlive `'a`
    |
    = help: consider adding the following bound: `'b: 'a`
-   = note: requirement occurs because of the type `Cell<&'?8 ()>`, which makes the generic argument `&'?8 ()` invariant
+   = note: requirement occurs because of the type `Cell<&'?6 ()>`, which makes the generic argument `&'?6 ()` invariant
    = note: the struct `Cell<T>` is invariant over the parameter `T`
    = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
 
@@ -188,7 +192,7 @@ note: external requirements
 LL |     with_signature(cell, t, |cell, t| require(cell, t));
    |                             ^^^^^^^^^
    |
-   = note: defining type: two_regions_outlive::<'?1, '?2, T>::{closure#0} with closure substs [
+   = note: defining type: two_regions_outlive::<'?1, '?2, T>::{closure#0} with closure args [
                i32,
                extern "rust-call" fn((std::cell::Cell<&'?3 ()>, T)),
                (),
@@ -213,7 +217,7 @@ note: external requirements
 LL |     with_signature(cell, t, |cell, t| require(cell, t));
    |                             ^^^^^^^^^
    |
-   = note: defining type: one_region::<'?1, T>::{closure#0} with closure substs [
+   = note: defining type: one_region::<'?1, T>::{closure#0} with closure args [
                i32,
                extern "rust-call" fn((std::cell::Cell<&'?2 ()>, T)),
                (),

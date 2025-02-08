@@ -1,15 +1,16 @@
-use crate::infer::canonical::query_response;
-use crate::infer::InferCtxt;
-use crate::traits::query::type_op::TypeOpOutput;
-use crate::traits::ObligationCtxt;
+use std::fmt;
+
 use rustc_errors::ErrorGuaranteed;
 use rustc_infer::infer::region_constraints::RegionConstraintData;
 use rustc_middle::traits::query::NoSolution;
 use rustc_middle::ty::{TyCtxt, TypeFoldable};
-use rustc_span::source_map::DUMMY_SP;
 use rustc_span::Span;
+use tracing::info;
 
-use std::fmt;
+use crate::infer::InferCtxt;
+use crate::infer::canonical::query_response;
+use crate::traits::ObligationCtxt;
+use crate::traits::query::type_op::TypeOpOutput;
 
 pub struct CustomTypeOp<F> {
     closure: F,
@@ -77,23 +78,21 @@ where
     let pre_obligations = infcx.take_registered_region_obligations();
     assert!(
         pre_obligations.is_empty(),
-        "scrape_region_constraints: incoming region obligations = {:#?}",
-        pre_obligations,
+        "scrape_region_constraints: incoming region obligations = {pre_obligations:#?}",
     );
 
     let value = infcx.commit_if_ok(|_| {
-        let ocx = ObligationCtxt::new_in_snapshot(infcx);
+        let ocx = ObligationCtxt::new(infcx);
         let value = op(&ocx).map_err(|_| {
-            infcx.tcx.sess.delay_span_bug(span, format!("error performing operation: {name}"))
+            infcx.dcx().span_delayed_bug(span, format!("error performing operation: {name}"))
         })?;
         let errors = ocx.select_all_or_error();
         if errors.is_empty() {
             Ok(value)
         } else {
-            Err(infcx.tcx.sess.delay_span_bug(
-                DUMMY_SP,
-                format!("errors selecting obligation during MIR typeck: {:?}", errors),
-            ))
+            Err(infcx
+                .dcx()
+                .delayed_bug(format!("errors selecting obligation during MIR typeck: {errors:?}")))
         }
     })?;
 

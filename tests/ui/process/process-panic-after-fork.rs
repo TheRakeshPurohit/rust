@@ -1,11 +1,8 @@
-// run-pass
-// no-prefer-dynamic
-// ignore-wasm32-bare no libc
-// ignore-windows
-// ignore-sgx no libc
-// ignore-emscripten no processes
-// ignore-sgx no processes
-// ignore-fuchsia no fork
+//@ run-pass
+//@ no-prefer-dynamic
+//@ only-unix
+//@ needs-subprocess
+//@ ignore-fuchsia no fork
 
 #![feature(rustc_private)]
 #![feature(never_type)]
@@ -16,13 +13,12 @@
 extern crate libc;
 
 use std::alloc::{GlobalAlloc, Layout};
+use std::ffi::c_int;
 use std::fmt;
 use std::panic::{self, panic_any};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{self, Command, ExitStatus};
 use std::sync::atomic::{AtomicU32, Ordering};
-
-use libc::c_int;
 
 /// This stunt allocator allows us to spot heap allocations in the child.
 struct PidChecking<A> {

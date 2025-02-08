@@ -2,6 +2,7 @@ mod collapsible_match;
 mod infallible_destructuring_match;
 mod manual_filter;
 mod manual_map;
+mod manual_ok_err;
 mod manual_unwrap_or;
 mod manual_utils;
 mod match_as_ref;
@@ -16,6 +17,7 @@ mod match_wild_enum;
 mod match_wild_err_arm;
 mod needless_match;
 mod overlapping_arms;
+mod redundant_guards;
 mod redundant_pattern_match;
 mod rest_pat_in_fully_bound_struct;
 mod significant_drop_in_scrutinee;
@@ -23,26 +25,32 @@ mod single_match;
 mod try_err;
 mod wild_in_or_pats;
 
+use clippy_config::Conf;
 use clippy_utils::msrvs::{self, Msrv};
-use clippy_utils::source::{snippet_opt, walk_span_to_context};
-use clippy_utils::{higher, in_constant, is_direct_expn_of, is_span_match, tokenize_with_text};
-use rustc_hir::{Arm, Expr, ExprKind, Local, MatchSource, Pat};
-use rustc_lexer::TokenKind;
+use clippy_utils::source::walk_span_to_context;
+use clippy_utils::{
+    higher, is_direct_expn_of, is_in_const_context, is_span_match, span_contains_cfg, span_extract_comments,
+};
+use rustc_hir::{Arm, Expr, ExprKind, LetStmt, MatchSource, Pat, PatKind};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
-use rustc_middle::lint::in_external_macro;
-use rustc_session::{declare_tool_lint, impl_lint_pass};
-use rustc_span::{Span, SpanData, SyntaxContext};
+use rustc_session::impl_lint_pass;
+use rustc_span::{SpanData, SyntaxContext};
 
 declare_clippy_lint! {
     /// ### What it does
     /// Checks for matches with a single arm where an `if let`
     /// will usually suffice.
     ///
+    /// This intentionally does not lint if there are comments
+    /// inside of the other arm, so as to allow the user to document
+    /// why having another explicit pattern with an empty body is necessary,
+    /// or because the comments need to be preserved for other reasons.
+    ///
     /// ### Why is this bad?
     /// Just readability – `if let` nests less than a `match`.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # fn bar(stool: &str) {}
     /// # let x = Some("abc");
     /// match x {
@@ -52,7 +60,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # fn bar(stool: &str) {}
     /// # let x = Some("abc");
     /// if let Some(ref foo) = x {
@@ -79,7 +87,7 @@ declare_clippy_lint! {
     /// ### Example
     /// Using `match`:
     ///
-    /// ```rust
+    /// ```no_run
     /// # fn bar(foo: &usize) {}
     /// # let other_ref: usize = 1;
     /// # let x: Option<&usize> = Some(&1);
@@ -91,7 +99,7 @@ declare_clippy_lint! {
     ///
     /// Using `if let` with `else`:
     ///
-    /// ```rust
+    /// ```no_run
     /// # fn bar(foo: &usize) {}
     /// # let other_ref: usize = 1;
     /// # let x: Option<&usize> = Some(&1);
@@ -149,7 +157,7 @@ declare_clippy_lint! {
     /// It makes the code less readable.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # fn foo() {}
     /// # fn bar() {}
     /// let condition: bool = true;
@@ -159,7 +167,7 @@ declare_clippy_lint! {
     /// }
     /// ```
     /// Use if/else instead:
-    /// ```rust
+    /// ```no_run
     /// # fn foo() {}
     /// # fn bar() {}
     /// let condition: bool = true;
@@ -184,7 +192,7 @@ declare_clippy_lint! {
     /// less obvious.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let x = 5;
     /// match x {
     ///     1..=10 => println!("1 ... 10"),
@@ -208,7 +216,7 @@ declare_clippy_lint! {
     /// catching all exceptions in java with `catch(Exception)`
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let x: Result<i32, &str> = Ok(3);
     /// match x {
     ///     Ok(_) => println!("ok"),
@@ -230,7 +238,7 @@ declare_clippy_lint! {
     /// Using `as_ref()` or `as_mut()` instead is shorter.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let x: Option<()> = None;
     ///
     /// let r: Option<&()> = match x {
@@ -240,7 +248,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// let x: Option<()> = None;
     ///
     /// let r: Option<&()> = x.as_ref();
@@ -255,7 +263,7 @@ declare_clippy_lint! {
     /// ### What it does
     /// Checks for wildcard enum matches using `_`.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// New enum variants added by library updates can be missed.
     ///
     /// ### Known problems
@@ -263,7 +271,7 @@ declare_clippy_lint! {
     /// variants, and also may not use correct path to enum if it's not present in the current scope.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # enum Foo { A(usize), B(usize) }
     /// # let x = Foo::B(1);
     /// match x {
@@ -273,7 +281,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # enum Foo { A(usize), B(usize) }
     /// # let x = Foo::B(1);
     /// match x {
@@ -299,7 +307,7 @@ declare_clippy_lint! {
     /// if it's not present in the current scope.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # enum Foo { A, B, C }
     /// # let x = Foo::B;
     /// match x {
@@ -310,7 +318,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # enum Foo { A, B, C }
     /// # let x = Foo::B;
     /// match x {
@@ -334,7 +342,7 @@ declare_clippy_lint! {
     /// It makes the code less readable, especially to spot wildcard pattern use in match arm.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # let s = "foo";
     /// match s {
     ///     "a" => {},
@@ -343,7 +351,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # let s = "foo";
     /// match s {
     ///     "a" => {},
@@ -365,7 +373,7 @@ declare_clippy_lint! {
     /// Just readability – `let` doesn't nest, whereas a `match` does.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// enum Wrapper {
     ///     Data(i32),
     /// }
@@ -378,7 +386,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// The correct use would be:
-    /// ```rust
+    /// ```no_run
     /// enum Wrapper {
     ///     Data(i32),
     /// }
@@ -404,7 +412,7 @@ declare_clippy_lint! {
     /// is actually binding temporary value, bringing a 'dropped while borrowed' error.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # let a = 1;
     /// # let b = 2;
     /// match (a, b) {
@@ -415,7 +423,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # let a = 1;
     /// # let b = 2;
     /// let (c, d) = (a, b);
@@ -430,12 +438,12 @@ declare_clippy_lint! {
     /// ### What it does
     /// Checks for unnecessary '..' pattern binding on struct when all fields are explicitly matched.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// Correctness and readability. It's like having a wildcard pattern after
     /// matching all enum variants explicitly.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # struct A { a: i32 }
     /// let a = A { a: 5 };
     ///
@@ -446,7 +454,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # struct A { a: i32 }
     /// # let a = A { a: 5 };
     /// match a {
@@ -463,22 +471,22 @@ declare_clippy_lint! {
 declare_clippy_lint! {
     /// ### What it does
     /// Lint for redundant pattern matching over `Result`, `Option`,
-    /// `std::task::Poll` or `std::net::IpAddr`
+    /// `std::task::Poll`, `std::net::IpAddr` or `bool`s
     ///
     /// ### Why is this bad?
     /// It's more concise and clear to just use the proper
-    /// utility function
+    /// utility function or using the condition directly
     ///
     /// ### Known problems
-    /// This will change the drop order for the matched type. Both `if let` and
-    /// `while let` will drop the value at the end of the block, both `if` and `while` will drop the
+    /// For suggestions involving bindings in patterns, this will change the drop order for the matched type.
+    /// Both `if let` and `while let` will drop the value at the end of the block, both `if` and `while` will drop the
     /// value before entering the block. For most types this change will not matter, but for a few
     /// types this will not be an acceptable change (e.g. locks). See the
     /// [reference](https://doc.rust-lang.org/reference/destructors.html#drop-scopes) for more about
     /// drop order.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # use std::task::Poll;
     /// # use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     /// if let Ok(_) = Ok::<i32, i32>(42) {}
@@ -493,11 +501,15 @@ declare_clippy_lint! {
     ///     Ok(_) => true,
     ///     Err(_) => false,
     /// };
+    ///
+    /// let cond = true;
+    /// if let true = cond {}
+    /// matches!(cond, true);
     /// ```
     ///
     /// The more idiomatic use would be:
     ///
-    /// ```rust
+    /// ```no_run
     /// # use std::task::Poll;
     /// # use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     /// if Ok::<i32, i32>(42).is_ok() {}
@@ -509,6 +521,10 @@ declare_clippy_lint! {
     /// if IpAddr::V4(Ipv4Addr::LOCALHOST).is_ipv4() {}
     /// if IpAddr::V6(Ipv6Addr::LOCALHOST).is_ipv6() {}
     /// Ok::<i32, i32>(42).is_ok();
+    ///
+    /// let cond = true;
+    /// if cond {}
+    /// cond;
     /// ```
     #[clippy::version = "1.31.0"]
     pub REDUNDANT_PATTERN_MATCHING,
@@ -529,7 +545,7 @@ declare_clippy_lint! {
     /// `cfg` attributes that remove an arm evaluating to `false`.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let x = Some(5);
     ///
     /// let a = match x {
@@ -545,7 +561,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// let x = Some(5);
     /// let a = matches!(x, Some(0));
     /// ```
@@ -559,15 +575,13 @@ declare_clippy_lint! {
     /// ### What it does
     /// Checks for `match` with identical arm bodies.
     ///
+    /// Note: Does not lint on wildcards if the `non_exhaustive_omitted_patterns_lint` feature is
+    /// enabled and disallowed.
+    ///
     /// ### Why is this bad?
     /// This is probably a copy & paste error. If arm bodies
     /// are the same on purpose, you can factor them
     /// [using `|`](https://doc.rust-lang.org/book/patterns.html#multiple-patterns).
-    ///
-    /// ### Known problems
-    /// False positive possible with order dependent `match`
-    /// (see issue
-    /// [#860](https://github.com/rust-lang/rust-clippy/issues/860)).
     ///
     /// ### Example
     /// ```rust,ignore
@@ -655,7 +669,7 @@ declare_clippy_lint! {
     /// It is unnecessarily verbose and complex.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// fn func(opt: Option<Result<u64, String>>) {
     ///     let n = match opt {
     ///         Some(n) => match n {
@@ -667,7 +681,7 @@ declare_clippy_lint! {
     /// }
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// fn func(opt: Option<Result<u64, String>>) {
     ///     let n = match opt {
     ///         Some(Ok(n)) => n,
@@ -689,7 +703,7 @@ declare_clippy_lint! {
     /// Concise code helps focusing on behavior instead of boilerplate.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// let foo: Option<i32> = None;
     /// match foo {
     ///     Some(v) => v,
@@ -698,7 +712,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// let foo: Option<i32> = None;
     /// foo.unwrap_or(1);
     /// ```
@@ -752,7 +766,7 @@ declare_clippy_lint! {
     /// The arm is unreachable, which is likely a mistake
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # let text = "Foo";
     /// match &*text.to_ascii_lowercase() {
     ///     "foo" => {},
@@ -761,7 +775,7 @@ declare_clippy_lint! {
     /// }
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # let text = "Foo";
     /// match &*text.to_ascii_lowercase() {
     ///     "foo" => {},
@@ -777,7 +791,7 @@ declare_clippy_lint! {
 
 declare_clippy_lint! {
     /// ### What it does
-    /// Check for temporaries returned from function calls in a match scrutinee that have the
+    /// Checks for temporaries returned from function calls in a match scrutinee that have the
     /// `clippy::has_significant_drop` attribute.
     ///
     /// ### Why is this bad?
@@ -814,7 +828,7 @@ declare_clippy_lint! {
     /// println!("All done!");
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # use std::sync::Mutex;
     /// # struct State {}
     /// # impl State {
@@ -845,14 +859,14 @@ declare_clippy_lint! {
     /// ### What it does
     /// Checks for usage of `Err(x)?`.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// The `?` operator is designed to allow calls that
     /// can fail to be easily chained. For example, `foo()?.bar()` or
     /// `foo(bar()?)`. Because `Err(x)?` can't be used that way (it will
     /// always return), it is more clear to write `return Err(x)`.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// fn foo(fail: bool) -> Result<i32, String> {
     ///     if fail {
     ///       Err("failed")?;
@@ -862,7 +876,7 @@ declare_clippy_lint! {
     /// ```
     /// Could be written:
     ///
-    /// ```rust
+    /// ```no_run
     /// fn foo(fail: bool) -> Result<i32, String> {
     ///     if fail {
     ///       return Err("failed".into());
@@ -884,14 +898,14 @@ declare_clippy_lint! {
     /// Using the `map` method is clearer and more concise.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// match Some(0) {
     ///     Some(x) => Some(x + 1),
     ///     None => None,
     /// };
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// Some(0).map(|x| x + 1);
     /// ```
     #[clippy::version = "1.52.0"]
@@ -908,7 +922,7 @@ declare_clippy_lint! {
     /// Using the `filter` method is clearer and more concise.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// match Some(0) {
     ///     Some(x) => if x % 2 == 0 {
     ///                     Some(x)
@@ -919,7 +933,7 @@ declare_clippy_lint! {
     /// };
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// Some(0).filter(|&x| x % 2 == 0);
     /// ```
     #[clippy::version = "1.66.0"]
@@ -928,18 +942,80 @@ declare_clippy_lint! {
     "reimplementation of `filter`"
 }
 
-#[derive(Default)]
+declare_clippy_lint! {
+    /// ### What it does
+    /// Checks for unnecessary guards in match expressions.
+    ///
+    /// ### Why is this bad?
+    /// It's more complex and much less readable. Making it part of the pattern can improve
+    /// exhaustiveness checking as well.
+    ///
+    /// ### Example
+    /// ```rust,ignore
+    /// match x {
+    ///     Some(x) if matches!(x, Some(1)) => ..,
+    ///     Some(x) if x == Some(2) => ..,
+    ///     _ => todo!(),
+    /// }
+    /// ```
+    /// Use instead:
+    /// ```rust,ignore
+    /// match x {
+    ///     Some(Some(1)) => ..,
+    ///     Some(Some(2)) => ..,
+    ///     _ => todo!(),
+    /// }
+    /// ```
+    #[clippy::version = "1.73.0"]
+    pub REDUNDANT_GUARDS,
+    complexity,
+    "checks for unnecessary guards in match expressions"
+}
+
+declare_clippy_lint! {
+    /// ### What it does
+    /// Checks for manual implementation of `.ok()` or `.err()`
+    /// on `Result` values.
+    ///
+    /// ### Why is this bad?
+    /// Using `.ok()` or `.err()` rather than a `match` or
+    /// `if let` is less complex and more readable.
+    ///
+    /// ### Example
+    /// ```no_run
+    /// # fn func() -> Result<u32, &'static str> { Ok(0) }
+    /// let a = match func() {
+    ///     Ok(v) => Some(v),
+    ///     Err(_) => None,
+    /// };
+    /// let b = if let Err(v) = func() {
+    ///     Some(v)
+    /// } else {
+    ///     None
+    /// };
+    /// ```
+    /// Use instead:
+    /// ```no_run
+    /// # fn func() -> Result<u32, &'static str> { Ok(0) }
+    /// let a = func().ok();
+    /// let b = func().err();
+    /// ```
+    #[clippy::version = "1.86.0"]
+    pub MANUAL_OK_ERR,
+    complexity,
+    "find manual implementations of `.ok()` or `.err()` on `Result`"
+}
+
 pub struct Matches {
     msrv: Msrv,
     infallible_destructuring_match_linted: bool,
 }
 
 impl Matches {
-    #[must_use]
-    pub fn new(msrv: Msrv) -> Self {
+    pub fn new(conf: &'static Conf) -> Self {
         Self {
-            msrv,
-            ..Matches::default()
+            msrv: conf.msrv.clone(),
+            infallible_destructuring_match_linted: false,
         }
     }
 }
@@ -970,35 +1046,41 @@ impl_lint_pass!(Matches => [
     TRY_ERR,
     MANUAL_MAP,
     MANUAL_FILTER,
+    REDUNDANT_GUARDS,
+    MANUAL_OK_ERR,
 ]);
 
 impl<'tcx> LateLintPass<'tcx> for Matches {
+    #[expect(clippy::too_many_lines)]
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
-        if is_direct_expn_of(expr.span, "matches").is_none() && in_external_macro(cx.sess(), expr.span) {
+        if is_direct_expn_of(expr.span, "matches").is_none() && expr.span.in_external_macro(cx.sess().source_map()) {
             return;
         }
         let from_expansion = expr.span.from_expansion();
 
         if let ExprKind::Match(ex, arms, source) = expr.kind {
-            if is_direct_expn_of(expr.span, "matches").is_some() {
+            if is_direct_expn_of(expr.span, "matches").is_some()
+                && let [arm, _] = arms
+            {
                 redundant_pattern_match::check_match(cx, expr, ex, arms);
+                redundant_pattern_match::check_matches_true(cx, expr, arm, ex);
             }
 
             if source == MatchSource::Normal && !is_span_match(cx, expr.span) {
                 return;
             }
             if matches!(source, MatchSource::Normal | MatchSource::ForLoopDesugar) {
-                significant_drop_in_scrutinee::check(cx, expr, ex, arms, source);
+                significant_drop_in_scrutinee::check_match(cx, expr, ex, arms, source);
             }
 
-            collapsible_match::check_match(cx, arms);
+            collapsible_match::check_match(cx, arms, &self.msrv);
             if !from_expansion {
                 // These don't depend on a relationship between multiple arms
                 match_wild_err_arm::check(cx, ex, arms);
-                wild_in_or_pats::check(cx, arms);
+                wild_in_or_pats::check(cx, ex, arms);
             }
 
-            if source == MatchSource::TryDesugar {
+            if let MatchSource::TryDesugar(_) = source {
                 try_err::check(cx, expr, ex);
             }
 
@@ -1009,7 +1091,28 @@ impl<'tcx> LateLintPass<'tcx> for Matches {
                     }
 
                     redundant_pattern_match::check_match(cx, expr, ex, arms);
-                    single_match::check(cx, ex, arms, expr);
+                    let source_map = cx.tcx.sess.source_map();
+                    let mut match_comments = span_extract_comments(source_map, expr.span);
+                    // We remove comments from inside arms block.
+                    if !match_comments.is_empty() {
+                        for arm in arms {
+                            for comment in span_extract_comments(source_map, arm.body.span) {
+                                if let Some(index) = match_comments
+                                    .iter()
+                                    .enumerate()
+                                    .find(|(_, cm)| **cm == comment)
+                                    .map(|(index, _)| index)
+                                {
+                                    match_comments.remove(index);
+                                }
+                            }
+                        }
+                    }
+                    // If there are still comments, it means they are outside of the arms, therefore
+                    // we should not lint.
+                    if match_comments.is_empty() {
+                        single_match::check(cx, ex, arms, expr);
+                    }
                     match_bool::check(cx, ex, arms, expr);
                     overlapping_arms::check(cx, ex, arms);
                     match_wild_enum::check(cx, ex, arms);
@@ -1017,11 +1120,13 @@ impl<'tcx> LateLintPass<'tcx> for Matches {
                     needless_match::check_match(cx, ex, arms, expr);
                     match_on_vec_items::check(cx, ex);
                     match_str_case_mismatch::check(cx, ex, arms);
+                    redundant_guards::check(cx, arms, &self.msrv);
 
-                    if !in_constant(cx, expr.hir_id) {
-                        manual_unwrap_or::check(cx, expr, ex, arms);
+                    if !is_in_const_context(cx) {
+                        manual_unwrap_or::check_match(cx, expr, ex, arms);
                         manual_map::check_match(cx, expr, ex, arms);
                         manual_filter::check_match(cx, ex, arms, expr);
+                        manual_ok_err::check_match(cx, expr, ex, arms);
                     }
 
                     if self.infallible_destructuring_match_linted {
@@ -1033,7 +1138,8 @@ impl<'tcx> LateLintPass<'tcx> for Matches {
                 match_ref_pats::check(cx, ex, arms.iter().map(|el| el.pat), expr);
             }
         } else if let Some(if_let) = higher::IfLet::hir(cx, expr) {
-            collapsible_match::check_if_let(cx, if_let.let_pat, if_let.if_then, if_let.if_else);
+            collapsible_match::check_if_let(cx, if_let.let_pat, if_let.if_then, if_let.if_else, &self.msrv);
+            significant_drop_in_scrutinee::check_if_let(cx, expr, if_let.let_expr, if_let.if_then, if_let.if_else);
             if !from_expansion {
                 if let Some(else_expr) = if_let.if_else {
                     if self.msrv.meets(msrvs::MATCHES_MACRO) {
@@ -1046,9 +1152,25 @@ impl<'tcx> LateLintPass<'tcx> for Matches {
                             else_expr,
                         );
                     }
-                    if !in_constant(cx, expr.hir_id) {
+                    if !is_in_const_context(cx) {
+                        manual_unwrap_or::check_if_let(
+                            cx,
+                            expr,
+                            if_let.let_pat,
+                            if_let.let_expr,
+                            if_let.if_then,
+                            else_expr,
+                        );
                         manual_map::check_if_let(cx, expr, if_let.let_pat, if_let.let_expr, if_let.if_then, else_expr);
                         manual_filter::check_if_let(
+                            cx,
+                            expr,
+                            if_let.let_pat,
+                            if_let.let_expr,
+                            if_let.if_then,
+                            else_expr,
+                        );
+                        manual_ok_err::check_if_let(
                             cx,
                             expr,
                             if_let.let_pat,
@@ -1064,15 +1186,21 @@ impl<'tcx> LateLintPass<'tcx> for Matches {
                     if_let.let_pat,
                     if_let.let_expr,
                     if_let.if_else.is_some(),
+                    if_let.let_span,
                 );
                 needless_match::check_if_let(cx, expr, &if_let);
             }
-        } else if !from_expansion {
-            redundant_pattern_match::check(cx, expr);
+        } else {
+            if let Some(while_let) = higher::WhileLet::hir(expr) {
+                significant_drop_in_scrutinee::check_while_let(cx, expr, while_let.let_expr, while_let.if_then);
+            }
+            if !from_expansion {
+                redundant_pattern_match::check(cx, expr);
+            }
         }
     }
 
-    fn check_local(&mut self, cx: &LateContext<'tcx>, local: &'tcx Local<'_>) {
+    fn check_local(&mut self, cx: &LateContext<'tcx>, local: &'tcx LetStmt<'_>) {
         self.infallible_destructuring_match_linted |=
             local.els.is_none() && infallible_destructuring_match::check(cx, local);
     }
@@ -1117,8 +1245,8 @@ fn contains_cfg_arm(cx: &LateContext<'_>, e: &Expr<'_>, scrutinee: &Expr<'_>, ar
     //|^
     let found = arm_spans.try_fold(start, |start, range| {
         let Some((end, next_start)) = range else {
-            // Shouldn't happen as macros can't expand to match arms, but treat this as though a `cfg` attribute were
-            // found.
+            // Shouldn't happen as macros can't expand to match arms, but treat this as though a `cfg` attribute
+            // were found.
             return Err(());
         };
         let span = SpanData {
@@ -1145,27 +1273,17 @@ fn contains_cfg_arm(cx: &LateContext<'_>, e: &Expr<'_>, scrutinee: &Expr<'_>, ar
     }
 }
 
-/// Checks if the given span contains a `#[cfg(..)]` attribute
-fn span_contains_cfg(cx: &LateContext<'_>, s: Span) -> bool {
-    let Some(snip) = snippet_opt(cx, s) else {
-        // Assume true. This would require either an invalid span, or one which crosses file boundaries.
-        return true;
-    };
-    let mut iter = tokenize_with_text(&snip);
-
-    // Search for the token sequence [`#`, `[`, `cfg`]
-    while iter.any(|(t, _)| matches!(t, TokenKind::Pound)) {
-        let mut iter = iter.by_ref().skip_while(|(t, _)| {
-            matches!(
-                t,
-                TokenKind::Whitespace | TokenKind::LineComment { .. } | TokenKind::BlockComment { .. }
-            )
-        });
-        if matches!(iter.next(), Some((TokenKind::OpenBracket, _)))
-            && matches!(iter.next(), Some((TokenKind::Ident, "cfg")))
-        {
-            return true;
-        }
+/// Checks if `pat` contains OR patterns that cannot be nested due to a too low MSRV.
+fn pat_contains_disallowed_or(pat: &Pat<'_>, msrv: &Msrv) -> bool {
+    if msrv.meets(msrvs::OR_PATTERNS) {
+        return false;
     }
-    false
+
+    let mut result = false;
+    pat.walk(|p| {
+        let is_or = matches!(p.kind, PatKind::Or(_));
+        result |= is_or;
+        !is_or
+    });
+    result
 }

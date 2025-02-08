@@ -1,7 +1,10 @@
-// run-pass
+//@ run-pass
 #![allow(unused_variables)]
 
 // Test slicing sugar.
+
+// FIXME(static_mut_refs): this could use an atomic
+#![allow(static_mut_refs)]
 
 extern crate core;
 use core::ops::{Index, IndexMut, Range, RangeTo, RangeFrom, RangeFull};

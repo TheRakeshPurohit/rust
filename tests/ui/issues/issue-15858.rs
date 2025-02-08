@@ -1,8 +1,10 @@
-// run-pass
+//@ run-pass
+// FIXME(static_mut_refs): this could use an atomic
+#![allow(static_mut_refs)]
 static mut DROP_RAN: bool = false;
 
 trait Bar {
-    fn do_something(&mut self);
+    fn do_something(&mut self); //~ WARN method `do_something` is never used
 }
 
 struct BarImpl;
@@ -12,7 +14,7 @@ impl Bar for BarImpl {
 }
 
 
-struct Foo<B: Bar>(#[allow(unused_tuple_struct_fields)] B);
+struct Foo<B: Bar>(#[allow(dead_code)] B);
 
 impl<B: Bar> Drop for Foo<B> {
     fn drop(&mut self) {

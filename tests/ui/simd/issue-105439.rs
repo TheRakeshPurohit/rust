@@ -1,17 +1,16 @@
-// run-pass
-// compile-flags: -O -Zverify-llvm-ir
+//@ run-pass
+//@ compile-flags: -O -Zverify-llvm-ir
 
 #![feature(repr_simd)]
-#![feature(platform_intrinsics)]
+#![feature(intrinsics)]
 
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 #[repr(simd)]
 struct i32x4([i32; 4]);
 
-extern "platform-intrinsic" {
-    pub(crate) fn simd_add<T>(x: T, y: T) -> T;
-}
+#[rustc_intrinsic]
+pub(crate) unsafe fn simd_add<T>(x: T, y: T) -> T;
 
 #[inline(always)]
 fn to_array(a: i32x4) -> [i32; 4] {

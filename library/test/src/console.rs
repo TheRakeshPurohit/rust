@@ -5,22 +5,22 @@ use std::io;
 use std::io::prelude::Write;
 use std::time::Instant;
 
-use super::{
-    bench::fmt_bench_samples,
-    cli::TestOpts,
-    event::{CompletedTest, TestEvent},
-    filter_tests,
-    formatters::{JsonFormatter, JunitFormatter, OutputFormatter, PrettyFormatter, TerseFormatter},
-    helpers::{concurrency::get_concurrency, metrics::MetricMap},
-    options::{Options, OutputFormat},
-    run_tests, term,
-    test_result::TestResult,
-    time::{TestExecTime, TestSuiteExecTime},
-    types::{NamePadding, TestDesc, TestDescAndFn},
+use super::bench::fmt_bench_samples;
+use super::cli::TestOpts;
+use super::event::{CompletedTest, TestEvent};
+use super::formatters::{
+    JsonFormatter, JunitFormatter, OutputFormatter, PrettyFormatter, TerseFormatter,
 };
+use super::helpers::concurrency::get_concurrency;
+use super::helpers::metrics::MetricMap;
+use super::options::{Options, OutputFormat};
+use super::test_result::TestResult;
+use super::time::{TestExecTime, TestSuiteExecTime};
+use super::types::{NamePadding, TestDesc, TestDescAndFn};
+use super::{filter_tests, run_tests, term};
 
 /// Generic wrapper over stdout.
-pub enum OutputLocation<T> {
+pub(crate) enum OutputLocation<T> {
     Pretty(Box<term::StdoutTerminal>),
     Raw(T),
 }
@@ -41,31 +41,24 @@ impl<T: Write> Write for OutputLocation<T> {
     }
 }
 
-pub struct ConsoleTestDiscoveryState {
+pub(crate) struct ConsoleTestDiscoveryState {
     pub log_out: Option<File>,
     pub tests: usize,
     pub benchmarks: usize,
     pub ignored: usize,
-    pub options: Options,
 }
 
 impl ConsoleTestDiscoveryState {
-    pub fn new(opts: &TestOpts) -> io::Result<ConsoleTestDiscoveryState> {
+    pub(crate) fn new(opts: &TestOpts) -> io::Result<ConsoleTestDiscoveryState> {
         let log_out = match opts.logfile {
             Some(ref path) => Some(File::create(path)?),
             None => None,
         };
 
-        Ok(ConsoleTestDiscoveryState {
-            log_out,
-            tests: 0,
-            benchmarks: 0,
-            ignored: 0,
-            options: opts.options,
-        })
+        Ok(ConsoleTestDiscoveryState { log_out, tests: 0, benchmarks: 0, ignored: 0 })
     }
 
-    pub fn write_log<F, S>(&mut self, msg: F) -> io::Result<()>
+    pub(crate) fn write_log<F, S>(&mut self, msg: F) -> io::Result<()>
     where
         S: AsRef<str>,
         F: FnOnce() -> S,
@@ -81,7 +74,7 @@ impl ConsoleTestDiscoveryState {
     }
 }
 
-pub struct ConsoleTestState {
+pub(crate) struct ConsoleTestState {
     pub log_out: Option<File>,
     pub total: usize,
     pub passed: usize,
@@ -99,7 +92,7 @@ pub struct ConsoleTestState {
 }
 
 impl ConsoleTestState {
-    pub fn new(opts: &TestOpts) -> io::Result<ConsoleTestState> {
+    pub(crate) fn new(opts: &TestOpts) -> io::Result<ConsoleTestState> {
         let log_out = match opts.logfile {
             Some(ref path) => Some(File::create(path)?),
             None => None,
@@ -123,7 +116,7 @@ impl ConsoleTestState {
         })
     }
 
-    pub fn write_log<F, S>(&mut self, msg: F) -> io::Result<()>
+    pub(crate) fn write_log<F, S>(&mut self, msg: F) -> io::Result<()>
     where
         S: AsRef<str>,
         F: FnOnce() -> S,
@@ -138,7 +131,7 @@ impl ConsoleTestState {
         }
     }
 
-    pub fn write_log_result(
+    pub(crate) fn write_log_result(
         &mut self,
         test: &TestDesc,
         result: &TestResult,
@@ -177,7 +170,7 @@ impl ConsoleTestState {
 }
 
 // List the tests to console, and optionally to logfile. Filters are honored.
-pub fn list_tests_console(opts: &TestOpts, tests: Vec<TestDescAndFn>) -> io::Result<()> {
+pub(crate) fn list_tests_console(opts: &TestOpts, tests: Vec<TestDescAndFn>) -> io::Result<()> {
     let output = match term::stdout() {
         None => OutputLocation::Raw(io::stdout().lock()),
         Some(t) => OutputLocation::Pretty(t),
@@ -199,7 +192,7 @@ pub fn list_tests_console(opts: &TestOpts, tests: Vec<TestDescAndFn>) -> io::Res
         let TestDescAndFn { desc, testfn } = test;
 
         let fntype = match testfn {
-            StaticTestFn(..) | DynTestFn(..) => {
+            StaticTestFn(..) | DynTestFn(..) | StaticBenchAsTestFn(..) | DynBenchAsTestFn(..) => {
                 st.tests += 1;
                 "test"
             }
@@ -322,10 +315,10 @@ pub fn run_tests_console(opts: &TestOpts, tests: Vec<TestDescAndFn>) -> io::Resu
 
     // Prevent the usage of `Instant` in some cases:
     // - It's currently not supported for wasm targets.
-    // - We disable it for miri because it's not available when isolation is enabled.
-    let is_instant_supported = !cfg!(target_family = "wasm") && !cfg!(miri);
+    let is_instant_unsupported =
+        (cfg!(target_family = "wasm") && !cfg!(target_os = "wasi")) || cfg!(target_os = "zkvm");
 
-    let start_time = is_instant_supported.then(Instant::now);
+    let start_time = (!is_instant_unsupported).then(Instant::now);
     run_tests(opts, tests, |x| on_test_event(&x, &mut st, &mut *out))?;
     st.exec_time = start_time.map(|t| TestSuiteExecTime(t.elapsed()));
 

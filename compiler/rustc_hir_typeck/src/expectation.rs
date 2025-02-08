@@ -1,6 +1,5 @@
-use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
 use rustc_middle::ty::{self, Ty};
-use rustc_span::{self, Span};
+use rustc_span::Span;
 
 use super::Expectation::*;
 use super::FnCtxt;
@@ -8,7 +7,7 @@ use super::FnCtxt;
 /// When type-checking an expression, we propagate downward
 /// whatever type hint we are able in the form of an `Expectation`.
 #[derive(Copy, Clone, Debug)]
-pub enum Expectation<'tcx> {
+pub(crate) enum Expectation<'tcx> {
     /// We know nothing about what type this expression should have.
     NoExpectation,
 
@@ -21,8 +20,6 @@ pub enum Expectation<'tcx> {
     /// This rvalue expression will be wrapped in `&` or `Box` and coerced
     /// to `&Ty` or `Box<Ty>`, respectively. `Ty` is `[A]` or `Trait`.
     ExpectRvalueLikeUnsized(Ty<'tcx>),
-
-    IsLast(Span),
 }
 
 impl<'a, 'tcx> Expectation<'tcx> {
@@ -42,10 +39,14 @@ impl<'a, 'tcx> Expectation<'tcx> {
     // an expected type. Otherwise, we might write parts of the type
     // when checking the 'then' block which are incompatible with the
     // 'else' branch.
-    pub(super) fn adjust_for_branches(&self, fcx: &FnCtxt<'a, 'tcx>) -> Expectation<'tcx> {
+    pub(super) fn try_structurally_resolve_and_adjust_for_branches(
+        &self,
+        fcx: &FnCtxt<'a, 'tcx>,
+        span: Span,
+    ) -> Expectation<'tcx> {
         match *self {
             ExpectHasType(ety) => {
-                let ety = fcx.shallow_resolve(ety);
+                let ety = fcx.try_structurally_resolve_type(span, ety);
                 if !ety.is_ty_var() { ExpectHasType(ety) } else { NoExpectation }
             }
             ExpectRvalueLikeUnsized(ety) => ExpectRvalueLikeUnsized(ety),
@@ -58,7 +59,7 @@ impl<'a, 'tcx> Expectation<'tcx> {
     /// be checked higher up, as is the case with `&expr` and `box expr`), but
     /// is useful in determining the concrete type.
     ///
-    /// The primary use case is where the expected type is a fat pointer,
+    /// The primary use case is where the expected type is a wide pointer,
     /// like `&[isize]`. For example, consider the following statement:
     ///
     ///    let x: &[isize] = &[1, 2, 3];
@@ -73,7 +74,8 @@ impl<'a, 'tcx> Expectation<'tcx> {
     /// See the test case `test/ui/coerce-expect-unsized.rs` and #20169
     /// for examples of where this comes up,.
     pub(super) fn rvalue_hint(fcx: &FnCtxt<'a, 'tcx>, ty: Ty<'tcx>) -> Expectation<'tcx> {
-        match fcx.tcx.struct_tail_without_normalization(ty).kind() {
+        // FIXME: This is not right, even in the old solver...
+        match fcx.tcx.struct_tail_raw(ty, |ty| ty, || {}).kind() {
             ty::Slice(_) | ty::Str | ty::Dynamic(..) => ExpectRvalueLikeUnsized(ty),
             _ => ExpectHasType(ty),
         }
@@ -88,13 +90,12 @@ impl<'a, 'tcx> Expectation<'tcx> {
             ExpectCastableToType(t) => ExpectCastableToType(fcx.resolve_vars_if_possible(t)),
             ExpectHasType(t) => ExpectHasType(fcx.resolve_vars_if_possible(t)),
             ExpectRvalueLikeUnsized(t) => ExpectRvalueLikeUnsized(fcx.resolve_vars_if_possible(t)),
-            IsLast(sp) => IsLast(sp),
         }
     }
 
     pub(super) fn to_option(self, fcx: &FnCtxt<'a, 'tcx>) -> Option<Ty<'tcx>> {
         match self.resolve(fcx) {
-            NoExpectation | IsLast(_) => None,
+            NoExpectation => None,
             ExpectCastableToType(ty) | ExpectHasType(ty) | ExpectRvalueLikeUnsized(ty) => Some(ty),
         }
     }
@@ -106,17 +107,13 @@ impl<'a, 'tcx> Expectation<'tcx> {
     pub(super) fn only_has_type(self, fcx: &FnCtxt<'a, 'tcx>) -> Option<Ty<'tcx>> {
         match self {
             ExpectHasType(ty) => Some(fcx.resolve_vars_if_possible(ty)),
-            NoExpectation | ExpectCastableToType(_) | ExpectRvalueLikeUnsized(_) | IsLast(_) => {
-                None
-            }
+            NoExpectation | ExpectCastableToType(_) | ExpectRvalueLikeUnsized(_) => None,
         }
     }
 
     /// Like `only_has_type`, but instead of returning `None` if no
     /// hard constraint exists, creates a fresh type variable.
     pub(super) fn coercion_target_type(self, fcx: &FnCtxt<'a, 'tcx>, span: Span) -> Ty<'tcx> {
-        self.only_has_type(fcx).unwrap_or_else(|| {
-            fcx.next_ty_var(TypeVariableOrigin { kind: TypeVariableOriginKind::MiscVariable, span })
-        })
+        self.only_has_type(fcx).unwrap_or_else(|| fcx.next_ty_var(span))
     }
 }

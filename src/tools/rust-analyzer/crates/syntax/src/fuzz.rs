@@ -4,7 +4,7 @@
 
 use std::str::{self, FromStr};
 
-use text_edit::Indel;
+use parser::Edition;
 
 use crate::{validation, AstNode, SourceFile, TextRange};
 
@@ -14,14 +14,15 @@ fn check_file_invariants(file: &SourceFile) {
 }
 
 pub fn check_parser(text: &str) {
-    let file = SourceFile::parse(text);
+    let file = SourceFile::parse(text, Edition::CURRENT);
     check_file_invariants(&file.tree());
 }
 
 #[derive(Debug, Clone)]
 pub struct CheckReparse {
     text: String,
-    edit: Indel,
+    delete: TextRange,
+    insert: String,
     edited_text: String,
 }
 
@@ -34,7 +35,7 @@ impl CheckReparse {
         let mut lines = data.lines();
         let delete_start = usize::from_str(lines.next()?).ok()? + PREFIX.len();
         let delete_len = usize::from_str(lines.next()?).ok()?;
-        let insert = lines.next()?.to_string();
+        let insert = lines.next()?.to_owned();
         let text = lines.collect::<Vec<_>>().join("\n");
         let text = format!("{PREFIX}{text}{SUFFIX}");
         text.get(delete_start..delete_start.checked_add(delete_len)?)?; // make sure delete is a valid range
@@ -42,16 +43,16 @@ impl CheckReparse {
             TextRange::at(delete_start.try_into().unwrap(), delete_len.try_into().unwrap());
         let edited_text =
             format!("{}{}{}", &text[..delete_start], &insert, &text[delete_start + delete_len..]);
-        let edit = Indel { insert, delete };
-        Some(CheckReparse { text, edit, edited_text })
+        Some(CheckReparse { text, insert, delete, edited_text })
     }
 
+    #[allow(clippy::print_stderr)]
     pub fn run(&self) {
-        let parse = SourceFile::parse(&self.text);
-        let new_parse = parse.reparse(&self.edit);
+        let parse = SourceFile::parse(&self.text, Edition::CURRENT);
+        let new_parse = parse.reparse(self.delete, &self.insert, Edition::CURRENT);
         check_file_invariants(&new_parse.tree());
         assert_eq!(&new_parse.tree().syntax().text().to_string(), &self.edited_text);
-        let full_reparse = SourceFile::parse(&self.edited_text);
+        let full_reparse = SourceFile::parse(&self.edited_text, Edition::CURRENT);
         for (a, b) in
             new_parse.tree().syntax().descendants().zip(full_reparse.tree().syntax().descendants())
         {

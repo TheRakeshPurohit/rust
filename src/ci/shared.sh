@@ -8,7 +8,7 @@
 export MIRRORS_BASE="https://ci-mirrors.rust-lang.org/rustc"
 
 # See https://unix.stackexchange.com/questions/82598
-# Duplicated in docker/dist-various-2/shared.sh
+# Duplicated in docker/scripts/shared.sh
 function retry {
   echo "Attempting with retry:" "$@"
   local n=1
@@ -50,6 +50,11 @@ function isWindows {
 
 function isLinux {
     [[ "${OSTYPE}" = "linux-gnu" ]]
+}
+
+function isKnownToBeMingwBuild {
+    # CI_JOB_NAME must end with "mingw" and optionally `-N` to be considered a MinGW build.
+    isGitHubActions && [[ "${CI_JOB_NAME}" =~ mingw(-[0-9]+)?$ ]]
 }
 
 function isCiBranch {
@@ -131,4 +136,16 @@ function releaseChannel {
     else
         echo $RUST_CI_OVERRIDE_RELEASE_CHANNEL
     fi
+}
+
+# Parse values from src/stage0 file by key
+function parse_stage0_file_by_key {
+    local key="$1"
+    local file="$ci_dir/../stage0"
+    local value=$(awk -F= '{a[$1]=$2} END {print(a["'$key'"])}' $file)
+    if [ -z "$value" ]; then
+        echo "ERROR: Key '$key' not found in '$file'."
+        exit 1
+    fi
+    echo "$value"
 }

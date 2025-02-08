@@ -1,6 +1,4 @@
-// check-pass
-#![feature(const_mut_refs)]
-#![feature(raw_ref_op)]
+//@ check-pass
 
 struct Foo {
     x: usize

@@ -1,7 +1,7 @@
 use cfg::DnfExpr;
 use stdx::format_to;
 
-use crate::{Diagnostic, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 
 // Diagnostic: inactive-code
 //
@@ -15,8 +15,8 @@ pub(crate) fn inactive_code(
         return None;
     }
 
-    let inactive = DnfExpr::new(d.cfg.clone()).why_inactive(&d.opts);
-    let mut message = "code is inactive due to #[cfg] directives".to_string();
+    let inactive = DnfExpr::new(&d.cfg).why_inactive(&d.opts);
+    let mut message = "code is inactive due to #[cfg] directives".to_owned();
 
     if let Some(inactive) = inactive {
         let inactive_reasons = inactive.to_string();
@@ -27,13 +27,12 @@ pub(crate) fn inactive_code(
             format_to!(message, ": {}", inactive);
         }
     }
-
+    // FIXME: This shouldn't be a diagnostic
     let res = Diagnostic::new(
-        "inactive-code",
+        DiagnosticCode::Ra("inactive-code", Severity::WeakWarning),
         message,
-        ctx.sema.diagnostics_display_range(d.node.clone()).range,
+        ctx.sema.diagnostics_display_range(d.node),
     )
-    .severity(Severity::WeakWarning)
     .with_unused(true);
     Some(res)
 }
@@ -42,8 +41,11 @@ pub(crate) fn inactive_code(
 mod tests {
     use crate::{tests::check_diagnostics_with_config, DiagnosticsConfig};
 
-    pub(crate) fn check(ra_fixture: &str) {
-        let config = DiagnosticsConfig::test_sample();
+    pub(crate) fn check(#[rust_analyzer::rust_fixture] ra_fixture: &str) {
+        let config = DiagnosticsConfig {
+            disabled: std::iter::once("unlinked-file".to_owned()).collect(),
+            ..DiagnosticsConfig::test_sample()
+        };
         check_diagnostics_with_config(config, ra_fixture)
     }
 
@@ -61,6 +63,7 @@ fn f() {
     #[cfg(a)] let x = 0; // let statement
   //^^^^^^^^^^^^^^^^^^^^ weak: code is inactive due to #[cfg] directives: a is disabled
 
+    fn abc() {}
     abc(#[cfg(a)] 0);
       //^^^^^^^^^^^ weak: code is inactive due to #[cfg] directives: a is disabled
     let x = Struct {
@@ -168,6 +171,43 @@ union FooBar {
   #[cfg(a)] baz: u32,
 //^^^^^^^^^^^^^^^^^^ weak: code is inactive due to #[cfg] directives: a is disabled
 }
+"#,
+        );
+    }
+
+    #[test]
+    fn modules() {
+        check(
+            r#"
+//- /main.rs
+  #[cfg(outline)] mod outline;
+//^^^^^^^^^^^^^^^^^^^^^^^^^^^^ weak: code is inactive due to #[cfg] directives: outline is disabled
+
+  mod outline_inner;
+//^^^^^^^^^^^^^^^^^^ weak: code is inactive due to #[cfg] directives: outline_inner is disabled
+
+  #[cfg(inline)] mod inline {}
+//^^^^^^^^^^^^^^^^^^^^^^^^^^^^ weak: code is inactive due to #[cfg] directives: inline is disabled
+
+//- /outline_inner.rs
+#![cfg(outline_inner)]
+//- /outline.rs
+"#,
+        );
+    }
+
+    #[test]
+    fn cfg_true_false() {
+        check(
+            r#"
+  #[cfg(false)] fn inactive() {}
+//^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ weak: code is inactive due to #[cfg] directives: false is disabled
+
+  #[cfg(true)] fn active() {}
+
+  #[cfg(any(not(true)), false)] fn inactive2() {}
+//^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ weak: code is inactive due to #[cfg] directives: true is enabled
+
 "#,
         );
     }

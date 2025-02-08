@@ -1,6 +1,5 @@
-// edition:2021
-// compile-flags: -Z drop-tracking
-// build-pass
+//@ edition:2021
+//@ build-pass
 
 use std::collections::HashMap;
 

@@ -2,11 +2,9 @@ use std::assert_matches::assert_matches;
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::TryReserveErrorKind::*;
-use std::ops::Bound;
 use std::ops::Bound::*;
-use std::ops::RangeBounds;
-use std::panic;
-use std::str;
+use std::ops::{Bound, RangeBounds};
+use std::{panic, str};
 
 pub trait IntoCow<'a, B: ?Sized>
 where
@@ -117,30 +115,58 @@ fn test_from_utf8_lossy() {
 }
 
 #[test]
+fn test_fromutf8error_into_lossy() {
+    fn func(input: &[u8]) -> String {
+        String::from_utf8(input.to_owned()).unwrap_or_else(|e| e.into_utf8_lossy())
+    }
+
+    let xs = b"hello";
+    let ys = "hello".to_owned();
+    assert_eq!(func(xs), ys);
+
+    let xs = "ศไทย中华Việt Nam".as_bytes();
+    let ys = "ศไทย中华Việt Nam".to_owned();
+    assert_eq!(func(xs), ys);
+
+    let xs = b"Hello\xC2 There\xFF Goodbye";
+    assert_eq!(func(xs), "Hello\u{FFFD} There\u{FFFD} Goodbye".to_owned());
+
+    let xs = b"Hello\xC0\x80 There\xE6\x83 Goodbye";
+    assert_eq!(func(xs), "Hello\u{FFFD}\u{FFFD} There\u{FFFD} Goodbye".to_owned());
+
+    let xs = b"\xF5foo\xF5\x80bar";
+    assert_eq!(func(xs), "\u{FFFD}foo\u{FFFD}\u{FFFD}bar".to_owned());
+
+    let xs = b"\xF1foo\xF1\x80bar\xF1\x80\x80baz";
+    assert_eq!(func(xs), "\u{FFFD}foo\u{FFFD}bar\u{FFFD}baz".to_owned());
+
+    let xs = b"\xF4foo\xF4\x80bar\xF4\xBFbaz";
+    assert_eq!(func(xs), "\u{FFFD}foo\u{FFFD}bar\u{FFFD}\u{FFFD}baz".to_owned());
+
+    let xs = b"\xF0\x80\x80\x80foo\xF0\x90\x80\x80bar";
+    assert_eq!(func(xs), "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}foo\u{10000}bar".to_owned());
+
+    // surrogates
+    let xs = b"\xED\xA0\x80foo\xED\xBF\xBFbar";
+    assert_eq!(func(xs), "\u{FFFD}\u{FFFD}\u{FFFD}foo\u{FFFD}\u{FFFD}\u{FFFD}bar".to_owned());
+}
+
+#[test]
 fn test_from_utf16() {
     let pairs = [
-        (
-            String::from("𐍅𐌿𐌻𐍆𐌹𐌻𐌰\n"),
-            vec![
-                0xd800, 0xdf45, 0xd800, 0xdf3f, 0xd800, 0xdf3b, 0xd800, 0xdf46, 0xd800, 0xdf39,
-                0xd800, 0xdf3b, 0xd800, 0xdf30, 0x000a,
-            ],
-        ),
-        (
-            String::from("𐐒𐑉𐐮𐑀𐐲𐑋 𐐏𐐲𐑍\n"),
-            vec![
-                0xd801, 0xdc12, 0xd801, 0xdc49, 0xd801, 0xdc2e, 0xd801, 0xdc40, 0xd801, 0xdc32,
-                0xd801, 0xdc4b, 0x0020, 0xd801, 0xdc0f, 0xd801, 0xdc32, 0xd801, 0xdc4d, 0x000a,
-            ],
-        ),
-        (
-            String::from("𐌀𐌖𐌋𐌄𐌑𐌉·𐌌𐌄𐌕𐌄𐌋𐌉𐌑\n"),
-            vec![
-                0xd800, 0xdf00, 0xd800, 0xdf16, 0xd800, 0xdf0b, 0xd800, 0xdf04, 0xd800, 0xdf11,
-                0xd800, 0xdf09, 0x00b7, 0xd800, 0xdf0c, 0xd800, 0xdf04, 0xd800, 0xdf15, 0xd800,
-                0xdf04, 0xd800, 0xdf0b, 0xd800, 0xdf09, 0xd800, 0xdf11, 0x000a,
-            ],
-        ),
+        (String::from("𐍅𐌿𐌻𐍆𐌹𐌻𐌰\n"), vec![
+            0xd800, 0xdf45, 0xd800, 0xdf3f, 0xd800, 0xdf3b, 0xd800, 0xdf46, 0xd800, 0xdf39, 0xd800,
+            0xdf3b, 0xd800, 0xdf30, 0x000a,
+        ]),
+        (String::from("𐐒𐑉𐐮𐑀𐐲𐑋 𐐏𐐲𐑍\n"), vec![
+            0xd801, 0xdc12, 0xd801, 0xdc49, 0xd801, 0xdc2e, 0xd801, 0xdc40, 0xd801, 0xdc32, 0xd801,
+            0xdc4b, 0x0020, 0xd801, 0xdc0f, 0xd801, 0xdc32, 0xd801, 0xdc4d, 0x000a,
+        ]),
+        (String::from("𐌀𐌖𐌋𐌄𐌑𐌉·𐌌𐌄𐌕𐌄𐌋𐌉𐌑\n"), vec![
+            0xd800, 0xdf00, 0xd800, 0xdf16, 0xd800, 0xdf0b, 0xd800, 0xdf04, 0xd800, 0xdf11, 0xd800,
+            0xdf09, 0x00b7, 0xd800, 0xdf0c, 0xd800, 0xdf04, 0xd800, 0xdf15, 0xd800, 0xdf04, 0xd800,
+            0xdf0b, 0xd800, 0xdf09, 0xd800, 0xdf11, 0x000a,
+        ]),
         (
             String::from("𐒋𐒘𐒈𐒑𐒛𐒒 𐒕𐒓 𐒈𐒚𐒍 𐒏𐒜𐒒𐒖𐒆 𐒕𐒆\n"),
             vec![
@@ -368,29 +394,73 @@ fn remove_bad() {
 
 #[test]
 fn test_remove_matches() {
+    // test_single_pattern_occurrence
     let mut s = "abc".to_string();
-
     s.remove_matches('b');
     assert_eq!(s, "ac");
+    // repeat_test_single_pattern_occurrence
     s.remove_matches('b');
     assert_eq!(s, "ac");
 
+    // test_single_character_pattern
     let mut s = "abcb".to_string();
-
     s.remove_matches('b');
     assert_eq!(s, "ac");
 
+    // test_pattern_with_special_characters
     let mut s = "ศไทย中华Việt Nam; foobarศ".to_string();
     s.remove_matches('ศ');
     assert_eq!(s, "ไทย中华Việt Nam; foobar");
 
+    // test_pattern_empty_text_and_pattern
     let mut s = "".to_string();
     s.remove_matches("");
     assert_eq!(s, "");
 
+    // test_pattern_empty_text
+    let mut s = "".to_string();
+    s.remove_matches("something");
+    assert_eq!(s, "");
+
+    // test_empty_pattern
+    let mut s = "Testing with empty pattern.".to_string();
+    s.remove_matches("");
+    assert_eq!(s, "Testing with empty pattern.");
+
+    // test_multiple_consecutive_patterns_1
     let mut s = "aaaaa".to_string();
     s.remove_matches('a');
     assert_eq!(s, "");
+
+    // test_multiple_consecutive_patterns_2
+    let mut s = "Hello **world****today!**".to_string();
+    s.remove_matches("**");
+    assert_eq!(s, "Hello worldtoday!");
+
+    // test_case_insensitive_pattern
+    let mut s = "CASE ** SeNsItIvE ** PaTtErN.".to_string();
+    s.remove_matches("sEnSiTiVe");
+    assert_eq!(s, "CASE ** SeNsItIvE ** PaTtErN.");
+
+    // test_pattern_with_digits
+    let mut s = "123 ** 456 ** 789".to_string();
+    s.remove_matches("**");
+    assert_eq!(s, "123  456  789");
+
+    // test_pattern_occurs_after_empty_string
+    let mut s = "abc X defXghi".to_string();
+    s.remove_matches("X");
+    assert_eq!(s, "abc  defghi");
+
+    // test_large_pattern
+    let mut s = "aaaXbbbXcccXdddXeee".to_string();
+    s.remove_matches("X");
+    assert_eq!(s, "aaabbbcccdddeee");
+
+    // test_pattern_at_multiple_positions
+    let mut s = "Pattern ** found ** multiple ** times ** in ** text.".to_string();
+    s.remove_matches("**");
+    assert_eq!(s, "Pattern  found  multiple  times  in  text.");
 }
 
 #[test]
@@ -681,7 +751,16 @@ fn test_reserve_exact() {
 
 #[test]
 #[cfg_attr(miri, ignore)] // Miri does not support signalling OOM
-#[cfg_attr(target_os = "android", ignore)] // Android used in CI has a broken dlmalloc
+fn test_try_with_capacity() {
+    let string = String::try_with_capacity(1000).unwrap();
+    assert_eq!(0, string.len());
+    assert!(string.capacity() >= 1000 && string.capacity() <= isize::MAX as usize);
+
+    assert!(String::try_with_capacity(usize::MAX).is_err());
+}
+
+#[test]
+#[cfg_attr(miri, ignore)] // Miri does not support signalling OOM
 fn test_try_reserve() {
     // These are the interesting cases:
     // * exactly isize::MAX should never trigger a CapacityOverflow (can be OOM)
@@ -750,7 +829,6 @@ fn test_try_reserve() {
 
 #[test]
 #[cfg_attr(miri, ignore)] // Miri does not support signalling OOM
-#[cfg_attr(target_os = "android", ignore)] // Android used in CI has a broken dlmalloc
 fn test_try_reserve_exact() {
     // This is exactly the same as test_try_reserve with the method changed.
     // See that test for comments.

@@ -1,10 +1,8 @@
+use std::io::{self, Write};
+
 use gsgdt::GraphvizSettings;
 use rustc_graphviz as dot;
-use rustc_hir::def_id::DefId;
 use rustc_middle::mir::*;
-use rustc_middle::ty::{self, TyCtxt};
-use std::fmt::Debug;
-use std::io::{self, Write};
 
 use super::generic_graph::mir_fn_to_generic_graph;
 use super::pretty::dump_mir_def_ids;
@@ -19,10 +17,10 @@ where
     let mirs = def_ids
         .iter()
         .flat_map(|def_id| {
-            if tcx.is_const_fn_raw(*def_id) {
+            if tcx.is_const_fn(*def_id) {
                 vec![tcx.optimized_mir(*def_id), tcx.mir_for_ctfe(*def_id)]
             } else {
-                vec![tcx.instance_mir(ty::InstanceDef::Item(*def_id))]
+                vec![tcx.instance_mir(ty::InstanceKind::Item(*def_id))]
             }
         })
         .collect::<Vec<_>>();
@@ -127,5 +125,5 @@ fn write_graph_label<'tcx, W: std::fmt::Write>(
 }
 
 fn escape<T: Debug>(t: &T) -> String {
-    dot::escape_html(&format!("{:?}", t))
+    dot::escape_html(&format!("{t:?}"))
 }

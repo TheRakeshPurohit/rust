@@ -1,19 +1,22 @@
 //! An analysis to determine which locals require allocas and
 //! which do not.
 
+use rustc_data_structures::graph::dominators::Dominators;
+use rustc_index::bit_set::DenseBitSet;
+use rustc_index::{IndexSlice, IndexVec};
+use rustc_middle::mir::visit::{MutatingUseContext, NonMutatingUseContext, PlaceContext, Visitor};
+use rustc_middle::mir::{self, DefLocation, Location, TerminatorKind, traversal};
+use rustc_middle::ty::layout::{HasTyCtxt, LayoutOf};
+use rustc_middle::{bug, span_bug};
+use tracing::debug;
+
 use super::FunctionCx;
 use crate::traits::*;
-use rustc_data_structures::graph::dominators::Dominators;
-use rustc_index::bit_set::BitSet;
-use rustc_index::{IndexSlice, IndexVec};
-use rustc_middle::mir::traversal;
-use rustc_middle::mir::visit::{MutatingUseContext, NonMutatingUseContext, PlaceContext, Visitor};
-use rustc_middle::mir::{self, Location, TerminatorKind};
-use rustc_middle::ty::layout::{HasTyCtxt, LayoutOf};
 
-pub fn non_ssa_locals<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
+pub(crate) fn non_ssa_locals<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     fx: &FunctionCx<'a, 'tcx, Bx>,
-) -> BitSet<mir::Local> {
+    traversal_order: &[mir::BasicBlock],
+) -> DenseBitSet<mir::Local> {
     let mir = fx.mir;
     let dominators = mir.basic_blocks.dominators();
     let locals = mir
@@ -22,13 +25,7 @@ pub fn non_ssa_locals<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         .map(|decl| {
             let ty = fx.monomorphize(decl.ty);
             let layout = fx.cx.spanned_layout_of(ty, decl.source_info.span);
-            if layout.is_zst() {
-                LocalKind::ZST
-            } else if fx.cx.is_backend_immediate(layout) || fx.cx.is_backend_scalar_pair(layout) {
-                LocalKind::Unused
-            } else {
-                LocalKind::Memory
-            }
+            if layout.is_zst() { LocalKind::ZST } else { LocalKind::Unused }
         })
         .collect();
 
@@ -36,17 +33,18 @@ pub fn non_ssa_locals<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
 
     // Arguments get assigned to by means of the function being called
     for arg in mir.args_iter() {
-        analyzer.assign(arg, DefLocation::Argument);
+        analyzer.define(arg, DefLocation::Argument);
     }
 
     // If there exists a local definition that dominates all uses of that local,
     // the definition should be visited first. Traverse blocks in an order that
     // is a topological sort of dominance partial order.
-    for (bb, data) in traversal::reverse_postorder(&mir) {
+    for bb in traversal_order.iter().copied() {
+        let data = &mir.basic_blocks[bb];
         analyzer.visit_basic_block_data(bb, data);
     }
 
-    let mut non_ssa_locals = BitSet::new_empty(analyzer.locals.len());
+    let mut non_ssa_locals = DenseBitSet::new_empty(analyzer.locals.len());
     for (local, kind) in analyzer.locals.iter_enumerated() {
         if matches!(kind, LocalKind::Memory) {
             non_ssa_locals.insert(local);
@@ -67,34 +65,30 @@ enum LocalKind {
     SSA(DefLocation),
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
-enum DefLocation {
-    Argument,
-    Body(Location),
-}
-
-impl DefLocation {
-    fn dominates(self, location: Location, dominators: &Dominators<mir::BasicBlock>) -> bool {
-        match self {
-            DefLocation::Argument => true,
-            DefLocation::Body(def) => def.successor_within_block().dominates(location, dominators),
-        }
-    }
-}
-
-struct LocalAnalyzer<'mir, 'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> {
-    fx: &'mir FunctionCx<'a, 'tcx, Bx>,
-    dominators: &'mir Dominators<mir::BasicBlock>,
+struct LocalAnalyzer<'a, 'b, 'tcx, Bx: BuilderMethods<'b, 'tcx>> {
+    fx: &'a FunctionCx<'b, 'tcx, Bx>,
+    dominators: &'a Dominators<mir::BasicBlock>,
     locals: IndexVec<mir::Local, LocalKind>,
 }
 
-impl<'mir, 'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> LocalAnalyzer<'mir, 'a, 'tcx, Bx> {
-    fn assign(&mut self, local: mir::Local, location: DefLocation) {
+impl<'a, 'b, 'tcx, Bx: BuilderMethods<'b, 'tcx>> LocalAnalyzer<'a, 'b, 'tcx, Bx> {
+    fn define(&mut self, local: mir::Local, location: DefLocation) {
+        let fx = self.fx;
         let kind = &mut self.locals[local];
+        let decl = &fx.mir.local_decls[local];
         match *kind {
             LocalKind::ZST => {}
             LocalKind::Memory => {}
-            LocalKind::Unused => *kind = LocalKind::SSA(location),
+            LocalKind::Unused => {
+                let ty = fx.monomorphize(decl.ty);
+                let layout = fx.cx.spanned_layout_of(ty, decl.source_info.span);
+                *kind =
+                    if fx.cx.is_backend_immediate(layout) || fx.cx.is_backend_scalar_pair(layout) {
+                        LocalKind::SSA(location)
+                    } else {
+                        LocalKind::Memory
+                    };
+            }
             LocalKind::SSA(_) => *kind = LocalKind::Memory,
         }
     }
@@ -165,9 +159,7 @@ impl<'mir, 'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> LocalAnalyzer<'mir, 'a, 'tcx,
     }
 }
 
-impl<'mir, 'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> Visitor<'tcx>
-    for LocalAnalyzer<'mir, 'a, 'tcx, Bx>
-{
+impl<'a, 'b, 'tcx, Bx: BuilderMethods<'b, 'tcx>> Visitor<'tcx> for LocalAnalyzer<'a, 'b, 'tcx, Bx> {
     fn visit_assign(
         &mut self,
         place: &mir::Place<'tcx>,
@@ -177,7 +169,7 @@ impl<'mir, 'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> Visitor<'tcx>
         debug!("visit_assign(place={:?}, rvalue={:?})", place, rvalue);
 
         if let Some(local) = place.as_local() {
-            self.assign(local, DefLocation::Body(location));
+            self.define(local, DefLocation::Assignment(location));
             if self.locals[local] != LocalKind::Memory {
                 let decl_span = self.fx.mir.local_decls[local].source_info.span;
                 if !self.fx.rvalue_creates_operand(rvalue, decl_span) {
@@ -198,9 +190,14 @@ impl<'mir, 'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> Visitor<'tcx>
 
     fn visit_local(&mut self, local: mir::Local, context: PlaceContext, location: Location) {
         match context {
-            PlaceContext::MutatingUse(MutatingUseContext::Call)
-            | PlaceContext::MutatingUse(MutatingUseContext::Yield) => {
-                self.assign(local, DefLocation::Body(location));
+            PlaceContext::MutatingUse(MutatingUseContext::Call) => {
+                let call = location.block;
+                let TerminatorKind::Call { target, .. } =
+                    self.fx.mir.basic_blocks[call].terminator().kind
+                else {
+                    bug!()
+                };
+                self.define(local, DefLocation::CallReturn { call, target });
             }
 
             PlaceContext::NonUse(_)
@@ -212,7 +209,7 @@ impl<'mir, 'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> Visitor<'tcx>
             ) => match &mut self.locals[local] {
                 LocalKind::ZST => {}
                 LocalKind::Memory => {}
-                LocalKind::SSA(def) if def.dominates(location, &self.dominators) => {}
+                LocalKind::SSA(def) if def.dominates(location, self.dominators) => {}
                 // Reads from uninitialized variables (e.g., in dead code, after
                 // optimizations) require locals to be in (uninitialized) memory.
                 // N.B., there can be uninitialized reads of a local visited after
@@ -228,14 +225,14 @@ impl<'mir, 'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> Visitor<'tcx>
                 | MutatingUseContext::SetDiscriminant
                 | MutatingUseContext::AsmOutput
                 | MutatingUseContext::Borrow
-                | MutatingUseContext::AddressOf
+                | MutatingUseContext::RawBorrow
                 | MutatingUseContext::Projection,
             )
             | PlaceContext::NonMutatingUse(
                 NonMutatingUseContext::Inspect
                 | NonMutatingUseContext::SharedBorrow
-                | NonMutatingUseContext::ShallowBorrow
-                | NonMutatingUseContext::AddressOf
+                | NonMutatingUseContext::FakeBorrow
+                | NonMutatingUseContext::RawBorrow
                 | NonMutatingUseContext::Projection,
             ) => {
                 self.locals[local] = LocalKind::Memory;
@@ -252,19 +249,21 @@ impl<'mir, 'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> Visitor<'tcx>
                     }
                 }
             }
+
+            PlaceContext::MutatingUse(MutatingUseContext::Yield) => bug!(),
         }
     }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum CleanupKind {
+pub(crate) enum CleanupKind {
     NotCleanup,
     Funclet,
     Internal { funclet: mir::BasicBlock },
 }
 
 impl CleanupKind {
-    pub fn funclet_bb(self, for_bb: mir::BasicBlock) -> Option<mir::BasicBlock> {
+    pub(crate) fn funclet_bb(self, for_bb: mir::BasicBlock) -> Option<mir::BasicBlock> {
         match self {
             CleanupKind::NotCleanup => None,
             CleanupKind::Funclet => Some(for_bb),
@@ -276,7 +275,7 @@ impl CleanupKind {
 /// MSVC requires unwinding code to be split to a tree of *funclets*, where each funclet can only
 /// branch to itself or to its parent. Luckily, the code we generates matches this pattern.
 /// Recover that structure in an analyze pass.
-pub fn cleanup_kinds(mir: &mir::Body<'_>) -> IndexVec<mir::BasicBlock, CleanupKind> {
+pub(crate) fn cleanup_kinds(mir: &mir::Body<'_>) -> IndexVec<mir::BasicBlock, CleanupKind> {
     fn discover_masters<'tcx>(
         result: &mut IndexSlice<mir::BasicBlock, CleanupKind>,
         mir: &mir::Body<'tcx>,
@@ -284,10 +283,11 @@ pub fn cleanup_kinds(mir: &mir::Body<'_>) -> IndexVec<mir::BasicBlock, CleanupKi
         for (bb, data) in mir.basic_blocks.iter_enumerated() {
             match data.terminator().kind {
                 TerminatorKind::Goto { .. }
-                | TerminatorKind::Resume
-                | TerminatorKind::Terminate
+                | TerminatorKind::UnwindResume
+                | TerminatorKind::UnwindTerminate(_)
                 | TerminatorKind::Return
-                | TerminatorKind::GeneratorDrop
+                | TerminatorKind::TailCall { .. }
+                | TerminatorKind::CoroutineDrop
                 | TerminatorKind::Unreachable
                 | TerminatorKind::SwitchInt { .. }
                 | TerminatorKind::Yield { .. }

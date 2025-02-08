@@ -1,137 +1,75 @@
-warning: private type `PrivTy` in public interface (error E0446)
-  --> $DIR/where-priv-type.rs:25:1
-   |
-LL | pub struct S
-   | ^^^^^^^^^^^^
-   |
-   = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-   = note: for more information, see issue #34537 <https://github.com/rust-lang/rust/issues/34537>
-   = note: `#[warn(private_in_public)]` on by default
-
 warning: type `PrivTy` is more private than the item `S`
-   |
-note: struct `S` is reachable at visibility `pub`
-  --> $DIR/where-priv-type.rs:25:1
+  --> $DIR/where-priv-type.rs:21:1
    |
 LL | pub struct S
-   | ^^^^^^^^^^^^
+   | ^^^^^^^^^^^^ struct `S` is reachable at visibility `pub`
+   |
 note: but type `PrivTy` is only usable at visibility `pub(crate)`
-  --> $DIR/where-priv-type.rs:15:1
+  --> $DIR/where-priv-type.rs:8:1
    |
 LL | struct PrivTy;
    | ^^^^^^^^^^^^^
-note: the lint level is defined here
-  --> $DIR/where-priv-type.rs:8:9
-   |
-LL | #![warn(private_bounds)]
-   |         ^^^^^^^^^^^^^^
-
-warning: private type `PrivTy` in public interface (error E0446)
-  --> $DIR/where-priv-type.rs:33:1
-   |
-LL | pub enum E
-   | ^^^^^^^^^^
-   |
-   = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-   = note: for more information, see issue #34537 <https://github.com/rust-lang/rust/issues/34537>
+   = note: `#[warn(private_bounds)]` on by default
 
 warning: type `PrivTy` is more private than the item `E`
-   |
-note: enum `E` is reachable at visibility `pub`
-  --> $DIR/where-priv-type.rs:33:1
+  --> $DIR/where-priv-type.rs:26:1
    |
 LL | pub enum E
-   | ^^^^^^^^^^
+   | ^^^^^^^^^^ enum `E` is reachable at visibility `pub`
+   |
 note: but type `PrivTy` is only usable at visibility `pub(crate)`
-  --> $DIR/where-priv-type.rs:15:1
+  --> $DIR/where-priv-type.rs:8:1
    |
 LL | struct PrivTy;
    | ^^^^^^^^^^^^^
-
-warning: private type `PrivTy` in public interface (error E0446)
-  --> $DIR/where-priv-type.rs:41:1
-   |
-LL | / pub fn f()
-LL | |
-LL | |
-LL | | where
-LL | |     PrivTy:
-   | |___________^
-   |
-   = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-   = note: for more information, see issue #34537 <https://github.com/rust-lang/rust/issues/34537>
 
 warning: type `PrivTy` is more private than the item `f`
-   |
-note: function `f` is reachable at visibility `pub`
-  --> $DIR/where-priv-type.rs:41:1
+  --> $DIR/where-priv-type.rs:31:1
    |
 LL | / pub fn f()
 LL | |
-LL | |
 LL | | where
-LL | |     PrivTy:
-   | |___________^
+LL | |     PrivTy:,
+   | |____________^ function `f` is reachable at visibility `pub`
+   |
 note: but type `PrivTy` is only usable at visibility `pub(crate)`
-  --> $DIR/where-priv-type.rs:15:1
+  --> $DIR/where-priv-type.rs:8:1
    |
 LL | struct PrivTy;
    | ^^^^^^^^^^^^^
-
-error[E0446]: private type `PrivTy` in public interface
-  --> $DIR/where-priv-type.rs:49:1
-   |
-LL | struct PrivTy;
-   | ------------- `PrivTy` declared as private
-...
-LL | impl S
-   | ^^^^^^ can't leak private type
 
 warning: type `PrivTy` is more private than the item `S`
+  --> $DIR/where-priv-type.rs:38:1
    |
-note: implementation `S` is reachable at visibility `pub`
-  --> $DIR/where-priv-type.rs:49:1
+LL | / impl S
+LL | |
+LL | | where
+LL | |     PrivTy:,
+   | |____________^ implementation `S` is reachable at visibility `pub`
    |
-LL | impl S
-   | ^^^^^^
 note: but type `PrivTy` is only usable at visibility `pub(crate)`
-  --> $DIR/where-priv-type.rs:15:1
+  --> $DIR/where-priv-type.rs:8:1
    |
 LL | struct PrivTy;
    | ^^^^^^^^^^^^^
 
-warning: private type `PrivTy` in public interface (error E0446)
-  --> $DIR/where-priv-type.rs:54:5
-   |
-LL | /     pub fn f()
-LL | |
-LL | |
-LL | |     where
-LL | |         PrivTy:
-   | |_______________^
-   |
-   = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
-   = note: for more information, see issue #34537 <https://github.com/rust-lang/rust/issues/34537>
-
 warning: type `PrivTy` is more private than the item `S::f`
-   |
-note: associated function `S::f` is reachable at visibility `pub`
-  --> $DIR/where-priv-type.rs:54:5
+  --> $DIR/where-priv-type.rs:43:5
    |
 LL | /     pub fn f()
 LL | |
-LL | |
 LL | |     where
-LL | |         PrivTy:
-   | |_______________^
+LL | |         PrivTy:,
+   | |________________^ associated function `S::f` is reachable at visibility `pub`
+   |
 note: but type `PrivTy` is only usable at visibility `pub(crate)`
-  --> $DIR/where-priv-type.rs:15:1
+  --> $DIR/where-priv-type.rs:8:1
    |
 LL | struct PrivTy;
    | ^^^^^^^^^^^^^
 
 error[E0446]: private type `fn(u8) -> u8 {my_const_fn}` in public interface
-  --> $DIR/where-priv-type.rs:86:5
+  --> $DIR/where-priv-type.rs:66:5
    |
 LL |     type AssocTy = Const<{ my_const_fn(U) }>;
    |     ^^^^^^^^^^^^ can't leak private type
@@ -139,24 +77,17 @@ LL |     type AssocTy = Const<{ my_const_fn(U) }>;
 LL | const fn my_const_fn(val: u8) -> u8 {
    | ----------------------------------- `fn(u8) -> u8 {my_const_fn}` declared as private
 
-warning: type `fn(u8) -> u8 {my_const_fn}` is more private than the item `<Const<U> as Trait>::AssocTy`
-   |
-note: associated type `<Const<U> as Trait>::AssocTy` is reachable at visibility `pub`
-  --> $DIR/where-priv-type.rs:86:5
+error[E0446]: private type `fn(u8) -> u8 {my_const_fn}` in public interface
+  --> $DIR/where-priv-type.rs:66:5
    |
 LL |     type AssocTy = Const<{ my_const_fn(U) }>;
-   |     ^^^^^^^^^^^^
-note: but type `fn(u8) -> u8 {my_const_fn}` is only usable at visibility `pub(crate)`
-  --> $DIR/where-priv-type.rs:93:1
-   |
+   |     ^^^^^^^^^^^^ can't leak private type
+...
 LL | const fn my_const_fn(val: u8) -> u8 {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-note: the lint level is defined here
-  --> $DIR/where-priv-type.rs:9:9
+   | ----------------------------------- `fn(u8) -> u8 {my_const_fn}` declared as private
    |
-LL | #![warn(private_interfaces)]
-   |         ^^^^^^^^^^^^^^^^^^
+   = note: duplicate diagnostic emitted due to `-Z deduplicate-diagnostics=no`
 
-error: aborting due to 2 previous errors; 10 warnings emitted
+error: aborting due to 2 previous errors; 5 warnings emitted
 
 For more information about this error, try `rustc --explain E0446`.

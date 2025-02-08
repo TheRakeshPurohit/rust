@@ -1,7 +1,5 @@
-// edition:2018
-// run-rustfix
-
-#![feature(async_closure)]
+//@ edition:2018
+//@ run-rustfix
 
 fn take_u32(_x: u32) {}
 

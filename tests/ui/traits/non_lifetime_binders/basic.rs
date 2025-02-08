@@ -1,5 +1,5 @@
-// check-pass
-// Basic test that show's we can succesfully typeck a `for<T>` where clause.
+//@ check-pass
+// Basic test that show's we can successfully typeck a `for<T>` where clause.
 
 #![feature(non_lifetime_binders)]
 //~^ WARN the feature `non_lifetime_binders` is incomplete

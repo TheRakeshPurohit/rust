@@ -1,14 +1,13 @@
-#![deny(rustc::untranslatable_diagnostic)]
-#![deny(rustc::diagnostic_outside_of_impl)]
 use rustc_data_structures::fx::FxIndexSet;
 use rustc_middle::mir::visit::{PlaceContext, Visitor};
 use rustc_middle::mir::{
     Local, Location, Place, Statement, StatementKind, Terminator, TerminatorKind,
 };
+use tracing::debug;
 
 use crate::MirBorrowckCtxt;
 
-impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
+impl<'tcx> MirBorrowckCtxt<'_, '_, 'tcx> {
     /// Walks the MIR adding to the set of `used_mut` locals that will be ignored for the purposes
     /// of the `unused_mut` lint.
     ///
@@ -35,7 +34,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                 never_initialized_mut_locals: &mut never_initialized_mut_locals,
                 mbcx: self,
             };
-            visitor.visit_body(&visitor.mbcx.body);
+            visitor.visit_body(visitor.mbcx.body);
         }
 
         // Take the union of the existed `used_mut` set with those variables we've found were
@@ -47,24 +46,25 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
 
 /// MIR visitor for collecting used mutable variables.
 /// The 'visit lifetime represents the duration of the MIR walk.
-struct GatherUsedMutsVisitor<'visit, 'cx, 'tcx> {
+struct GatherUsedMutsVisitor<'a, 'b, 'infcx, 'tcx> {
     temporary_used_locals: FxIndexSet<Local>,
-    never_initialized_mut_locals: &'visit mut FxIndexSet<Local>,
-    mbcx: &'visit mut MirBorrowckCtxt<'cx, 'tcx>,
+    never_initialized_mut_locals: &'a mut FxIndexSet<Local>,
+    mbcx: &'a mut MirBorrowckCtxt<'b, 'infcx, 'tcx>,
 }
 
-impl GatherUsedMutsVisitor<'_, '_, '_> {
+impl GatherUsedMutsVisitor<'_, '_, '_, '_> {
     fn remove_never_initialized_mut_locals(&mut self, into: Place<'_>) {
         // Remove any locals that we found were initialized from the
         // `never_initialized_mut_locals` set. At the end, the only remaining locals will
         // be those that were never initialized - we will consider those as being used as
         // they will either have been removed by unreachable code optimizations; or linted
         // as unused variables.
-        self.never_initialized_mut_locals.remove(&into.local);
+        // FIXME(#120456) - is `swap_remove` correct?
+        self.never_initialized_mut_locals.swap_remove(&into.local);
     }
 }
 
-impl<'visit, 'cx, 'tcx> Visitor<'tcx> for GatherUsedMutsVisitor<'visit, 'cx, 'tcx> {
+impl<'tcx> Visitor<'tcx> for GatherUsedMutsVisitor<'_, '_, '_, 'tcx> {
     fn visit_terminator(&mut self, terminator: &Terminator<'tcx>, location: Location) {
         debug!("visit_terminator: terminator={:?}", terminator);
         match &terminator.kind {

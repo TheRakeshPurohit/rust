@@ -1,62 +1,42 @@
-//! Implementation of lint checking.
+//! Basic types for managing and implementing lints.
 //!
-//! The lint checking is mostly consolidated into one pass which runs
-//! after all other analyses. Throughout compilation, lint warnings
-//! can be added via the `add_lint` method on the Session structure. This
-//! requires a span and an ID of the node that the lint is being added to. The
-//! lint isn't actually emitted at that time because it is unknown what the
-//! actual lint level at that location is.
-//!
-//! To actually emit lint warnings/errors, a separate pass is used.
-//! A context keeps track of the current state of all lint levels.
-//! Upon entering a node of the ast which can modify the lint settings, the
-//! previous lint state is pushed onto a stack and the ast is then recursed
-//! upon. As the ast is traversed, this keeps track of the current lint level
-//! for all lint attributes.
+//! See <https://rustc-dev-guide.rust-lang.org/diagnostics.html> for an
+//! overview of how lints are implemented.
 
-use self::TargetLint::*;
+use std::cell::Cell;
+use std::slice;
 
-use crate::errors::{
-    CheckNameDeprecated, CheckNameUnknown, CheckNameUnknownTool, CheckNameWarning, RequestedLevel,
-    UnsupportedGroup,
-};
-use crate::levels::LintLevelsBuilder;
-use crate::passes::{EarlyLintPassObject, LateLintPassObject};
-use rustc_ast::util::unicode::TEXT_FLOW_CONTROL_CHARS;
-use rustc_data_structures::fx::FxHashMap;
+use rustc_data_structures::fx::FxIndexMap;
 use rustc_data_structures::sync;
-use rustc_errors::{add_elided_lifetime_in_path_suggestion, DiagnosticBuilder, DiagnosticMessage};
-use rustc_errors::{Applicability, DecorateLint, MultiSpan, SuggestionStyle};
-use rustc_hir as hir;
+use rustc_data_structures::unord::UnordMap;
+use rustc_errors::{Diag, LintDiagnostic, MultiSpan};
+use rustc_feature::Features;
 use rustc_hir::def::Res;
 use rustc_hir::def_id::{CrateNum, DefId};
 use rustc_hir::definitions::{DefPathData, DisambiguatedDefPathData};
+use rustc_middle::bug;
 use rustc_middle::middle::privacy::EffectiveVisibilities;
-use rustc_middle::middle::stability;
 use rustc_middle::ty::layout::{LayoutError, LayoutOfHelpers, TyAndLayout};
-use rustc_middle::ty::print::with_no_trimmed_paths;
-use rustc_middle::ty::{self, print::Printer, subst::GenericArg, RegisteredTools, Ty, TyCtxt};
-use rustc_session::config::ExpectedValues;
-use rustc_session::lint::{BuiltinLintDiagnostics, LintExpectationId};
-use rustc_session::lint::{FutureIncompatibleInfo, Level, Lint, LintBuffer, LintId};
-use rustc_session::Session;
-use rustc_span::edit_distance::find_best_match_for_name;
-use rustc_span::symbol::{sym, Ident, Symbol};
-use rustc_span::{BytePos, Span};
-use rustc_target::abi;
+use rustc_middle::ty::print::{PrintError, PrintTraitRefExt as _, Printer, with_no_trimmed_paths};
+use rustc_middle::ty::{self, GenericArg, RegisteredTools, Ty, TyCtxt, TypingEnv, TypingMode};
+use rustc_session::lint::{
+    FutureIncompatibleInfo, Level, Lint, LintBuffer, LintExpectationId, LintId,
+};
+use rustc_session::{LintStoreMarker, Session};
+use rustc_span::edit_distance::find_best_match_for_names;
+use rustc_span::{Ident, Span, Symbol, sym};
+use tracing::debug;
+use {rustc_abi as abi, rustc_hir as hir};
 
-use std::cell::Cell;
-use std::iter;
-use std::slice;
+use self::TargetLint::*;
+use crate::levels::LintLevelsBuilder;
+use crate::passes::{EarlyLintPassObject, LateLintPassObject};
 
 type EarlyLintPassFactory = dyn Fn() -> EarlyLintPassObject + sync::DynSend + sync::DynSync;
 type LateLintPassFactory =
     dyn for<'tcx> Fn(TyCtxt<'tcx>) -> LateLintPassObject<'tcx> + sync::DynSend + sync::DynSync;
 
 /// Information about the registered lints.
-///
-/// This is basically the subset of `Context` that we can
-/// build early in the compile pipeline.
 pub struct LintStore {
     /// Registered lints.
     lints: Vec<&'static Lint>,
@@ -74,11 +54,13 @@ pub struct LintStore {
     pub late_module_passes: Vec<Box<LateLintPassFactory>>,
 
     /// Lints indexed by name.
-    by_name: FxHashMap<String, TargetLint>,
+    by_name: UnordMap<String, TargetLint>,
 
     /// Map of registered lint groups to what lints they expand to.
-    lint_groups: FxHashMap<&'static str, LintGroup>,
+    lint_groups: FxIndexMap<&'static str, LintGroup>,
 }
+
+impl LintStoreMarker for LintStore {}
 
 /// The target of the `by_name` map, which accounts for renaming/deprecation.
 #[derive(Debug)]
@@ -95,7 +77,8 @@ enum TargetLint {
 
     /// A lint name that should give no warnings and have no effect.
     ///
-    /// This is used by rustc to avoid warning about old rustdoc lints before rustdoc registers them as tool lints.
+    /// This is used by rustc to avoid warning about old rustdoc lints before rustdoc registers
+    /// them as tool lints.
     Ignored,
 }
 
@@ -112,7 +95,7 @@ struct LintAlias {
 
 struct LintGroup {
     lint_ids: Vec<LintId>,
-    from_plugin: bool,
+    is_externally_loaded: bool,
     depr: Option<LintAlias>,
 }
 
@@ -120,18 +103,23 @@ struct LintGroup {
 pub enum CheckLintNameResult<'a> {
     Ok(&'a [LintId]),
     /// Lint doesn't exist. Potentially contains a suggestion for a correct lint name.
-    NoLint(Option<Symbol>),
+    NoLint(Option<(Symbol, bool)>),
     /// The lint refers to a tool that has not been registered.
     NoTool,
-    /// The lint is either renamed or removed. This is the warning
-    /// message, and an optional new name (`None` if removed).
-    Warning(String, Option<String>),
-    /// The lint is from a tool. If the Option is None, then either
-    /// the lint does not exist in the tool or the code was not
-    /// compiled with the tool and therefore the lint was never
-    /// added to the `LintStore`. Otherwise the `LintId` will be
-    /// returned as if it where a rustc lint.
-    Tool(Result<&'a [LintId], (Option<&'a [LintId]>, String)>),
+    /// The lint has been renamed to a new name.
+    Renamed(String),
+    /// The lint has been removed due to the given reason.
+    Removed(String),
+
+    /// The lint is from a tool. The `LintId` will be returned as if it were a
+    /// rustc lint. The `Option<String>` indicates if the lint has been
+    /// renamed.
+    Tool(&'a [LintId], Option<String>),
+
+    /// The lint is from a tool. Either the lint does not exist in the tool or
+    /// the code was not compiled with the tool and therefore the lint was
+    /// never added to the `LintStore`.
+    MissingTool,
 }
 
 impl LintStore {
@@ -154,16 +142,14 @@ impl LintStore {
     pub fn get_lint_groups<'t>(
         &'t self,
     ) -> impl Iterator<Item = (&'static str, Vec<LintId>, bool)> + 't {
-        // This function is not used in a way which observes the order of lints.
-        #[allow(rustc::potential_query_instability)]
         self.lint_groups
             .iter()
             .filter(|(_, LintGroup { depr, .. })| {
                 // Don't display deprecated lint groups.
                 depr.is_none()
             })
-            .map(|(k, LintGroup { lint_ids, from_plugin, .. })| {
-                (*k, lint_ids.clone(), *from_plugin)
+            .map(|(k, LintGroup { lint_ids, is_externally_loaded, .. })| {
+                (*k, lint_ids.clone(), *is_externally_loaded)
             })
     }
 
@@ -223,7 +209,7 @@ impl LintStore {
                         .entry(edition.lint_name())
                         .or_insert(LintGroup {
                             lint_ids: vec![],
-                            from_plugin: lint.is_plugin,
+                            is_externally_loaded: lint.is_externally_loaded,
                             depr: None,
                         })
                         .lint_ids
@@ -236,7 +222,7 @@ impl LintStore {
                         .entry("future_incompatible")
                         .or_insert(LintGroup {
                             lint_ids: vec![],
-                            from_plugin: lint.is_plugin,
+                            is_externally_loaded: lint.is_externally_loaded,
                             depr: None,
                         })
                         .lint_ids
@@ -247,36 +233,30 @@ impl LintStore {
     }
 
     pub fn register_group_alias(&mut self, lint_name: &'static str, alias: &'static str) {
-        self.lint_groups.insert(
-            alias,
-            LintGroup {
-                lint_ids: vec![],
-                from_plugin: false,
-                depr: Some(LintAlias { name: lint_name, silent: true }),
-            },
-        );
+        self.lint_groups.insert(alias, LintGroup {
+            lint_ids: vec![],
+            is_externally_loaded: false,
+            depr: Some(LintAlias { name: lint_name, silent: true }),
+        });
     }
 
     pub fn register_group(
         &mut self,
-        from_plugin: bool,
+        is_externally_loaded: bool,
         name: &'static str,
         deprecated_name: Option<&'static str>,
         to: Vec<LintId>,
     ) {
         let new = self
             .lint_groups
-            .insert(name, LintGroup { lint_ids: to, from_plugin, depr: None })
+            .insert(name, LintGroup { lint_ids: to, is_externally_loaded, depr: None })
             .is_none();
         if let Some(deprecated) = deprecated_name {
-            self.lint_groups.insert(
-                deprecated,
-                LintGroup {
-                    lint_ids: vec![],
-                    from_plugin,
-                    depr: Some(LintAlias { name, silent: false }),
-                },
-            );
+            self.lint_groups.insert(deprecated, LintGroup {
+                lint_ids: vec![],
+                is_externally_loaded,
+                depr: Some(LintAlias { name, silent: false }),
+            });
         }
 
         if !new {
@@ -328,51 +308,6 @@ impl LintStore {
         }
     }
 
-    /// Checks the validity of lint names derived from the command line.
-    pub fn check_lint_name_cmdline(
-        &self,
-        sess: &Session,
-        lint_name: &str,
-        level: Level,
-        registered_tools: &RegisteredTools,
-    ) {
-        let (tool_name, lint_name_only) = parse_lint_and_tool_name(lint_name);
-        if lint_name_only == crate::WARNINGS.name_lower() && matches!(level, Level::ForceWarn(_)) {
-            sess.emit_err(UnsupportedGroup { lint_group: crate::WARNINGS.name_lower() });
-            return;
-        }
-        let lint_name = lint_name.to_string();
-        match self.check_lint_name(lint_name_only, tool_name, registered_tools) {
-            CheckLintNameResult::Warning(msg, _) => {
-                sess.emit_warning(CheckNameWarning {
-                    msg,
-                    sub: RequestedLevel { level, lint_name },
-                });
-            }
-            CheckLintNameResult::NoLint(suggestion) => {
-                sess.emit_err(CheckNameUnknown {
-                    lint_name: lint_name.clone(),
-                    suggestion,
-                    sub: RequestedLevel { level, lint_name },
-                });
-            }
-            CheckLintNameResult::Tool(Err((Some(_), new_name))) => {
-                sess.emit_warning(CheckNameDeprecated {
-                    lint_name: lint_name.clone(),
-                    new_name,
-                    sub: RequestedLevel { level, lint_name },
-                });
-            }
-            CheckLintNameResult::NoTool => {
-                sess.emit_err(CheckNameUnknownTool {
-                    tool_name: tool_name.unwrap(),
-                    sub: RequestedLevel { level, lint_name },
-                });
-            }
-            _ => {}
-        };
-    }
-
     /// True if this symbol represents a lint group name.
     pub fn is_lint_group(&self, lint_name: Symbol) -> bool {
         debug!(
@@ -388,7 +323,7 @@ impl LintStore {
     }
 
     /// Checks the name of a lint for its existence, and whether it was
-    /// renamed or removed. Generates a DiagnosticBuilder containing a
+    /// renamed or removed. Generates a `Diag` containing a
     /// warning for renamed and removed lints. This is over both lint
     /// names from attributes and those passed on the command line. Since
     /// it emits non-fatal warnings and there are *two* lint passes that
@@ -411,7 +346,7 @@ impl LintStore {
         }
 
         let complete_name = if let Some(tool_name) = tool_name {
-            format!("{}::{}", tool_name, lint_name)
+            format!("{tool_name}::{lint_name}")
         } else {
             lint_name.to_string()
         };
@@ -423,35 +358,30 @@ impl LintStore {
                     None => {
                         // 1. The tool is currently running, so this lint really doesn't exist.
                         // FIXME: should this handle tools that never register a lint, like rustfmt?
-                        debug!("lints={:?}", self.by_name.keys().collect::<Vec<_>>());
-                        let tool_prefix = format!("{}::", tool_name);
+                        debug!("lints={:?}", self.by_name);
+                        let tool_prefix = format!("{tool_name}::");
+
                         return if self.by_name.keys().any(|lint| lint.starts_with(&tool_prefix)) {
-                            self.no_lint_suggestion(&complete_name)
+                            self.no_lint_suggestion(&complete_name, tool_name.as_str())
                         } else {
                             // 2. The tool isn't currently running, so no lints will be registered.
                             // To avoid giving a false positive, ignore all unknown lints.
-                            CheckLintNameResult::Tool(Err((None, String::new())))
+                            CheckLintNameResult::MissingTool
                         };
                     }
                     Some(LintGroup { lint_ids, .. }) => {
-                        return CheckLintNameResult::Tool(Ok(&lint_ids));
+                        return CheckLintNameResult::Tool(lint_ids, None);
                     }
                 },
-                Some(Id(id)) => return CheckLintNameResult::Tool(Ok(slice::from_ref(id))),
+                Some(Id(id)) => return CheckLintNameResult::Tool(slice::from_ref(id), None),
                 // If the lint was registered as removed or renamed by the lint tool, we don't need
                 // to treat tool_lints and rustc lints different and can use the code below.
                 _ => {}
             }
         }
         match self.by_name.get(&complete_name) {
-            Some(Renamed(new_name, _)) => CheckLintNameResult::Warning(
-                format!("lint `{}` has been renamed to `{}`", complete_name, new_name),
-                Some(new_name.to_owned()),
-            ),
-            Some(Removed(reason)) => CheckLintNameResult::Warning(
-                format!("lint `{}` has been removed: {}", complete_name, reason),
-                None,
-            ),
+            Some(Renamed(new_name, _)) => CheckLintNameResult::Renamed(new_name.to_string()),
+            Some(Removed(reason)) => CheckLintNameResult::Removed(reason.to_string()),
             None => match self.lint_groups.get(&*complete_name) {
                 // If neither the lint, nor the lint group exists check if there is a `clippy::`
                 // variant of this lint
@@ -461,12 +391,12 @@ impl LintStore {
                     if let Some(LintAlias { name, silent }) = depr {
                         let LintGroup { lint_ids, .. } = self.lint_groups.get(name).unwrap();
                         return if *silent {
-                            CheckLintNameResult::Ok(&lint_ids)
+                            CheckLintNameResult::Ok(lint_ids)
                         } else {
-                            CheckLintNameResult::Tool(Err((Some(&lint_ids), (*name).to_string())))
+                            CheckLintNameResult::Tool(lint_ids, Some((*name).to_string()))
                         };
                     }
-                    CheckLintNameResult::Ok(&lint_ids)
+                    CheckLintNameResult::Ok(lint_ids)
                 }
             },
             Some(Id(id)) => CheckLintNameResult::Ok(slice::from_ref(id)),
@@ -474,17 +404,20 @@ impl LintStore {
         }
     }
 
-    fn no_lint_suggestion(&self, lint_name: &str) -> CheckLintNameResult<'_> {
+    fn no_lint_suggestion(&self, lint_name: &str, tool_name: &str) -> CheckLintNameResult<'_> {
         let name_lower = lint_name.to_lowercase();
 
         if lint_name.chars().any(char::is_uppercase) && self.find_lints(&name_lower).is_ok() {
             // First check if the lint name is (partly) in upper case instead of lower case...
-            return CheckLintNameResult::NoLint(Some(Symbol::intern(&name_lower)));
+            return CheckLintNameResult::NoLint(Some((Symbol::intern(&name_lower), false)));
         }
+
         // ...if not, search for lints with a similar name
         // Note: find_best_match_for_name depends on the sort order of its input vector.
         // To ensure deterministic output, sort elements of the lint_groups hash map.
         // Also, never suggest deprecated lint groups.
+        // We will soon sort, so the initial order does not matter.
+        #[allow(rustc::potential_query_instability)]
         let mut groups: Vec<_> = self
             .lint_groups
             .iter()
@@ -494,7 +427,16 @@ impl LintStore {
         let groups = groups.iter().map(|k| Symbol::intern(k));
         let lints = self.lints.iter().map(|l| Symbol::intern(&l.name_lower()));
         let names: Vec<Symbol> = groups.chain(lints).collect();
-        let suggestion = find_best_match_for_name(&names, Symbol::intern(&name_lower), None);
+        let mut lookups = vec![Symbol::intern(&name_lower)];
+        if let Some(stripped) = name_lower.split("::").last() {
+            lookups.push(Symbol::intern(stripped));
+        }
+        let res = find_best_match_for_names(&names, &lookups, None);
+        let is_rustc = res.map_or_else(
+            || false,
+            |s| name_lower.contains("::") && !s.as_str().starts_with(tool_name),
+        );
+        let suggestion = res.map(|s| (s, is_rustc));
         CheckLintNameResult::NoLint(suggestion)
     }
 
@@ -503,27 +445,26 @@ impl LintStore {
         lint_name: &str,
         tool_name: &str,
     ) -> CheckLintNameResult<'_> {
-        let complete_name = format!("{}::{}", tool_name, lint_name);
+        let complete_name = format!("{tool_name}::{lint_name}");
         match self.by_name.get(&complete_name) {
             None => match self.lint_groups.get(&*complete_name) {
                 // Now we are sure, that this lint exists nowhere
-                None => self.no_lint_suggestion(lint_name),
+                None => self.no_lint_suggestion(lint_name, tool_name),
                 Some(LintGroup { lint_ids, depr, .. }) => {
                     // Reaching this would be weird, but let's cover this case anyway
                     if let Some(LintAlias { name, silent }) = depr {
                         let LintGroup { lint_ids, .. } = self.lint_groups.get(name).unwrap();
-                        return if *silent {
-                            CheckLintNameResult::Tool(Err((Some(&lint_ids), complete_name)))
+                        if *silent {
+                            CheckLintNameResult::Tool(lint_ids, Some(complete_name))
                         } else {
-                            CheckLintNameResult::Tool(Err((Some(&lint_ids), (*name).to_string())))
-                        };
+                            CheckLintNameResult::Tool(lint_ids, Some((*name).to_string()))
+                        }
+                    } else {
+                        CheckLintNameResult::Tool(lint_ids, Some(complete_name))
                     }
-                    CheckLintNameResult::Tool(Err((Some(&lint_ids), complete_name)))
                 }
             },
-            Some(Id(id)) => {
-                CheckLintNameResult::Tool(Err((Some(slice::from_ref(id)), complete_name)))
-            }
+            Some(Id(id)) => CheckLintNameResult::Tool(slice::from_ref(id), Some(complete_name)),
             Some(other) => {
                 debug!("got renamed lint {:?}", other);
                 CheckLintNameResult::NoLint(None)
@@ -552,9 +493,6 @@ pub struct LateContext<'tcx> {
     /// Items accessible from the crate being checked.
     pub effective_visibilities: &'tcx EffectiveVisibilities,
 
-    /// The store of registered lints and the lint levels.
-    pub lint_store: &'tcx LintStore,
-
     pub last_node_with_lint_attrs: hir::HirId,
 
     /// Generic type parameters in scope for the item we are in.
@@ -570,468 +508,62 @@ pub struct EarlyContext<'a> {
     pub buffered: LintBuffer,
 }
 
-pub trait LintPassObject: Sized {}
-
-impl LintPassObject for EarlyLintPassObject {}
-
-impl LintPassObject for LateLintPassObject<'_> {}
-
-pub trait LintContext: Sized {
-    type PassObject: LintPassObject;
-
+pub trait LintContext {
     fn sess(&self) -> &Session;
-    fn lints(&self) -> &LintStore;
-
-    /// Emit a lint at the appropriate level, with an optional associated span and an existing diagnostic.
-    ///
-    /// Return value of the `decorate` closure is ignored, see [`struct_lint_level`] for a detailed explanation.
-    ///
-    /// [`struct_lint_level`]: rustc_middle::lint::struct_lint_level#decorate-signature
-    #[rustc_lint_diagnostics]
-    fn lookup_with_diagnostics(
-        &self,
-        lint: &'static Lint,
-        span: Option<impl Into<MultiSpan>>,
-        msg: impl Into<DiagnosticMessage>,
-        decorate: impl for<'a, 'b> FnOnce(
-            &'b mut DiagnosticBuilder<'a, ()>,
-        ) -> &'b mut DiagnosticBuilder<'a, ()>,
-        diagnostic: BuiltinLintDiagnostics,
-    ) {
-        // We first generate a blank diagnostic.
-        self.lookup(lint, span, msg,|db| {
-            // Now, set up surrounding context.
-            let sess = self.sess();
-            match diagnostic {
-                BuiltinLintDiagnostics::UnicodeTextFlow(span, content) => {
-                    let spans: Vec<_> = content
-                        .char_indices()
-                        .filter_map(|(i, c)| {
-                            TEXT_FLOW_CONTROL_CHARS.contains(&c).then(|| {
-                                let lo = span.lo() + BytePos(2 + i as u32);
-                                (c, span.with_lo(lo).with_hi(lo + BytePos(c.len_utf8() as u32)))
-                            })
-                        })
-                        .collect();
-                    let (an, s) = match spans.len() {
-                        1 => ("an ", ""),
-                        _ => ("", "s"),
-                    };
-                    db.span_label(span, format!(
-                        "this comment contains {}invisible unicode text flow control codepoint{}",
-                        an,
-                        s,
-                    ));
-                    for (c, span) in &spans {
-                        db.span_label(*span, format!("{:?}", c));
-                    }
-                    db.note(
-                        "these kind of unicode codepoints change the way text flows on \
-                         applications that support them, but can cause confusion because they \
-                         change the order of characters on the screen",
-                    );
-                    if !spans.is_empty() {
-                        db.multipart_suggestion_with_style(
-                            "if their presence wasn't intentional, you can remove them",
-                            spans.into_iter().map(|(_, span)| (span, "".to_string())).collect(),
-                            Applicability::MachineApplicable,
-                            SuggestionStyle::HideCodeAlways,
-                        );
-                    }
-                },
-                BuiltinLintDiagnostics::Normal => (),
-                BuiltinLintDiagnostics::AbsPathWithModule(span) => {
-                    let (sugg, app) = match sess.source_map().span_to_snippet(span) {
-                        Ok(ref s) => {
-                            // FIXME(Manishearth) ideally the emitting code
-                            // can tell us whether or not this is global
-                            let opt_colon =
-                                if s.trim_start().starts_with("::") { "" } else { "::" };
-
-                            (format!("crate{}{}", opt_colon, s), Applicability::MachineApplicable)
-                        }
-                        Err(_) => ("crate::<path>".to_string(), Applicability::HasPlaceholders),
-                    };
-                    db.span_suggestion(span, "use `crate`", sugg, app);
-                }
-                BuiltinLintDiagnostics::ProcMacroDeriveResolutionFallback(span) => {
-                    db.span_label(
-                        span,
-                        "names from parent modules are not accessible without an explicit import",
-                    );
-                }
-                BuiltinLintDiagnostics::MacroExpandedMacroExportsAccessedByAbsolutePaths(
-                    span_def,
-                ) => {
-                    db.span_note(span_def, "the macro is defined here");
-                }
-                BuiltinLintDiagnostics::ElidedLifetimesInPaths(
-                    n,
-                    path_span,
-                    incl_angl_brckt,
-                    insertion_span,
-                ) => {
-                    add_elided_lifetime_in_path_suggestion(
-                        sess.source_map(),
-                        db,
-                        n,
-                        path_span,
-                        incl_angl_brckt,
-                        insertion_span,
-                    );
-                }
-                BuiltinLintDiagnostics::UnknownCrateTypes(span, note, sugg) => {
-                    db.span_suggestion(span, note, sugg, Applicability::MaybeIncorrect);
-                }
-                BuiltinLintDiagnostics::UnusedImports(message, replaces, in_test_module) => {
-                    if !replaces.is_empty() {
-                        db.tool_only_multipart_suggestion(
-                            message,
-                            replaces,
-                            Applicability::MachineApplicable,
-                        );
-                    }
-
-                    if let Some(span) = in_test_module {
-                        db.span_help(
-                            self.sess().source_map().guess_head_span(span),
-                            "consider adding a `#[cfg(test)]` to the containing module",
-                        );
-                    }
-                }
-                BuiltinLintDiagnostics::RedundantImport(spans, ident) => {
-                    for (span, is_imported) in spans {
-                        let introduced = if is_imported { "imported" } else { "defined" };
-                        db.span_label(
-                            span,
-                            format!("the item `{}` is already {} here", ident, introduced),
-                        );
-                    }
-                }
-                BuiltinLintDiagnostics::DeprecatedMacro(suggestion, span) => {
-                    stability::deprecation_suggestion(db, "macro", suggestion, span)
-                }
-                BuiltinLintDiagnostics::UnusedDocComment(span) => {
-                    db.span_label(span, "rustdoc does not generate documentation for macro invocations");
-                    db.help("to document an item produced by a macro, \
-                                  the macro must produce the documentation as part of its expansion");
-                }
-                BuiltinLintDiagnostics::PatternsInFnsWithoutBody(span, ident) => {
-                    db.span_suggestion(span, "remove `mut` from the parameter", ident, Applicability::MachineApplicable);
-                }
-                BuiltinLintDiagnostics::MissingAbi(span, default_abi) => {
-                    db.span_label(span, "ABI should be specified here");
-                    db.help(format!("the default ABI is {}", default_abi.name()));
-                }
-                BuiltinLintDiagnostics::LegacyDeriveHelpers(span) => {
-                    db.span_label(span, "the attribute is introduced here");
-                }
-                BuiltinLintDiagnostics::ProcMacroBackCompat(note) => {
-                    db.note(note);
-                }
-                BuiltinLintDiagnostics::OrPatternsBackCompat(span,suggestion) => {
-                    db.span_suggestion(span, "use pat_param to preserve semantics", suggestion, Applicability::MachineApplicable);
-                }
-                BuiltinLintDiagnostics::ReservedPrefix(span) => {
-                    db.span_label(span, "unknown prefix");
-                    db.span_suggestion_verbose(
-                        span.shrink_to_hi(),
-                        "insert whitespace here to avoid this being parsed as a prefix in Rust 2021",
-                        " ",
-                        Applicability::MachineApplicable,
-                    );
-                }
-                BuiltinLintDiagnostics::UnusedBuiltinAttribute {
-                    attr_name,
-                    macro_name,
-                    invoc_span
-                } => {
-                    db.span_note(
-                        invoc_span,
-                        format!("the built-in attribute `{attr_name}` will be ignored, since it's applied to the macro invocation `{macro_name}`")
-                    );
-                }
-                BuiltinLintDiagnostics::TrailingMacro(is_trailing, name) => {
-                    if is_trailing {
-                        db.note("macro invocations at the end of a block are treated as expressions");
-                        db.note(format!("to ignore the value produced by the macro, add a semicolon after the invocation of `{name}`"));
-                    }
-                }
-                BuiltinLintDiagnostics::BreakWithLabelAndLoop(span) => {
-                    db.multipart_suggestion(
-                        "wrap this expression in parentheses",
-                        vec![(span.shrink_to_lo(), "(".to_string()),
-                             (span.shrink_to_hi(), ")".to_string())],
-                        Applicability::MachineApplicable
-                    );
-                }
-                BuiltinLintDiagnostics::NamedAsmLabel(help) => {
-                    db.help(help);
-                    db.note("see the asm section of Rust By Example <https://doc.rust-lang.org/nightly/rust-by-example/unsafe/asm.html#labels> for more information");
-                },
-                BuiltinLintDiagnostics::UnexpectedCfgName((name, name_span), value) => {
-                    let possibilities: Vec<Symbol> = sess.parse_sess.check_config.expecteds.keys().map(|s| *s).collect();
-
-                    // Suggest the most probable if we found one
-                    if let Some(best_match) = find_best_match_for_name(&possibilities, name, None) {
-                        if let Some(ExpectedValues::Some(best_match_values)) =
-                            sess.parse_sess.check_config.expecteds.get(&best_match) {
-                            let mut possibilities = best_match_values.iter()
-                                .flatten()
-                                .map(Symbol::as_str)
-                                .collect::<Vec<_>>();
-                            possibilities.sort();
-
-                            if let Some((value, value_span)) = value {
-                                if best_match_values.contains(&Some(value)) {
-                                    db.span_suggestion(name_span, "there is a config with a similar name and value", best_match, Applicability::MaybeIncorrect);
-                                } else if best_match_values.contains(&None) {
-                                    db.span_suggestion(name_span.to(value_span), "there is a config with a similar name and no value", best_match, Applicability::MaybeIncorrect);
-                                } else if let Some(first_value) = possibilities.first() {
-                                    db.span_suggestion(name_span.to(value_span), "there is a config with a similar name and different values", format!("{best_match} = \"{first_value}\""), Applicability::MaybeIncorrect);
-                                } else {
-                                    db.span_suggestion(name_span.to(value_span), "there is a config with a similar name and different values", best_match, Applicability::MaybeIncorrect);
-                                };
-                            } else {
-                                db.span_suggestion(name_span, "there is a config with a similar name", best_match, Applicability::MaybeIncorrect);
-                            }
-
-                            if !possibilities.is_empty() {
-                                let possibilities = possibilities.join("`, `");
-                                db.help(format!("expected values for `{best_match}` are: `{possibilities}`"));
-                            }
-                        } else {
-                            db.span_suggestion(name_span, "there is a config with a similar name", best_match, Applicability::MaybeIncorrect);
-                        }
-                    }
-                },
-                BuiltinLintDiagnostics::UnexpectedCfgValue((name, name_span), value) => {
-                    let Some(ExpectedValues::Some(values)) = &sess.parse_sess.check_config.expecteds.get(&name) else {
-                        bug!("it shouldn't be possible to have a diagnostic on a value whose name is not in values");
-                    };
-                    let mut have_none_possibility = false;
-                    let possibilities: Vec<Symbol> = values.iter()
-                        .inspect(|a| have_none_possibility |= a.is_none())
-                        .copied()
-                        .flatten()
-                        .collect();
-
-                    // Show the full list if all possible values for a given name, but don't do it
-                    // for names as the possibilities could be very long
-                    if !possibilities.is_empty() {
-                        {
-                            let mut possibilities = possibilities.iter().map(Symbol::as_str).collect::<Vec<_>>();
-                            possibilities.sort();
-
-                            let possibilities = possibilities.join("`, `");
-                            let none = if have_none_possibility { "(none), " } else { "" };
-
-                            db.note(format!("expected values for `{name}` are: {none}`{possibilities}`"));
-                        }
-
-                        if let Some((value, value_span)) = value {
-                            // Suggest the most probable if we found one
-                            if let Some(best_match) = find_best_match_for_name(&possibilities, value, None) {
-                                db.span_suggestion(value_span, "there is a expected value with a similar name", format!("\"{best_match}\""), Applicability::MaybeIncorrect);
-
-                            }
-                        } else if let &[first_possibility] = &possibilities[..] {
-                            db.span_suggestion(name_span.shrink_to_hi(), "specify a config value", format!(" = \"{first_possibility}\""), Applicability::MaybeIncorrect);
-                        }
-                    } else if have_none_possibility {
-                        db.note(format!("no expected value for `{name}`"));
-                        if let Some((_value, value_span)) = value {
-                            db.span_suggestion(name_span.shrink_to_hi().to(value_span), "remove the value", "", Applicability::MaybeIncorrect);
-                        }
-                    }
-                },
-                BuiltinLintDiagnostics::DeprecatedWhereclauseLocation(new_span, suggestion) => {
-                    db.multipart_suggestion(
-                        "move it to the end of the type declaration",
-                        vec![(db.span.primary_span().unwrap(), "".to_string()), (new_span, suggestion)],
-                        Applicability::MachineApplicable,
-                    );
-                    db.note(
-                        "see issue #89122 <https://github.com/rust-lang/rust/issues/89122> for more information",
-                    );
-                },
-                BuiltinLintDiagnostics::SingleUseLifetime {
-                    param_span,
-                    use_span: Some((use_span, elide)),
-                    deletion_span,
-                } => {
-                    debug!(?param_span, ?use_span, ?deletion_span);
-                    db.span_label(param_span, "this lifetime...");
-                    db.span_label(use_span, "...is used only here");
-                    if let Some(deletion_span) = deletion_span {
-                        let msg = "elide the single-use lifetime";
-                        let (use_span, replace_lt) = if elide {
-                            let use_span = sess.source_map().span_extend_while(
-                                use_span,
-                                char::is_whitespace,
-                            ).unwrap_or(use_span);
-                            (use_span, String::new())
-                        } else {
-                            (use_span, "'_".to_owned())
-                        };
-                        debug!(?deletion_span, ?use_span);
-
-                        // issue 107998 for the case such as a wrong function pointer type
-                        // `deletion_span` is empty and there is no need to report lifetime uses here
-                        let suggestions = if deletion_span.is_empty() {
-                            vec![(use_span, replace_lt)]
-                        } else {
-                            vec![(deletion_span, String::new()), (use_span, replace_lt)]
-                        };
-                        db.multipart_suggestion(
-                            msg,
-                            suggestions,
-                            Applicability::MachineApplicable,
-                        );
-                    }
-                },
-                BuiltinLintDiagnostics::SingleUseLifetime {
-                    param_span: _,
-                    use_span: None,
-                    deletion_span,
-                } => {
-                    debug!(?deletion_span);
-                    if let Some(deletion_span) = deletion_span {
-                        db.span_suggestion(
-                            deletion_span,
-                            "elide the unused lifetime",
-                            "",
-                            Applicability::MachineApplicable,
-                        );
-                    }
-                },
-                BuiltinLintDiagnostics::NamedArgumentUsedPositionally{ position_sp_to_replace, position_sp_for_msg, named_arg_sp, named_arg_name, is_formatting_arg} => {
-                    db.span_label(named_arg_sp, "this named argument is referred to by position in formatting string");
-                    if let Some(positional_arg_for_msg) = position_sp_for_msg {
-                        let msg = format!("this formatting argument uses named argument `{}` by position", named_arg_name);
-                        db.span_label(positional_arg_for_msg, msg);
-                    }
-
-                    if let Some(positional_arg_to_replace) = position_sp_to_replace {
-                        let name = if is_formatting_arg { named_arg_name + "$" } else { named_arg_name };
-                        let span_to_replace = if let Ok(positional_arg_content) =
-                            self.sess().source_map().span_to_snippet(positional_arg_to_replace) && positional_arg_content.starts_with(':') {
-                            positional_arg_to_replace.shrink_to_lo()
-                        } else {
-                            positional_arg_to_replace
-                        };
-                        db.span_suggestion_verbose(
-                            span_to_replace,
-                            "use the named argument by name to avoid ambiguity",
-                            name,
-                            Applicability::MaybeIncorrect,
-                        );
-                    }
-                }
-                BuiltinLintDiagnostics::ByteSliceInPackedStructWithDerive => {
-                    db.help("consider implementing the trait by hand, or remove the `packed` attribute");
-                }
-                BuiltinLintDiagnostics::UnusedExternCrate { removal_span }=> {
-                    db.span_suggestion(
-                        removal_span,
-                        "remove it",
-                        "",
-                        Applicability::MachineApplicable,
-                    );
-                }
-                BuiltinLintDiagnostics::ExternCrateNotIdiomatic { vis_span, ident_span }=> {
-                    let suggestion_span = vis_span.between(ident_span);
-                    db.span_suggestion_verbose(
-                        suggestion_span,
-                        "convert it to a `use`",
-                        if vis_span.is_empty() { "use " } else { " use " },
-                        Applicability::MachineApplicable,
-                    );
-                }
-                BuiltinLintDiagnostics::AmbiguousGlobReexports { name, namespace, first_reexport_span, duplicate_reexport_span } => {
-                    db.span_label(first_reexport_span, format!("the name `{}` in the {} namespace is first re-exported here", name, namespace));
-                    db.span_label(duplicate_reexport_span, format!("but the name `{}` in the {} namespace is also re-exported here", name, namespace));
-                }
-                BuiltinLintDiagnostics::HiddenGlobReexports { name, namespace, glob_reexport_span, private_item_span } => {
-                    db.span_note(glob_reexport_span, format!("the name `{}` in the {} namespace is supposed to be publicly re-exported here", name, namespace));
-                    db.span_note(private_item_span, "but the private item here shadows it".to_owned());
-                }
-            }
-            // Rewrap `db`, and pass control to the user.
-            decorate(db)
-        });
-    }
 
     // FIXME: These methods should not take an Into<MultiSpan> -- instead, callers should need to
     // set the span in their `decorate` function (preferably using set_span).
     /// Emit a lint at the appropriate level, with an optional associated span.
     ///
-    /// Return value of the `decorate` closure is ignored, see [`struct_lint_level`] for a detailed explanation.
-    ///
-    /// [`struct_lint_level`]: rustc_middle::lint::struct_lint_level#decorate-signature
+    /// [`lint_level`]: rustc_middle::lint::lint_level#decorate-signature
     #[rustc_lint_diagnostics]
-    fn lookup<S: Into<MultiSpan>>(
+    fn opt_span_lint<S: Into<MultiSpan>>(
         &self,
         lint: &'static Lint,
         span: Option<S>,
-        msg: impl Into<DiagnosticMessage>,
-        decorate: impl for<'a, 'b> FnOnce(
-            &'b mut DiagnosticBuilder<'a, ()>,
-        ) -> &'b mut DiagnosticBuilder<'a, ()>,
+        decorate: impl for<'a, 'b> FnOnce(&'b mut Diag<'a, ()>),
     );
 
-    /// Emit a lint at `span` from a lint struct (some type that implements `DecorateLint`,
+    /// Emit a lint at `span` from a lint struct (some type that implements `LintDiagnostic`,
     /// typically generated by `#[derive(LintDiagnostic)]`).
-    fn emit_spanned_lint<S: Into<MultiSpan>>(
+    fn emit_span_lint<S: Into<MultiSpan>>(
         &self,
         lint: &'static Lint,
         span: S,
-        decorator: impl for<'a> DecorateLint<'a, ()>,
+        decorator: impl for<'a> LintDiagnostic<'a, ()>,
     ) {
-        self.lookup(lint, Some(span), decorator.msg(), |diag| decorator.decorate_lint(diag));
+        self.opt_span_lint(lint, Some(span), |lint| {
+            decorator.decorate_lint(lint);
+        });
     }
 
     /// Emit a lint at the appropriate level, with an associated span.
     ///
-    /// Return value of the `decorate` closure is ignored, see [`struct_lint_level`] for a detailed explanation.
-    ///
-    /// [`struct_lint_level`]: rustc_middle::lint::struct_lint_level#decorate-signature
+    /// [`lint_level`]: rustc_middle::lint::lint_level#decorate-signature
     #[rustc_lint_diagnostics]
-    fn struct_span_lint<S: Into<MultiSpan>>(
+    fn span_lint<S: Into<MultiSpan>>(
         &self,
         lint: &'static Lint,
         span: S,
-        msg: impl Into<DiagnosticMessage>,
-        decorate: impl for<'a, 'b> FnOnce(
-            &'b mut DiagnosticBuilder<'a, ()>,
-        ) -> &'b mut DiagnosticBuilder<'a, ()>,
+        decorate: impl for<'a, 'b> FnOnce(&'b mut Diag<'a, ()>),
     ) {
-        self.lookup(lint, Some(span), msg, decorate);
+        self.opt_span_lint(lint, Some(span), decorate);
     }
 
-    /// Emit a lint from a lint struct (some type that implements `DecorateLint`, typically
+    /// Emit a lint from a lint struct (some type that implements `LintDiagnostic`, typically
     /// generated by `#[derive(LintDiagnostic)]`).
-    fn emit_lint(&self, lint: &'static Lint, decorator: impl for<'a> DecorateLint<'a, ()>) {
-        self.lookup(lint, None as Option<Span>, decorator.msg(), |diag| {
-            decorator.decorate_lint(diag)
+    fn emit_lint(&self, lint: &'static Lint, decorator: impl for<'a> LintDiagnostic<'a, ()>) {
+        self.opt_span_lint(lint, None as Option<Span>, |lint| {
+            decorator.decorate_lint(lint);
         });
     }
 
     /// Emit a lint at the appropriate level, with no associated span.
     ///
-    /// Return value of the `decorate` closure is ignored, see [`struct_lint_level`] for a detailed explanation.
-    ///
-    /// [`struct_lint_level`]: rustc_middle::lint::struct_lint_level#decorate-signature
+    /// [`lint_level`]: rustc_middle::lint::lint_level#decorate-signature
     #[rustc_lint_diagnostics]
-    fn lint(
-        &self,
-        lint: &'static Lint,
-        msg: impl Into<DiagnosticMessage>,
-        decorate: impl for<'a, 'b> FnOnce(
-            &'b mut DiagnosticBuilder<'a, ()>,
-        ) -> &'b mut DiagnosticBuilder<'a, ()>,
-    ) {
-        self.lookup(lint, None as Option<Span>, msg, decorate);
+    fn lint(&self, lint: &'static Lint, decorate: impl for<'a, 'b> FnOnce(&'b mut Diag<'a, ()>)) {
+        self.opt_span_lint(lint, None as Option<Span>, decorate);
     }
 
     /// This returns the lint level for the given lint at the current location.
@@ -1044,13 +576,15 @@ pub trait LintContext: Sized {
     /// Note that this function should only be called for [`LintExpectationId`]s
     /// retrieved from the current lint pass. Buffered or manually created ids can
     /// cause ICEs.
-    #[rustc_lint_diagnostics]
     fn fulfill_expectation(&self, expectation: LintExpectationId) {
         // We need to make sure that submitted expectation ids are correctly fulfilled suppressed
         // and stored between compilation sessions. To not manually do these steps, we simply create
-        // a dummy diagnostic and emit is as usual, which will be suppressed and stored like a normal
-        // expected lint diagnostic.
+        // a dummy diagnostic and emit it as usual, which will be suppressed and stored like a
+        // normal expected lint diagnostic.
+        #[allow(rustc::diagnostic_outside_of_impl)]
+        #[allow(rustc::untranslatable_diagnostic)]
         self.sess()
+            .dcx()
             .struct_expect(
                 "this is a dummy diagnostic, to submit and store an expectation",
                 expectation,
@@ -1062,7 +596,8 @@ pub trait LintContext: Sized {
 impl<'a> EarlyContext<'a> {
     pub(crate) fn new(
         sess: &'a Session,
-        warn_about_weird_lints: bool,
+        features: &'a Features,
+        lint_added_lints: bool,
         lint_store: &'a LintStore,
         registered_tools: &'a RegisteredTools,
         buffered: LintBuffer,
@@ -1070,7 +605,8 @@ impl<'a> EarlyContext<'a> {
         EarlyContext {
             builder: LintLevelsBuilder::new(
                 sess,
-                warn_about_weird_lints,
+                features,
+                lint_added_lints,
                 lint_store,
                 registered_tools,
             ),
@@ -1080,32 +616,23 @@ impl<'a> EarlyContext<'a> {
 }
 
 impl<'tcx> LintContext for LateContext<'tcx> {
-    type PassObject = LateLintPassObject<'tcx>;
-
     /// Gets the overall compiler `Session` object.
     fn sess(&self) -> &Session {
-        &self.tcx.sess
-    }
-
-    fn lints(&self) -> &LintStore {
-        &*self.lint_store
+        self.tcx.sess
     }
 
     #[rustc_lint_diagnostics]
-    fn lookup<S: Into<MultiSpan>>(
+    fn opt_span_lint<S: Into<MultiSpan>>(
         &self,
         lint: &'static Lint,
         span: Option<S>,
-        msg: impl Into<DiagnosticMessage>,
-        decorate: impl for<'a, 'b> FnOnce(
-            &'b mut DiagnosticBuilder<'a, ()>,
-        ) -> &'b mut DiagnosticBuilder<'a, ()>,
+        decorate: impl for<'a, 'b> FnOnce(&'b mut Diag<'a, ()>),
     ) {
         let hir_id = self.last_node_with_lint_attrs;
 
         match span {
-            Some(s) => self.tcx.struct_span_lint_hir(lint, hir_id, s, msg, decorate),
-            None => self.tcx.struct_lint_node(lint, hir_id, msg, decorate),
+            Some(s) => self.tcx.node_span_lint(lint, hir_id, s, decorate),
+            None => self.tcx.node_lint(lint, hir_id, decorate),
         }
     }
 
@@ -1115,28 +642,19 @@ impl<'tcx> LintContext for LateContext<'tcx> {
 }
 
 impl LintContext for EarlyContext<'_> {
-    type PassObject = EarlyLintPassObject;
-
     /// Gets the overall compiler `Session` object.
     fn sess(&self) -> &Session {
-        &self.builder.sess()
-    }
-
-    fn lints(&self) -> &LintStore {
-        self.builder.lint_store()
+        self.builder.sess()
     }
 
     #[rustc_lint_diagnostics]
-    fn lookup<S: Into<MultiSpan>>(
+    fn opt_span_lint<S: Into<MultiSpan>>(
         &self,
         lint: &'static Lint,
         span: Option<S>,
-        msg: impl Into<DiagnosticMessage>,
-        decorate: impl for<'a, 'b> FnOnce(
-            &'b mut DiagnosticBuilder<'a, ()>,
-        ) -> &'b mut DiagnosticBuilder<'a, ()>,
+        decorate: impl for<'a, 'b> FnOnce(&'b mut Diag<'a, ()>),
     ) {
-        self.builder.struct_lint(lint, span.map(|s| s.into()), msg, decorate)
+        self.builder.opt_span_lint(lint, span.map(|s| s.into()), decorate)
     }
 
     fn get_lint_level(&self, lint: &'static Lint) -> Level {
@@ -1145,6 +663,22 @@ impl LintContext for EarlyContext<'_> {
 }
 
 impl<'tcx> LateContext<'tcx> {
+    /// The typing mode of the currently visited node. Use this when
+    /// building a new `InferCtxt`.
+    pub fn typing_mode(&self) -> TypingMode<'tcx> {
+        // FIXME(#132279): In case we're in a body, we should use a typing
+        // mode which reveals the opaque types defined by that body.
+        TypingMode::non_body_analysis()
+    }
+
+    pub fn typing_env(&self) -> TypingEnv<'tcx> {
+        TypingEnv { typing_mode: self.typing_mode(), param_env: self.param_env }
+    }
+
+    pub fn type_is_copy_modulo_regions(&self, ty: Ty<'tcx>) -> bool {
+        self.tcx.type_is_copy_modulo_regions(self.typing_env(), ty)
+    }
+
     /// Gets the type-checking results for the current body,
     /// or `None` if outside a body.
     pub fn maybe_typeck_results(&self) -> Option<&'tcx ty::TypeckResults<'tcx>> {
@@ -1170,42 +704,18 @@ impl<'tcx> LateContext<'tcx> {
     /// bodies (e.g. for paths in `hir::Ty`), without any risk of ICE-ing.
     pub fn qpath_res(&self, qpath: &hir::QPath<'_>, id: hir::HirId) -> Res {
         match *qpath {
-            hir::QPath::Resolved(_, ref path) => path.res,
+            hir::QPath::Resolved(_, path) => path.res,
             hir::QPath::TypeRelative(..) | hir::QPath::LangItem(..) => self
                 .maybe_typeck_results()
                 .filter(|typeck_results| typeck_results.hir_owner == id.owner)
                 .or_else(|| {
                     self.tcx
-                        .has_typeck_results(id.owner.to_def_id())
+                        .has_typeck_results(id.owner.def_id)
                         .then(|| self.tcx.typeck(id.owner.def_id))
                 })
                 .and_then(|typeck_results| typeck_results.type_dependent_def(id))
                 .map_or(Res::Err, |(kind, def_id)| Res::Def(kind, def_id)),
         }
-    }
-
-    /// Check if a `DefId`'s path matches the given absolute type path usage.
-    ///
-    /// Anonymous scopes such as `extern` imports are matched with `kw::Empty`;
-    /// inherent `impl` blocks are matched with the name of the type.
-    ///
-    /// Instead of using this method, it is often preferable to instead use
-    /// `rustc_diagnostic_item` or a `lang_item`. This is less prone to errors
-    /// as paths get invalidated if the target definition moves.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore (no context or def id available)
-    /// if cx.match_def_path(def_id, &[sym::core, sym::option, sym::Option]) {
-    ///     // The given `def_id` is that of an `Option` type
-    /// }
-    /// ```
-    ///
-    /// Used by clippy, but should be replaced by diagnostic items eventually.
-    pub fn match_def_path(&self, def_id: DefId, path: &[Symbol]) -> bool {
-        let names = self.get_def_path(def_id);
-
-        names.len() == path.len() && iter::zip(names, path).all(|(a, &b)| a == b)
     }
 
     /// Gets the absolute path of `def_id` as a vector of `Symbol`.
@@ -1219,77 +729,72 @@ impl<'tcx> LateContext<'tcx> {
     /// }
     /// ```
     pub fn get_def_path(&self, def_id: DefId) -> Vec<Symbol> {
-        pub struct AbsolutePathPrinter<'tcx> {
-            pub tcx: TyCtxt<'tcx>,
+        struct AbsolutePathPrinter<'tcx> {
+            tcx: TyCtxt<'tcx>,
+            path: Vec<Symbol>,
         }
 
         impl<'tcx> Printer<'tcx> for AbsolutePathPrinter<'tcx> {
-            type Error = !;
-
-            type Path = Vec<Symbol>;
-            type Region = ();
-            type Type = ();
-            type DynExistential = ();
-            type Const = ();
-
             fn tcx(&self) -> TyCtxt<'tcx> {
                 self.tcx
             }
 
-            fn print_region(self, _region: ty::Region<'_>) -> Result<Self::Region, Self::Error> {
+            fn print_region(&mut self, _region: ty::Region<'_>) -> Result<(), PrintError> {
                 Ok(())
             }
 
-            fn print_type(self, _ty: Ty<'tcx>) -> Result<Self::Type, Self::Error> {
+            fn print_type(&mut self, _ty: Ty<'tcx>) -> Result<(), PrintError> {
                 Ok(())
             }
 
             fn print_dyn_existential(
-                self,
+                &mut self,
                 _predicates: &'tcx ty::List<ty::PolyExistentialPredicate<'tcx>>,
-            ) -> Result<Self::DynExistential, Self::Error> {
+            ) -> Result<(), PrintError> {
                 Ok(())
             }
 
-            fn print_const(self, _ct: ty::Const<'tcx>) -> Result<Self::Const, Self::Error> {
+            fn print_const(&mut self, _ct: ty::Const<'tcx>) -> Result<(), PrintError> {
                 Ok(())
             }
 
-            fn path_crate(self, cnum: CrateNum) -> Result<Self::Path, Self::Error> {
-                Ok(vec![self.tcx.crate_name(cnum)])
+            fn path_crate(&mut self, cnum: CrateNum) -> Result<(), PrintError> {
+                self.path = vec![self.tcx.crate_name(cnum)];
+                Ok(())
             }
 
             fn path_qualified(
-                self,
+                &mut self,
                 self_ty: Ty<'tcx>,
                 trait_ref: Option<ty::TraitRef<'tcx>>,
-            ) -> Result<Self::Path, Self::Error> {
+            ) -> Result<(), PrintError> {
                 if trait_ref.is_none() {
-                    if let ty::Adt(def, substs) = self_ty.kind() {
-                        return self.print_def_path(def.did(), substs);
+                    if let ty::Adt(def, args) = self_ty.kind() {
+                        return self.print_def_path(def.did(), args);
                     }
                 }
 
                 // This shouldn't ever be needed, but just in case:
                 with_no_trimmed_paths!({
-                    Ok(vec![match trait_ref {
-                        Some(trait_ref) => Symbol::intern(&format!("{:?}", trait_ref)),
-                        None => Symbol::intern(&format!("<{}>", self_ty)),
-                    }])
+                    self.path = vec![match trait_ref {
+                        Some(trait_ref) => Symbol::intern(&format!("{trait_ref:?}")),
+                        None => Symbol::intern(&format!("<{self_ty}>")),
+                    }];
+                    Ok(())
                 })
             }
 
             fn path_append_impl(
-                self,
-                print_prefix: impl FnOnce(Self) -> Result<Self::Path, Self::Error>,
+                &mut self,
+                print_prefix: impl FnOnce(&mut Self) -> Result<(), PrintError>,
                 _disambiguated_data: &DisambiguatedDefPathData,
                 self_ty: Ty<'tcx>,
                 trait_ref: Option<ty::TraitRef<'tcx>>,
-            ) -> Result<Self::Path, Self::Error> {
-                let mut path = print_prefix(self)?;
+            ) -> Result<(), PrintError> {
+                print_prefix(self)?;
 
                 // This shouldn't ever be needed, but just in case:
-                path.push(match trait_ref {
+                self.path.push(match trait_ref {
                     Some(trait_ref) => {
                         with_no_trimmed_paths!(Symbol::intern(&format!(
                             "<impl {} for {}>",
@@ -1298,39 +803,41 @@ impl<'tcx> LateContext<'tcx> {
                         )))
                     }
                     None => {
-                        with_no_trimmed_paths!(Symbol::intern(&format!("<impl {}>", self_ty)))
+                        with_no_trimmed_paths!(Symbol::intern(&format!("<impl {self_ty}>")))
                     }
                 });
 
-                Ok(path)
+                Ok(())
             }
 
             fn path_append(
-                self,
-                print_prefix: impl FnOnce(Self) -> Result<Self::Path, Self::Error>,
+                &mut self,
+                print_prefix: impl FnOnce(&mut Self) -> Result<(), PrintError>,
                 disambiguated_data: &DisambiguatedDefPathData,
-            ) -> Result<Self::Path, Self::Error> {
-                let mut path = print_prefix(self)?;
+            ) -> Result<(), PrintError> {
+                print_prefix(self)?;
 
                 // Skip `::{{extern}}` blocks and `::{{constructor}}` on tuple/unit structs.
                 if let DefPathData::ForeignMod | DefPathData::Ctor = disambiguated_data.data {
-                    return Ok(path);
+                    return Ok(());
                 }
 
-                path.push(Symbol::intern(&disambiguated_data.data.to_string()));
-                Ok(path)
+                self.path.push(Symbol::intern(&disambiguated_data.data.to_string()));
+                Ok(())
             }
 
             fn path_generic_args(
-                self,
-                print_prefix: impl FnOnce(Self) -> Result<Self::Path, Self::Error>,
+                &mut self,
+                print_prefix: impl FnOnce(&mut Self) -> Result<(), PrintError>,
                 _args: &[GenericArg<'tcx>],
-            ) -> Result<Self::Path, Self::Error> {
+            ) -> Result<(), PrintError> {
                 print_prefix(self)
             }
         }
 
-        AbsolutePathPrinter { tcx: self.tcx }.print_def_path(def_id, &[]).unwrap()
+        let mut printer = AbsolutePathPrinter { tcx: self.tcx, path: vec![] };
+        printer.print_def_path(def_id, &[]).unwrap();
+        printer.path
     }
 
     /// Returns the associated type `name` for `self_ty` as an implementation of `trait_id`.
@@ -1345,9 +852,94 @@ impl<'tcx> LateContext<'tcx> {
         tcx.associated_items(trait_id)
             .find_by_name_and_kind(tcx, Ident::from_str(name), ty::AssocKind::Type, trait_id)
             .and_then(|assoc| {
-                let proj = tcx.mk_projection(assoc.def_id, [self_ty]);
-                tcx.try_normalize_erasing_regions(self.param_env, proj).ok()
+                let proj = Ty::new_projection(tcx, assoc.def_id, [self_ty]);
+                tcx.try_normalize_erasing_regions(self.typing_env(), proj).ok()
             })
+    }
+
+    /// If the given expression is a local binding, find the initializer expression.
+    /// If that initializer expression is another local binding, find its initializer again.
+    ///
+    /// This process repeats as long as possible (but usually no more than once).
+    /// Type-check adjustments are not taken in account in this function.
+    ///
+    /// Examples:
+    /// ```
+    /// let abc = 1;
+    /// let def = abc + 2;
+    /// //        ^^^^^^^ output
+    /// let def = def;
+    /// dbg!(def);
+    /// //   ^^^ input
+    /// ```
+    pub fn expr_or_init<'a>(&self, mut expr: &'a hir::Expr<'tcx>) -> &'a hir::Expr<'tcx> {
+        expr = expr.peel_blocks();
+
+        while let hir::ExprKind::Path(ref qpath) = expr.kind
+            && let Some(parent_node) = match self.qpath_res(qpath, expr.hir_id) {
+                Res::Local(hir_id) => Some(self.tcx.parent_hir_node(hir_id)),
+                _ => None,
+            }
+            && let Some(init) = match parent_node {
+                hir::Node::Expr(expr) => Some(expr),
+                hir::Node::LetStmt(hir::LetStmt { init, .. }) => *init,
+                _ => None,
+            }
+        {
+            expr = init.peel_blocks();
+        }
+        expr
+    }
+
+    /// If the given expression is a local binding, find the initializer expression.
+    /// If that initializer expression is another local or **outside** (`const`/`static`)
+    /// binding, find its initializer again.
+    ///
+    /// This process repeats as long as possible (but usually no more than once).
+    /// Type-check adjustments are not taken in account in this function.
+    ///
+    /// Examples:
+    /// ```
+    /// const ABC: i32 = 1;
+    /// //               ^ output
+    /// let def = ABC;
+    /// dbg!(def);
+    /// //   ^^^ input
+    ///
+    /// // or...
+    /// let abc = 1;
+    /// let def = abc + 2;
+    /// //        ^^^^^^^ output
+    /// dbg!(def);
+    /// //   ^^^ input
+    /// ```
+    pub fn expr_or_init_with_outside_body<'a>(
+        &self,
+        mut expr: &'a hir::Expr<'tcx>,
+    ) -> &'a hir::Expr<'tcx> {
+        expr = expr.peel_blocks();
+
+        while let hir::ExprKind::Path(ref qpath) = expr.kind
+            && let Some(parent_node) = match self.qpath_res(qpath, expr.hir_id) {
+                Res::Local(hir_id) => Some(self.tcx.parent_hir_node(hir_id)),
+                Res::Def(_, def_id) => self.tcx.hir().get_if_local(def_id),
+                _ => None,
+            }
+            && let Some(init) = match parent_node {
+                hir::Node::Expr(expr) => Some(expr),
+                hir::Node::LetStmt(hir::LetStmt { init, .. }) => *init,
+                hir::Node::Item(item) => match item.kind {
+                    hir::ItemKind::Const(.., body_id) | hir::ItemKind::Static(.., body_id) => {
+                        Some(self.tcx.hir().body(body_id).value)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            }
+        {
+            expr = init.peel_blocks();
+        }
+        expr
     }
 }
 
@@ -1365,10 +957,10 @@ impl<'tcx> ty::layout::HasTyCtxt<'tcx> for LateContext<'tcx> {
     }
 }
 
-impl<'tcx> ty::layout::HasParamEnv<'tcx> for LateContext<'tcx> {
+impl<'tcx> ty::layout::HasTypingEnv<'tcx> for LateContext<'tcx> {
     #[inline]
-    fn param_env(&self) -> ty::ParamEnv<'tcx> {
-        self.param_env
+    fn typing_env(&self) -> ty::TypingEnv<'tcx> {
+        self.typing_env()
     }
 }
 
@@ -1378,16 +970,5 @@ impl<'tcx> LayoutOfHelpers<'tcx> for LateContext<'tcx> {
     #[inline]
     fn handle_layout_err(&self, err: LayoutError<'tcx>, _: Span, _: Ty<'tcx>) -> LayoutError<'tcx> {
         err
-    }
-}
-
-pub fn parse_lint_and_tool_name(lint_name: &str) -> (Option<Symbol>, &str) {
-    match lint_name.split_once("::") {
-        Some((tool_name, lint_name)) => {
-            let tool_name = Symbol::intern(tool_name);
-
-            (Some(tool_name), lint_name)
-        }
-        None => (None, lint_name),
     }
 }

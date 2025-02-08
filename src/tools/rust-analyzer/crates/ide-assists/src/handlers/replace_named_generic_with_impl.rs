@@ -1,9 +1,9 @@
-use hir::Semantics;
+use hir::{FileRange, Semantics};
+use ide_db::text_edit::TextRange;
 use ide_db::{
-    base_db::{FileId, FileRange},
     defs::Definition,
     search::{SearchScope, UsageSearchResult},
-    RootDatabase,
+    EditionedFileId, RootDatabase,
 };
 use syntax::{
     ast::{
@@ -12,7 +12,6 @@ use syntax::{
     },
     match_ast, ted, AstNode,
 };
-use text_edit::TextRange;
 
 use crate::{AssistContext, AssistId, AssistKind, Assists};
 
@@ -59,7 +58,10 @@ pub(crate) fn replace_named_generic_with_impl(
     let mut path_types_to_replace = Vec::new();
     for (_a, refs) in usage_refs.iter() {
         for usage_ref in refs {
-            let param_node = find_path_type(&ctx.sema, &type_param_name, &usage_ref.name)?;
+            let Some(name_like) = usage_ref.name.clone().into_name_like() else {
+                continue;
+            };
+            let param_node = find_path_type(&ctx.sema, &type_param_name, &name_like)?;
             path_types_to_replace.push(param_node);
         }
     }
@@ -154,10 +156,10 @@ fn find_usages(
     sema: &Semantics<'_, RootDatabase>,
     fn_: &ast::Fn,
     type_param_def: Definition,
-    file_id: FileId,
+    file_id: EditionedFileId,
 ) -> UsageSearchResult {
     let file_range = FileRange { file_id, range: fn_.syntax().text_range() };
-    type_param_def.usages(sema).in_scope(SearchScope::file_range(file_range)).all()
+    type_param_def.usages(sema).in_scope(&SearchScope::file_range(file_range)).all()
 }
 
 fn check_valid_usages(usages: &UsageSearchResult, param_list_range: TextRange) -> bool {

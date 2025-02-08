@@ -1,8 +1,8 @@
 use std::{mem, ptr};
 
-use rand::distributions::{Alphanumeric, DistString, Standard};
 use rand::Rng;
-use test::{black_box, Bencher};
+use rand::distributions::{Alphanumeric, DistString, Standard};
+use test::{Bencher, black_box};
 
 #[bench]
 fn iterator(b: &mut Bencher) {
@@ -336,10 +336,10 @@ reverse!(reverse_u32, u32, |x| x as u32);
 reverse!(reverse_u64, u64, |x| x as u64);
 reverse!(reverse_u128, u128, |x| x as u128);
 #[repr(simd)]
-struct F64x4(f64, f64, f64, f64);
+struct F64x4([f64; 4]);
 reverse!(reverse_simd_f64x4, F64x4, |x| {
     let x = x as f64;
-    F64x4(x, x, x, x)
+    F64x4([x, x, x, x])
 });
 
 macro_rules! rotate {
@@ -366,14 +366,25 @@ rotate!(rotate_medium_half, gen_random, 9158, 9158 / 2);
 rotate!(rotate_medium_half_plus_one, gen_random, 9158, 9158 / 2 + 1);
 
 // Intended to use more RAM than the machine has cache
+#[cfg(not(target_os = "emscripten"))] // hits an OOM
 rotate!(rotate_huge_by1, gen_random, 5 * 1024 * 1024, 1);
+#[cfg(not(target_os = "emscripten"))] // hits an OOM
 rotate!(rotate_huge_by9199_u64, gen_random, 5 * 1024 * 1024, 9199);
+#[cfg(not(target_os = "emscripten"))] // hits an OOM
 rotate!(rotate_huge_by9199_bytes, gen_random_bytes, 5 * 1024 * 1024, 9199);
+#[cfg(not(target_os = "emscripten"))] // hits an OOM
 rotate!(rotate_huge_by9199_strings, gen_strings, 5 * 1024 * 1024, 9199);
+#[cfg(not(target_os = "emscripten"))] // hits an OOM
 rotate!(rotate_huge_by9199_big, gen_big_random, 5 * 1024 * 1024, 9199);
+#[cfg(not(target_os = "emscripten"))] // hits an OOM
 rotate!(rotate_huge_by1234577_u64, gen_random, 5 * 1024 * 1024, 1234577);
+#[cfg(not(target_os = "emscripten"))] // hits an OOM
 rotate!(rotate_huge_by1234577_bytes, gen_random_bytes, 5 * 1024 * 1024, 1234577);
+#[cfg(not(target_os = "emscripten"))] // hits an OOM
 rotate!(rotate_huge_by1234577_strings, gen_strings, 5 * 1024 * 1024, 1234577);
+#[cfg(not(target_os = "emscripten"))] // hits an OOM
 rotate!(rotate_huge_by1234577_big, gen_big_random, 5 * 1024 * 1024, 1234577);
+#[cfg(not(target_os = "emscripten"))] // hits an OOM
 rotate!(rotate_huge_half, gen_random, 5 * 1024 * 1024, 5 * 1024 * 1024 / 2);
+#[cfg(not(target_os = "emscripten"))] // hits an OOM
 rotate!(rotate_huge_half_plus_one, gen_random, 5 * 1024 * 1024, 5 * 1024 * 1024 / 2 + 1);

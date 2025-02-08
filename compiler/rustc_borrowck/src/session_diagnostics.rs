@@ -1,4 +1,5 @@
 use rustc_errors::MultiSpan;
+use rustc_errors::codes::*;
 use rustc_macros::{Diagnostic, LintDiagnostic, Subdiagnostic};
 use rustc_middle::ty::{GenericArg, Ty};
 use rustc_span::Span;
@@ -6,7 +7,7 @@ use rustc_span::Span;
 use crate::diagnostics::RegionName;
 
 #[derive(Diagnostic)]
-#[diag(borrowck_move_unsized, code = "E0161")]
+#[diag(borrowck_move_unsized, code = E0161)]
 pub(crate) struct MoveUnsized<'tcx> {
     pub ty: Ty<'tcx>,
     #[primary_span]
@@ -139,23 +140,23 @@ pub(crate) enum RequireStaticErr {
 
 #[derive(Subdiagnostic)]
 pub(crate) enum CaptureVarPathUseCause {
-    #[label(borrowck_borrow_due_to_use_generator)]
-    BorrowInGenerator {
+    #[label(borrowck_borrow_due_to_use_coroutine)]
+    BorrowInCoroutine {
         #[primary_span]
         path_span: Span,
     },
-    #[label(borrowck_use_due_to_use_generator)]
-    UseInGenerator {
+    #[label(borrowck_use_due_to_use_coroutine)]
+    UseInCoroutine {
         #[primary_span]
         path_span: Span,
     },
-    #[label(borrowck_assign_due_to_use_generator)]
-    AssignInGenerator {
+    #[label(borrowck_assign_due_to_use_coroutine)]
+    AssignInCoroutine {
         #[primary_span]
         path_span: Span,
     },
-    #[label(borrowck_assign_part_due_to_use_generator)]
-    AssignPartInGenerator {
+    #[label(borrowck_assign_part_due_to_use_coroutine)]
+    AssignPartInCoroutine {
         #[primary_span]
         path_span: Span,
     },
@@ -202,8 +203,8 @@ pub(crate) enum CaptureVarKind {
 
 #[derive(Subdiagnostic)]
 pub(crate) enum CaptureVarCause {
-    #[label(borrowck_var_borrow_by_use_place_in_generator)]
-    BorrowUsePlaceGenerator {
+    #[label(borrowck_var_borrow_by_use_place_in_coroutine)]
+    BorrowUsePlaceCoroutine {
         is_single_var: bool,
         place: String,
         #[primary_span]
@@ -216,8 +217,8 @@ pub(crate) enum CaptureVarCause {
         #[primary_span]
         var_span: Span,
     },
-    #[label(borrowck_var_borrow_by_use_in_generator)]
-    BorrowUseInGenerator {
+    #[label(borrowck_var_borrow_by_use_in_coroutine)]
+    BorrowUseInCoroutine {
         #[primary_span]
         var_span: Span,
     },
@@ -226,8 +227,8 @@ pub(crate) enum CaptureVarCause {
         #[primary_span]
         var_span: Span,
     },
-    #[label(borrowck_var_move_by_use_in_generator)]
-    MoveUseInGenerator {
+    #[label(borrowck_var_move_by_use_in_coroutine)]
+    MoveUseInCoroutine {
         #[primary_span]
         var_span: Span,
     },
@@ -236,8 +237,8 @@ pub(crate) enum CaptureVarCause {
         #[primary_span]
         var_span: Span,
     },
-    #[label(borrowck_var_first_borrow_by_use_place_in_generator)]
-    FirstBorrowUsePlaceGenerator {
+    #[label(borrowck_var_first_borrow_by_use_place_in_coroutine)]
+    FirstBorrowUsePlaceCoroutine {
         place: String,
         #[primary_span]
         var_span: Span,
@@ -248,8 +249,8 @@ pub(crate) enum CaptureVarCause {
         #[primary_span]
         var_span: Span,
     },
-    #[label(borrowck_var_second_borrow_by_use_place_in_generator)]
-    SecondBorrowUsePlaceGenerator {
+    #[label(borrowck_var_second_borrow_by_use_place_in_coroutine)]
+    SecondBorrowUsePlaceCoroutine {
         place: String,
         #[primary_span]
         var_span: Span,
@@ -266,8 +267,8 @@ pub(crate) enum CaptureVarCause {
         #[primary_span]
         var_span: Span,
     },
-    #[label(borrowck_partial_var_move_by_use_in_generator)]
-    PartialMoveUseInGenerator {
+    #[label(borrowck_partial_var_move_by_use_in_coroutine)]
+    PartialMoveUseInCoroutine {
         #[primary_span]
         var_span: Span,
         is_partial: bool,
@@ -281,7 +282,7 @@ pub(crate) enum CaptureVarCause {
 }
 
 #[derive(Diagnostic)]
-#[diag(borrowck_cannot_move_when_borrowed, code = "E0505")]
+#[diag(borrowck_cannot_move_when_borrowed, code = E0505)]
 pub(crate) struct MoveBorrow<'a> {
     pub place: &'a str,
     pub borrow_place: &'a str,
@@ -294,7 +295,7 @@ pub(crate) struct MoveBorrow<'a> {
 }
 
 #[derive(Diagnostic)]
-#[diag(borrowck_opaque_type_non_generic_param, code = "E0792")]
+#[diag(borrowck_opaque_type_non_generic_param, code = E0792)]
 pub(crate) struct NonGenericOpaqueTypeParam<'a, 'tcx> {
     pub ty: GenericArg<'tcx>,
     pub kind: &'a str,
@@ -302,6 +303,19 @@ pub(crate) struct NonGenericOpaqueTypeParam<'a, 'tcx> {
     pub span: Span,
     #[label]
     pub param_span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(borrowck_opaque_type_lifetime_mismatch)]
+pub(crate) struct LifetimeMismatchOpaqueParam<'tcx> {
+    pub arg: GenericArg<'tcx>,
+    pub prev: GenericArg<'tcx>,
+    #[primary_span]
+    #[label]
+    #[note]
+    pub span: Span,
+    #[label(borrowck_prev_lifetime_label)]
+    pub prev_span: Span,
 }
 
 #[derive(Subdiagnostic)]
@@ -368,6 +382,11 @@ pub(crate) enum CaptureReasonNote {
         #[primary_span]
         var_span: Span,
     },
+    #[note(borrowck_calling_operator_moves)]
+    UnOpMoveByOperator {
+        #[primary_span]
+        span: Span,
+    },
     #[note(borrowck_calling_operator_moves_lhs)]
     LhsMoveByOperator {
         #[primary_span]
@@ -396,9 +415,9 @@ pub(crate) enum CaptureReasonSuggest<'tcx> {
         span: Span,
     },
     #[suggestion(
-        borrowck_suggest_create_freash_reborrow,
+        borrowck_suggest_create_fresh_reborrow,
         applicability = "maybe-incorrect",
-        code = "as_mut().",
+        code = ".as_mut()",
         style = "verbose"
     )]
     FreshReborrow {
@@ -440,15 +459,31 @@ pub(crate) enum OnClosureNote<'a> {
 }
 
 #[derive(Subdiagnostic)]
-pub(crate) enum TypeNoCopy<'a, 'tcx> {
+pub(crate) enum TypeNoCopy<'a> {
     #[label(borrowck_ty_no_impl_copy)]
     Label {
         is_partial_move: bool,
-        ty: Ty<'tcx>,
+        ty: String,
         place: &'a str,
         #[primary_span]
         span: Span,
     },
     #[note(borrowck_ty_no_impl_copy)]
-    Note { is_partial_move: bool, ty: Ty<'tcx>, place: &'a str },
+    Note { is_partial_move: bool, ty: String, place: &'a str },
+}
+
+#[derive(Diagnostic)]
+#[diag(borrowck_simd_intrinsic_arg_const)]
+pub(crate) struct SimdIntrinsicArgConst {
+    #[primary_span]
+    pub span: Span,
+    pub arg: usize,
+    pub intrinsic: String,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(borrowck_tail_expr_drop_order)]
+pub(crate) struct TailExprDropOrder {
+    #[label]
+    pub borrowed: Span,
 }

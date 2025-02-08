@@ -1,7 +1,6 @@
-// compile-flags: -O
-// ignore-debug: the debug assertions get in the way
+//@ compile-flags: -O
 
-#![crate_type="rlib"]
+#![crate_type = "rlib"]
 
 // CHECK-LABEL: @memzero
 // CHECK-NOT: store

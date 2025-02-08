@@ -1,7 +1,8 @@
 use std::str::Utf8Error;
 
-use rustc_ast::{BorrowKind, LitKind};
+use rustc_ast::LitKind;
 use rustc_hir::{Expr, ExprKind};
+use rustc_session::{declare_lint, declare_lint_pass};
 use rustc_span::source_map::Spanned;
 use rustc_span::sym;
 
@@ -11,7 +12,7 @@ use crate::{LateContext, LateLintPass, LintContext};
 declare_lint! {
     /// The `invalid_from_utf8_unchecked` lint checks for calls to
     /// `std::str::from_utf8_unchecked` and `std::str::from_utf8_unchecked_mut`
-    /// with an invalid UTF-8 literal.
+    /// with a known invalid UTF-8 value.
     ///
     /// ### Example
     ///
@@ -36,7 +37,7 @@ declare_lint! {
 declare_lint! {
     /// The `invalid_from_utf8` lint checks for calls to
     /// `std::str::from_utf8` and `std::str::from_utf8_mut`
-    /// with an invalid UTF-8 literal.
+    /// with a known invalid UTF-8 value.
     ///
     /// ### Example
     ///
@@ -64,51 +65,64 @@ impl<'tcx> LateLintPass<'tcx> for InvalidFromUtf8 {
             && let ExprKind::Path(ref qpath) = path.kind
             && let Some(def_id) = cx.qpath_res(qpath, path.hir_id).opt_def_id()
             && let Some(diag_item) = cx.tcx.get_diagnostic_name(def_id)
-            && [sym::str_from_utf8, sym::str_from_utf8_mut,
-                sym::str_from_utf8_unchecked, sym::str_from_utf8_unchecked_mut].contains(&diag_item)
+            && [
+                sym::str_from_utf8,
+                sym::str_from_utf8_mut,
+                sym::str_from_utf8_unchecked,
+                sym::str_from_utf8_unchecked_mut,
+            ]
+            .contains(&diag_item)
         {
-            let lint = |utf8_error: Utf8Error| {
-                let label = arg.span;
+            let lint = |label, utf8_error: Utf8Error| {
                 let method = diag_item.as_str().strip_prefix("str_").unwrap();
                 let method = format!("std::str::{method}");
                 let valid_up_to = utf8_error.valid_up_to();
                 let is_unchecked_variant = diag_item.as_str().contains("unchecked");
 
-                cx.emit_spanned_lint(
-                    if is_unchecked_variant { INVALID_FROM_UTF8_UNCHECKED } else { INVALID_FROM_UTF8 },
+                cx.emit_span_lint(
+                    if is_unchecked_variant {
+                        INVALID_FROM_UTF8_UNCHECKED
+                    } else {
+                        INVALID_FROM_UTF8
+                    },
                     expr.span,
                     if is_unchecked_variant {
-                        InvalidFromUtf8Diag::Unchecked { method,  valid_up_to, label }
+                        InvalidFromUtf8Diag::Unchecked { method, valid_up_to, label }
                     } else {
-                        InvalidFromUtf8Diag::Checked { method,  valid_up_to, label }
-                    }
+                        InvalidFromUtf8Diag::Checked { method, valid_up_to, label }
+                    },
                 )
             };
 
-            match &arg.kind {
+            let mut init = cx.expr_or_init_with_outside_body(arg);
+            while let ExprKind::AddrOf(.., inner) = init.kind {
+                init = cx.expr_or_init_with_outside_body(inner);
+            }
+            match init.kind {
                 ExprKind::Lit(Spanned { node: lit, .. }) => {
                     if let LitKind::ByteStr(bytes, _) = &lit
                         && let Err(utf8_error) = std::str::from_utf8(bytes)
                     {
-                        lint(utf8_error);
+                        lint(init.span, utf8_error);
                     }
-                },
-                ExprKind::AddrOf(BorrowKind::Ref, _, Expr { kind: ExprKind::Array(args), .. }) => {
-                    let elements = args.iter().map(|e|{
-                        match &e.kind {
+                }
+                ExprKind::Array(args) => {
+                    let elements = args
+                        .iter()
+                        .map(|e| match &e.kind {
                             ExprKind::Lit(Spanned { node: lit, .. }) => match lit {
                                 LitKind::Byte(b) => Some(*b),
-                                LitKind::Int(b, _) => Some(*b as u8),
-                                _ => None
-                            }
-                            _ => None
-                        }
-                    }).collect::<Option<Vec<_>>>();
+                                LitKind::Int(b, _) => Some(b.get() as u8),
+                                _ => None,
+                            },
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<_>>>();
 
                     if let Some(elements) = elements
                         && let Err(utf8_error) = std::str::from_utf8(&elements)
                     {
-                        lint(utf8_error);
+                        lint(init.span, utf8_error);
                     }
                 }
                 _ => {}

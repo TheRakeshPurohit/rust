@@ -1,9 +1,9 @@
 // Test case where the method we want is an inherent method on a
 // dyn Trait. In that case, the fix is to insert `*` on the receiver.
 //
-// check-pass
-// run-rustfix
-// edition:2018
+//@ check-pass
+//@ run-rustfix
+//@ edition:2018
 
 #![warn(rust_2021_prelude_collisions)]
 
@@ -25,6 +25,7 @@ mod inner {
     // having a struct of the same name as the trait in-scope, while *also*
     // implementing the trait for that struct but **without** importing the
     // trait itself into scope
+    #[allow(dead_code)]
     struct TryIntoU32;
 
     impl super::TryIntoU32 for TryIntoU32 {

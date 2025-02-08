@@ -1,23 +1,31 @@
-use clippy_utils::macros::collect_ast_format_args;
-use clippy_utils::source::snippet_opt;
+use clippy_utils::macros::FormatArgsStorage;
+use clippy_utils::source::SpanRangeExt;
 use itertools::Itertools;
-use rustc_ast::{Expr, ExprKind, FormatArgs};
-use rustc_lexer::{tokenize, TokenKind};
+use rustc_ast::{Crate, Expr, ExprKind, FormatArgs};
+use rustc_data_structures::fx::FxHashMap;
+use rustc_lexer::{TokenKind, tokenize};
 use rustc_lint::{EarlyContext, EarlyLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
-use rustc_span::hygiene;
+use rustc_session::impl_lint_pass;
+use rustc_span::{Span, hygiene};
 use std::iter::once;
+use std::mem;
 
-declare_clippy_lint! {
-    /// ### What it does
-    /// Collects [`rustc_ast::FormatArgs`] so that future late passes can call
-    /// [`clippy_utils::macros::find_format_args`]
-    pub FORMAT_ARGS_COLLECTOR,
-    internal_warn,
-    "collects `format_args` AST nodes for use in later lints"
+/// Populates [`FormatArgsStorage`] with AST [`FormatArgs`] nodes
+pub struct FormatArgsCollector {
+    format_args: FxHashMap<Span, FormatArgs>,
+    storage: FormatArgsStorage,
 }
 
-declare_lint_pass!(FormatArgsCollector => [FORMAT_ARGS_COLLECTOR]);
+impl FormatArgsCollector {
+    pub fn new(storage: FormatArgsStorage) -> Self {
+        Self {
+            format_args: FxHashMap::default(),
+            storage,
+        }
+    }
+}
+
+impl_lint_pass!(FormatArgsCollector => []);
 
 impl EarlyLintPass for FormatArgsCollector {
     fn check_expr(&mut self, cx: &EarlyContext<'_>, expr: &Expr) {
@@ -26,8 +34,12 @@ impl EarlyLintPass for FormatArgsCollector {
                 return;
             }
 
-            collect_ast_format_args(expr.span, args);
+            self.format_args.insert(expr.span.with_parent(None), (**args).clone());
         }
+    }
+
+    fn check_crate_post(&mut self, _: &EarlyContext<'_>, _: &Crate) {
+        self.storage.set(mem::take(&mut self.format_args));
     }
 }
 
@@ -63,36 +75,21 @@ fn has_span_from_proc_macro(cx: &EarlyContext<'_>, args: &FormatArgs) -> bool {
 
     // `format!("{} {} {c}", "one", "two", c = "three")`
     //                     ^^     ^^     ^^^^^^
-    let between_spans = once(args.span)
+    !once(args.span)
         .chain(argument_span)
         .tuple_windows()
-        .map(|(start, end)| start.between(end));
-
-    for between_span in between_spans {
-        let mut seen_comma = false;
-
-        let Some(snippet) = snippet_opt(cx, between_span) else { return true };
-        for token in tokenize(&snippet) {
-            match token.kind {
-                TokenKind::LineComment { .. } | TokenKind::BlockComment { .. } | TokenKind::Whitespace => {},
-                TokenKind::Comma if !seen_comma => seen_comma = true,
-                // named arguments, `start_val, name = end_val`
-                //                            ^^^^^^^^^ between_span
-                TokenKind::Ident | TokenKind::Eq if seen_comma => {},
-                // An unexpected token usually indicates that we crossed a macro boundary
-                //
-                // `println!(some_proc_macro!("input {}"), a)`
-                //                                      ^^^ between_span
-                // `println!("{}", val!(x))`
-                //               ^^^^^^^ between_span
-                _ => return true,
-            }
-        }
-
-        if !seen_comma {
-            return true;
-        }
-    }
-
-    false
+        .map(|(start, end)| start.between(end))
+        .all(|sp| {
+            sp.check_source_text(cx, |src| {
+                // text should be either `, name` or `, name =`
+                let mut iter = tokenize(src).filter(|t| {
+                    !matches!(
+                        t.kind,
+                        TokenKind::LineComment { .. } | TokenKind::BlockComment { .. } | TokenKind::Whitespace
+                    )
+                });
+                iter.next().is_some_and(|t| matches!(t.kind, TokenKind::Comma))
+                    && iter.all(|t| matches!(t.kind, TokenKind::Ident | TokenKind::Eq))
+            })
+        })
 }

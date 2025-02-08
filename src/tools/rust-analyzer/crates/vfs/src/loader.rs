@@ -1,4 +1,4 @@
-//! Object safe interface for file watching and reading.
+//! Dynamically compatible interface for file watching and reading.
 use std::fmt;
 
 use paths::{AbsPath, AbsPathBuf};
@@ -43,18 +43,36 @@ pub struct Config {
     pub watch: Vec<usize>,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum LoadingProgress {
+    Started,
+    Progress(usize),
+    Finished,
+}
+
 /// Message about an action taken by a [`Handle`].
 pub enum Message {
     /// Indicate a gradual progress.
     ///
     /// This is supposed to be the number of loaded files.
-    Progress { n_total: usize, n_done: usize, config_version: u32 },
-    /// The handle loaded the following files' content.
+    Progress {
+        /// The total files to be loaded.
+        n_total: usize,
+        /// The files that have been loaded successfully.
+        n_done: LoadingProgress,
+        /// The dir being loaded, `None` if its for a file.
+        dir: Option<AbsPathBuf>,
+        /// The [`Config`] version.
+        config_version: u32,
+    },
+    /// The handle loaded the following files' content for the first time.
     Loaded { files: Vec<(AbsPathBuf, Option<Vec<u8>>)> },
+    /// The handle loaded the following files' content.
+    Changed { files: Vec<(AbsPathBuf, Option<Vec<u8>>)> },
 }
 
 /// Type that will receive [`Messages`](Message) from a [`Handle`].
-pub type Sender = Box<dyn Fn(Message) + Send>;
+pub type Sender = crossbeam_channel::Sender<Message>;
 
 /// Interface for reading and watching files.
 pub trait Handle: fmt::Debug {
@@ -190,7 +208,7 @@ impl Directories {
 /// ```
 fn dirs(base: AbsPathBuf, exclude: &[&str]) -> Directories {
     let exclude = exclude.iter().map(|it| base.join(it)).collect::<Vec<_>>();
-    Directories { extensions: vec!["rs".to_string()], include: vec![base], exclude }
+    Directories { extensions: vec!["rs".to_owned()], include: vec![base], exclude }
 }
 
 impl fmt::Debug for Message {
@@ -199,10 +217,14 @@ impl fmt::Debug for Message {
             Message::Loaded { files } => {
                 f.debug_struct("Loaded").field("n_files", &files.len()).finish()
             }
-            Message::Progress { n_total, n_done, config_version } => f
+            Message::Changed { files } => {
+                f.debug_struct("Changed").field("n_files", &files.len()).finish()
+            }
+            Message::Progress { n_total, n_done, dir, config_version } => f
                 .debug_struct("Progress")
                 .field("n_total", n_total)
                 .field("n_done", n_done)
+                .field("dir", dir)
                 .field("config_version", config_version)
                 .finish(),
         }
@@ -210,6 +232,6 @@ impl fmt::Debug for Message {
 }
 
 #[test]
-fn handle_is_object_safe() {
+fn handle_is_dyn_compatible() {
     fn _assert(_: &dyn Handle) {}
 }

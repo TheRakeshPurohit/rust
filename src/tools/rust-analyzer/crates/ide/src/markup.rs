@@ -5,7 +5,7 @@
 //! what is used by LSP, so let's keep it simple.
 use std::fmt;
 
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug, Hash, PartialEq, Eq)]
 pub struct Markup {
     text: String,
 }
@@ -34,5 +34,8 @@ impl Markup {
     }
     pub fn fenced_block(contents: impl fmt::Display) -> Markup {
         format!("```rust\n{contents}\n```").into()
+    }
+    pub fn fenced_block_text(contents: impl fmt::Display) -> Markup {
+        format!("```text\n{contents}\n```").into()
     }
 }

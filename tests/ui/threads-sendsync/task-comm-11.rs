@@ -1,7 +1,6 @@
-// run-pass
+//@ run-pass
 #![allow(unused_must_use)]
-// pretty-expanded FIXME #23616
-// ignore-emscripten no threads support
+//@ needs-threads
 
 use std::sync::mpsc::{channel, Sender};
 use std::thread;
@@ -13,9 +12,7 @@ fn start(tx: &Sender<Sender<isize>>) {
 
 pub fn main() {
     let (tx, rx) = channel();
-    let child = thread::spawn(move|| {
-        start(&tx)
-    });
+    let child = thread::spawn(move || start(&tx));
     let _tx = rx.recv().unwrap();
     child.join();
 }

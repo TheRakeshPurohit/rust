@@ -6,10 +6,10 @@ use clippy_utils::{is_res_lang_ctor, path_res, path_to_local_id};
 use rustc_hir::LangItem::{OptionNone, OptionSome};
 use rustc_hir::{Arm, Expr, ExprKind, HirId, Pat, PatKind};
 use rustc_lint::LateContext;
-use rustc_span::{sym, SyntaxContext};
+use rustc_span::{SyntaxContext, sym};
 
-use super::manual_utils::{check_with, SomeExpr};
 use super::MANUAL_FILTER;
+use super::manual_utils::{SomeExpr, check_with};
 
 // Function called on the <expr> of `[&+]Some((ref | ref mut) x) => <expr>`
 // Need to check if it's of the form `<expr>=if <cond> {<then_expr>} else {<else_expr>}`
@@ -21,20 +21,20 @@ fn get_cond_expr<'tcx>(
     expr: &'tcx Expr<'_>,
     ctxt: SyntaxContext,
 ) -> Option<SomeExpr<'tcx>> {
-    if_chain! {
-        if let Some(block_expr) = peels_blocks_incl_unsafe_opt(expr);
-        if let ExprKind::If(cond, then_expr, Some(else_expr)) = block_expr.kind;
-        if let PatKind::Binding(_,target, ..) = pat.kind;
-        if is_some_expr(cx, target, ctxt, then_expr) && is_none_expr(cx, else_expr)
-            || is_none_expr(cx, then_expr) && is_some_expr(cx, target, ctxt, else_expr); // check that one expr resolves to `Some(x)`, the other to `None`
-        then {
-            return Some(SomeExpr {
-                    expr: peels_blocks_incl_unsafe(cond.peel_drop_temps()),
-                    needs_unsafe_block: contains_unsafe_block(cx, expr),
-                    needs_negated: is_none_expr(cx, then_expr) // if the `then_expr` resolves to `None`, need to negate the cond
-                })
-            }
-    };
+    if let Some(block_expr) = peels_blocks_incl_unsafe_opt(expr)
+        && let ExprKind::If(cond, then_expr, Some(else_expr)) = block_expr.kind
+        && let PatKind::Binding(_, target, ..) = pat.kind
+        && (is_some_expr(cx, target, ctxt, then_expr) && is_none_expr(cx, else_expr)
+            || is_none_expr(cx, then_expr) && is_some_expr(cx, target, ctxt, else_expr))
+    // check that one expr resolves to `Some(x)`, the other to `None`
+    {
+        return Some(SomeExpr {
+            expr: peels_blocks_incl_unsafe(cond.peel_drop_temps()),
+            needs_unsafe_block: contains_unsafe_block(cx, expr),
+            needs_negated: is_none_expr(cx, then_expr), /* if the `then_expr` resolves to `None`, need to negate the
+                                                         * cond */
+        });
+    }
     None
 }
 
@@ -45,7 +45,7 @@ fn peels_blocks_incl_unsafe_opt<'a>(expr: &'a Expr<'a>) -> Option<&'a Expr<'a>> 
         if block.stmts.is_empty() {
             return block.expr;
         }
-    };
+    }
     None
 }
 
@@ -68,14 +68,14 @@ fn is_some_expr(cx: &LateContext<'_>, target: HirId, ctxt: SyntaxContext, expr: 
                 && is_res_lang_ctor(cx, path_res(cx, callee), OptionSome)
                 && path_to_local_id(arg, target);
         }
-    };
+    }
     false
 }
 
 fn is_none_expr(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
     if let Some(inner_expr) = peels_blocks_incl_unsafe_opt(expr) {
         return is_res_lang_ctor(cx, path_res(cx, inner_expr), OptionNone);
-    };
+    }
     false
 }
 
@@ -99,12 +99,20 @@ pub(super) fn check_match<'tcx>(
 ) {
     let ty = cx.typeck_results().expr_ty(expr);
     if is_type_diagnostic_item(cx, ty, sym::Option)
-    && let [first_arm, second_arm] = arms
-    && first_arm.guard.is_none()
-    && second_arm.guard.is_none()
-         {
-            check(cx, expr, scrutinee, first_arm.pat, first_arm.body, Some(second_arm.pat), second_arm.body);
-        }
+        && let [first_arm, second_arm] = arms
+        && first_arm.guard.is_none()
+        && second_arm.guard.is_none()
+    {
+        check(
+            cx,
+            expr,
+            scrutinee,
+            first_arm.pat,
+            first_arm.body,
+            Some(second_arm.pat),
+            second_arm.body,
+        );
+    }
 }
 
 pub(super) fn check_if_let<'tcx>(
@@ -143,7 +151,7 @@ fn check<'tcx>(
             MANUAL_FILTER,
             expr.span,
             "manual implementation of `Option::filter`",
-            "try this",
+            "try",
             if sugg_info.needs_brackets {
                 format!(
                     "{{ {}{}.filter({body_str}) }}",

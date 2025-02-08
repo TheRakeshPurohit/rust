@@ -1,7 +1,10 @@
-// run-pass
+//@ run-pass
 // Test calling methods on an impl for a bare trait.
 
-// aux-build:traitimpl.rs
+//@ aux-build:traitimpl.rs
+
+// FIXME(static_mut_refs): this could use an atomic
+#![allow(static_mut_refs)]
 
 extern crate traitimpl;
 use traitimpl::Bar;
@@ -9,7 +12,7 @@ use traitimpl::Bar;
 static mut COUNT: usize = 1;
 
 trait T {
-    fn t(&self) {}
+    fn t(&self) {} //~ WARN method `t` is never used
 }
 
 impl<'a> dyn T+'a {

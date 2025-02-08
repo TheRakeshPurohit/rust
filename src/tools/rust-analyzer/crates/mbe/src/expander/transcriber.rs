@@ -1,42 +1,47 @@
 //! Transcriber takes a template, like `fn $ident() {}`, a set of bindings like
 //! `$ident => foo`, interpolates variables in the template, to get `fn foo() {}`
 
-use syntax::SmolStr;
+use intern::{sym, Symbol};
+use span::{Edition, Span};
+use tt::{iter::TtElement, Delimiter, TopSubtreeBuilder};
 
 use crate::{
     expander::{Binding, Bindings, Fragment},
-    parser::{MetaVarKind, Op, RepeatKind, Separator},
-    tt::{self, Delimiter},
-    CountError, ExpandError, ExpandResult, MetaTemplate,
+    parser::{ConcatMetaVarExprElem, MetaVarKind, Op, RepeatKind, Separator},
+    ExpandError, ExpandErrorKind, ExpandResult, MetaTemplate,
 };
 
-impl Bindings {
-    fn contains(&self, name: &str) -> bool {
-        self.inner.contains_key(name)
-    }
-
-    fn get(&self, name: &str) -> Result<&Binding, ExpandError> {
+impl<'t> Bindings<'t> {
+    fn get(&self, name: &Symbol, span: Span) -> Result<&Binding<'t>, ExpandError> {
         match self.inner.get(name) {
             Some(binding) => Ok(binding),
-            None => Err(ExpandError::binding_error(format!("could not find binding `{name}`"))),
+            None => Err(ExpandError::new(
+                span,
+                ExpandErrorKind::UnresolvedBinding(Box::new(Box::from(name.as_str()))),
+            )),
         }
     }
 
     fn get_fragment(
         &self,
-        name: &str,
+        name: &Symbol,
+        mut span: Span,
         nesting: &mut [NestingState],
-    ) -> Result<Fragment, ExpandError> {
+        marker: impl Fn(&mut Span),
+    ) -> Result<Fragment<'t>, ExpandError> {
         macro_rules! binding_err {
-            ($($arg:tt)*) => { ExpandError::binding_error(format!($($arg)*)) };
+            ($($arg:tt)*) => { ExpandError::binding_error(span, format!($($arg)*)) };
         }
 
-        let mut b = self.get(name)?;
+        let mut b = self.get(name, span)?;
         for nesting_state in nesting.iter_mut() {
             nesting_state.hit = true;
             b = match b {
                 Binding::Fragment(_) => break,
-                Binding::Missing(_) => break,
+                Binding::Missing(_) => {
+                    nesting_state.at_end = true;
+                    break;
+                }
                 Binding::Nested(bs) => bs.get(nesting_state.idx).ok_or_else(|| {
                     nesting_state.at_end = true;
                     binding_err!("could not find nested binding `{name}`")
@@ -48,55 +53,61 @@ impl Bindings {
             };
         }
         match b {
-            Binding::Fragment(it) => Ok(it.clone()),
+            Binding::Fragment(f) => Ok(f.clone()),
             // emit some reasonable default expansion for missing bindings,
             // this gives better recovery than emitting the `$fragment-name` verbatim
-            Binding::Missing(it) => Ok(match it {
-                MetaVarKind::Stmt => {
-                    Fragment::Tokens(tt::TokenTree::Leaf(tt::Leaf::Punct(tt::Punct {
-                        span: tt::TokenId::unspecified(),
-                        char: ';',
-                        spacing: tt::Spacing::Alone,
-                    })))
+            Binding::Missing(it) => Ok({
+                marker(&mut span);
+                let mut builder = TopSubtreeBuilder::new(tt::Delimiter::invisible_spanned(span));
+                match it {
+                    MetaVarKind::Stmt => {
+                        builder.push(tt::Leaf::Punct(tt::Punct {
+                            span,
+                            char: ';',
+                            spacing: tt::Spacing::Alone,
+                        }));
+                    }
+                    MetaVarKind::Block => {
+                        builder.open(tt::DelimiterKind::Brace, span);
+                        builder.close(span);
+                    }
+                    // FIXME: Meta and Item should get proper defaults
+                    MetaVarKind::Meta | MetaVarKind::Item | MetaVarKind::Tt | MetaVarKind::Vis => {}
+                    MetaVarKind::Path
+                    | MetaVarKind::Ty
+                    | MetaVarKind::Pat
+                    | MetaVarKind::PatParam
+                    | MetaVarKind::Expr(_)
+                    | MetaVarKind::Ident => {
+                        builder.push(tt::Leaf::Ident(tt::Ident {
+                            sym: sym::missing.clone(),
+                            span,
+                            is_raw: tt::IdentIsRaw::No,
+                        }));
+                    }
+                    MetaVarKind::Lifetime => {
+                        builder.extend([
+                            tt::Leaf::Punct(tt::Punct {
+                                char: '\'',
+                                span,
+                                spacing: tt::Spacing::Joint,
+                            }),
+                            tt::Leaf::Ident(tt::Ident {
+                                sym: sym::missing.clone(),
+                                span,
+                                is_raw: tt::IdentIsRaw::No,
+                            }),
+                        ]);
+                    }
+                    MetaVarKind::Literal => {
+                        builder.push(tt::Leaf::Ident(tt::Ident {
+                            sym: sym::missing.clone(),
+                            span,
+                            is_raw: tt::IdentIsRaw::No,
+                        }));
+                    }
                 }
-                MetaVarKind::Block => Fragment::Tokens(tt::TokenTree::Subtree(tt::Subtree {
-                    delimiter: tt::Delimiter {
-                        open: tt::TokenId::unspecified(),
-                        close: tt::TokenId::unspecified(),
-                        kind: tt::DelimiterKind::Brace,
-                    },
-                    token_trees: vec![],
-                })),
-                // FIXME: Meta and Item should get proper defaults
-                MetaVarKind::Meta | MetaVarKind::Item | MetaVarKind::Tt | MetaVarKind::Vis => {
-                    Fragment::Tokens(tt::TokenTree::Subtree(tt::Subtree {
-                        delimiter: tt::Delimiter::UNSPECIFIED,
-                        token_trees: vec![],
-                    }))
-                }
-                MetaVarKind::Path
-                | MetaVarKind::Ty
-                | MetaVarKind::Pat
-                | MetaVarKind::PatParam
-                | MetaVarKind::Expr
-                | MetaVarKind::Ident => {
-                    Fragment::Tokens(tt::TokenTree::Leaf(tt::Leaf::Ident(tt::Ident {
-                        text: SmolStr::new_inline("missing"),
-                        span: tt::TokenId::unspecified(),
-                    })))
-                }
-                MetaVarKind::Lifetime => {
-                    Fragment::Tokens(tt::TokenTree::Leaf(tt::Leaf::Ident(tt::Ident {
-                        text: SmolStr::new_inline("'missing"),
-                        span: tt::TokenId::unspecified(),
-                    })))
-                }
-                MetaVarKind::Literal => {
-                    Fragment::Tokens(tt::TokenTree::Leaf(tt::Leaf::Ident(tt::Ident {
-                        text: SmolStr::new_inline("\"missing\""),
-                        span: tt::TokenId::unspecified(),
-                    })))
-                }
+                Fragment::TokensOwned(builder.build())
             }),
             Binding::Nested(_) => {
                 Err(binding_err!("expected simple binding, found nested binding `{name}`"))
@@ -110,11 +121,13 @@ impl Bindings {
 
 pub(super) fn transcribe(
     template: &MetaTemplate,
-    bindings: &Bindings,
-) -> ExpandResult<tt::Subtree> {
-    let mut ctx = ExpandCtx { bindings, nesting: Vec::new() };
-    let mut arena: Vec<tt::TokenTree> = Vec::new();
-    expand_subtree(&mut ctx, template, None, &mut arena)
+    bindings: &Bindings<'_>,
+    marker: impl Fn(&mut Span) + Copy,
+    call_site: Span,
+) -> ExpandResult<tt::TopSubtree<Span>> {
+    let mut ctx = ExpandCtx { bindings, nesting: Vec::new(), call_site };
+    let mut builder = tt::TopSubtreeBuilder::new(tt::Delimiter::invisible_spanned(ctx.call_site));
+    expand_subtree(&mut ctx, template, &mut builder, marker).map(|()| builder.build())
 }
 
 #[derive(Debug)]
@@ -130,63 +143,100 @@ struct NestingState {
 
 #[derive(Debug)]
 struct ExpandCtx<'a> {
-    bindings: &'a Bindings,
+    bindings: &'a Bindings<'a>,
     nesting: Vec<NestingState>,
+    call_site: Span,
+}
+
+fn expand_subtree_with_delimiter(
+    ctx: &mut ExpandCtx<'_>,
+    template: &MetaTemplate,
+    builder: &mut tt::TopSubtreeBuilder<Span>,
+    delimiter: Option<Delimiter<Span>>,
+    marker: impl Fn(&mut Span) + Copy,
+) -> ExpandResult<()> {
+    let delimiter = delimiter.unwrap_or_else(|| tt::Delimiter::invisible_spanned(ctx.call_site));
+    builder.open(delimiter.kind, delimiter.open);
+    let result = expand_subtree(ctx, template, builder, marker);
+    builder.close(delimiter.close);
+    result
 }
 
 fn expand_subtree(
     ctx: &mut ExpandCtx<'_>,
     template: &MetaTemplate,
-    delimiter: Option<Delimiter>,
-    arena: &mut Vec<tt::TokenTree>,
-) -> ExpandResult<tt::Subtree> {
-    // remember how many elements are in the arena now - when returning, we want to drain exactly how many elements we added. This way, the recursive uses of the arena get their own "view" of the arena, but will reuse the allocation
-    let start_elements = arena.len();
+    builder: &mut tt::TopSubtreeBuilder<Span>,
+    marker: impl Fn(&mut Span) + Copy,
+) -> ExpandResult<()> {
     let mut err = None;
     'ops: for op in template.iter() {
         match op {
-            Op::Literal(it) => arena.push(tt::Leaf::from(it.clone()).into()),
-            Op::Ident(it) => arena.push(tt::Leaf::from(it.clone()).into()),
+            Op::Literal(it) => builder.push(tt::Leaf::from({
+                let mut it = it.clone();
+                marker(&mut it.span);
+                it
+            })),
+            Op::Ident(it) => builder.push(tt::Leaf::from({
+                let mut it = it.clone();
+                marker(&mut it.span);
+                it
+            })),
             Op::Punct(puncts) => {
-                for punct in puncts {
-                    arena.push(tt::Leaf::from(*punct).into());
-                }
+                builder.extend(puncts.iter().map(|punct| {
+                    tt::Leaf::from({
+                        let mut it = *punct;
+                        marker(&mut it.span);
+                        it
+                    })
+                }));
             }
             Op::Subtree { tokens, delimiter } => {
-                let ExpandResult { value: tt, err: e } =
-                    expand_subtree(ctx, tokens, Some(*delimiter), arena);
+                let mut delimiter = *delimiter;
+                marker(&mut delimiter.open);
+                marker(&mut delimiter.close);
+                let ExpandResult { value: (), err: e } =
+                    expand_subtree_with_delimiter(ctx, tokens, builder, Some(delimiter), marker);
                 err = err.or(e);
-                arena.push(tt.into());
             }
             Op::Var { name, id, .. } => {
-                let ExpandResult { value: fragment, err: e } = expand_var(ctx, name, *id);
+                let ExpandResult { value: (), err: e } =
+                    expand_var(ctx, name, *id, builder, marker);
                 err = err.or(e);
-                push_fragment(arena, fragment);
             }
             Op::Repeat { tokens: subtree, kind, separator } => {
-                let ExpandResult { value: fragment, err: e } =
-                    expand_repeat(ctx, subtree, *kind, separator, arena);
+                let ExpandResult { value: (), err: e } =
+                    expand_repeat(ctx, subtree, *kind, separator.as_deref(), builder, marker);
                 err = err.or(e);
-                push_fragment(arena, fragment)
             }
             Op::Ignore { name, id } => {
                 // Expand the variable, but ignore the result. This registers the repetition count.
                 // FIXME: Any emitted errors are dropped.
-                expand_var(ctx, name, *id);
+                let _ = ctx.bindings.get_fragment(name, *id, &mut ctx.nesting, marker);
             }
             Op::Index { depth } => {
                 let index =
                     ctx.nesting.get(ctx.nesting.len() - 1 - depth).map_or(0, |nest| nest.idx);
-                arena.push(
-                    tt::Leaf::Literal(tt::Literal {
-                        text: index.to_string().into(),
-                        span: tt::TokenId::unspecified(),
-                    })
-                    .into(),
-                );
+                builder.push(tt::Leaf::Literal(tt::Literal {
+                    symbol: Symbol::integer(index),
+                    span: ctx.call_site,
+                    kind: tt::LitKind::Integer,
+                    suffix: None,
+                }));
+            }
+            Op::Len { depth } => {
+                let length = ctx.nesting.get(ctx.nesting.len() - 1 - depth).map_or(0, |_nest| {
+                    // FIXME: to be implemented
+                    0
+                });
+                builder.push(tt::Leaf::Literal(tt::Literal {
+                    symbol: Symbol::integer(length),
+                    span: ctx.call_site,
+                    kind: tt::LitKind::Integer,
+                    suffix: None,
+                }));
             }
             Op::Count { name, depth } => {
-                let mut binding = match ctx.bindings.get(name.as_str()) {
+                let mut binding = match ctx.bindings.get(name, ctx.call_site) {
                     Ok(b) => b,
                     Err(e) => {
                         if err.is_none() {
@@ -222,77 +272,164 @@ fn expand_subtree(
                     }
                 }
 
-                let c = match count(ctx, binding, 0, *depth) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        // XXX: It *might* make sense to emit a dummy integer value like `0` here.
-                        // That would type inference a bit more robust in cases like
-                        // `v[${count(t)}]` where index doesn't matter, but also coult also lead to
-                        // wrong infefrence for cases like `tup.${count(t)}` where index itself
-                        // does matter.
-                        if err.is_none() {
-                            err = Some(e.into());
+                let res = count(binding, 0, depth.unwrap_or(0));
+
+                builder.push(tt::Leaf::Literal(tt::Literal {
+                    symbol: Symbol::integer(res),
+                    span: ctx.call_site,
+                    suffix: None,
+                    kind: tt::LitKind::Integer,
+                }));
+            }
+            Op::Concat { elements, span: concat_span } => {
+                let mut concatenated = String::new();
+                for element in elements {
+                    match element {
+                        ConcatMetaVarExprElem::Ident(ident) => {
+                            concatenated.push_str(ident.sym.as_str())
                         }
-                        continue;
+                        ConcatMetaVarExprElem::Literal(lit) => {
+                            // FIXME: This isn't really correct wrt. escaping, but that's what rustc does and anyway
+                            // escaping is used most of the times for characters that are invalid in identifiers.
+                            concatenated.push_str(lit.symbol.as_str())
+                        }
+                        ConcatMetaVarExprElem::Var(var) => {
+                            // Handling of repetitions in `${concat}` isn't fleshed out in rustc, so we currently
+                            // err at it.
+                            // FIXME: Do what rustc does for repetitions.
+                            let var_value = match ctx.bindings.get_fragment(
+                                &var.sym,
+                                var.span,
+                                &mut ctx.nesting,
+                                marker,
+                            ) {
+                                Ok(var) => var,
+                                Err(e) => {
+                                    if err.is_none() {
+                                        err = Some(e);
+                                    };
+                                    continue;
+                                }
+                            };
+                            let values = match &var_value {
+                                Fragment::Tokens(tokens) => {
+                                    let mut iter = tokens.iter();
+                                    (iter.next(), iter.next())
+                                }
+                                Fragment::TokensOwned(tokens) => {
+                                    let mut iter = tokens.iter();
+                                    (iter.next(), iter.next())
+                                }
+                                _ => (None, None),
+                            };
+                            let value = match values {
+                                (Some(TtElement::Leaf(tt::Leaf::Ident(ident))), None) => {
+                                    ident.sym.as_str()
+                                }
+                                (Some(TtElement::Leaf(tt::Leaf::Literal(lit))), None) => {
+                                    lit.symbol.as_str()
+                                }
+                                _ => {
+                                    if err.is_none() {
+                                        err = Some(ExpandError::binding_error(var.span, "metavariables of `${concat(..)}` must be of type `ident`, `literal` or `tt`"))
+                                    }
+                                    continue;
+                                }
+                            };
+                            concatenated.push_str(value);
+                        }
                     }
-                };
-                arena.push(
-                    tt::Leaf::Literal(tt::Literal {
-                        text: c.to_string().into(),
-                        span: tt::TokenId::unspecified(),
-                    })
-                    .into(),
-                );
+                }
+
+                // `${concat}` span comes from the macro (at least for now).
+                // See https://github.com/rust-lang/rust/blob/b0af276da341/compiler/rustc_expand/src/mbe/transcribe.rs#L724-L726.
+                let mut result_span = *concat_span;
+                marker(&mut result_span);
+
+                // FIXME: NFC normalize the result.
+                if !rustc_lexer::is_ident(&concatenated) {
+                    if err.is_none() {
+                        err = Some(ExpandError::binding_error(
+                            *concat_span,
+                            "`${concat(..)}` is not generating a valid identifier",
+                        ));
+                    }
+                    // Insert a dummy identifier for better parsing.
+                    concatenated.clear();
+                    concatenated.push_str("__ra_concat_dummy");
+                }
+
+                let needs_raw =
+                    parser::SyntaxKind::from_keyword(&concatenated, Edition::LATEST).is_some();
+                let is_raw = if needs_raw { tt::IdentIsRaw::Yes } else { tt::IdentIsRaw::No };
+                builder.push(tt::Leaf::Ident(tt::Ident {
+                    is_raw,
+                    span: result_span,
+                    sym: Symbol::intern(&concatenated),
+                }));
             }
         }
     }
-    // drain the elements added in this instance of expand_subtree
-    let tts = arena.drain(start_elements..).collect();
-    ExpandResult {
-        value: tt::Subtree {
-            delimiter: delimiter.unwrap_or_else(tt::Delimiter::unspecified),
-            token_trees: tts,
-        },
-        err,
-    }
+    ExpandResult { value: (), err }
 }
 
-fn expand_var(ctx: &mut ExpandCtx<'_>, v: &SmolStr, id: tt::TokenId) -> ExpandResult<Fragment> {
+fn expand_var(
+    ctx: &mut ExpandCtx<'_>,
+    v: &Symbol,
+    id: Span,
+    builder: &mut tt::TopSubtreeBuilder<Span>,
+    marker: impl Fn(&mut Span) + Copy,
+) -> ExpandResult<()> {
     // We already handle $crate case in mbe parser
-    debug_assert!(v != "crate");
+    debug_assert!(*v != sym::crate_);
 
-    if !ctx.bindings.contains(v) {
-        // Note that it is possible to have a `$var` inside a macro which is not bound.
-        // For example:
-        // ```
-        // macro_rules! foo {
-        //     ($a:ident, $b:ident, $c:tt) => {
-        //         macro_rules! bar {
-        //             ($bi:ident) => {
-        //                 fn $bi() -> u8 {$c}
-        //             }
-        //         }
-        //     }
-        // ```
-        // We just treat it a normal tokens
-        let tt = tt::Subtree {
-            delimiter: tt::Delimiter::UNSPECIFIED,
-            token_trees: vec![
-                tt::Leaf::from(tt::Punct { char: '$', spacing: tt::Spacing::Alone, span: id })
-                    .into(),
-                tt::Leaf::from(tt::Ident { text: v.clone(), span: id }).into(),
-            ],
+    match ctx.bindings.get_fragment(v, id, &mut ctx.nesting, marker) {
+        Ok(fragment) => {
+            match fragment {
+                Fragment::Tokens(tt) => builder.extend_with_tt(tt.strip_invisible()),
+                Fragment::TokensOwned(tt) => builder.extend_with_tt(tt.view().strip_invisible()),
+                Fragment::Expr(sub) => {
+                    let sub = sub.strip_invisible();
+                    let mut span = id;
+                    marker(&mut span);
+                    let wrap_in_parens = !matches!(sub.flat_tokens(), [tt::TokenTree::Leaf(_)])
+                        && sub.try_into_subtree().is_none_or(|it| {
+                            it.top_subtree().delimiter.kind == tt::DelimiterKind::Invisible
+                        });
+                    if wrap_in_parens {
+                        builder.open(tt::DelimiterKind::Parenthesis, span);
+                    }
+                    builder.extend_with_tt(sub);
+                    if wrap_in_parens {
+                        builder.close(span);
+                    }
+                }
+                Fragment::Path(tt) => fix_up_and_push_path_tt(ctx, builder, tt),
+                Fragment::Empty => (),
+            };
+            ExpandResult::ok(())
         }
-        .into();
-        ExpandResult::ok(Fragment::Tokens(tt))
-    } else {
-        ctx.bindings.get_fragment(v, &mut ctx.nesting).map_or_else(
-            |e| ExpandResult {
-                value: Fragment::Tokens(tt::TokenTree::Subtree(tt::Subtree::empty())),
-                err: Some(e),
-            },
-            ExpandResult::ok,
-        )
+        Err(e) if matches!(e.inner.1, ExpandErrorKind::UnresolvedBinding(_)) => {
+            // Note that it is possible to have a `$var` inside a macro which is not bound.
+            // For example:
+            // ```
+            // macro_rules! foo {
+            //     ($a:ident, $b:ident, $c:tt) => {
+            //         macro_rules! bar {
+            //             ($bi:ident) => {
+            //                 fn $bi() -> u8 {$c}
+            //             }
+            //         }
+            //     }
+            // ```
+            // We just treat it a normal tokens
+            builder.extend([
+                tt::Leaf::from(tt::Punct { char: '$', spacing: tt::Spacing::Alone, span: id }),
+                tt::Leaf::from(tt::Ident { sym: v.clone(), span: id, is_raw: tt::IdentIsRaw::No }),
+            ]);
+            ExpandResult::ok(())
+        }
+        Err(e) => ExpandResult::only_err(e),
     }
 }
 
@@ -300,20 +437,22 @@ fn expand_repeat(
     ctx: &mut ExpandCtx<'_>,
     template: &MetaTemplate,
     kind: RepeatKind,
-    separator: &Option<Separator>,
-    arena: &mut Vec<tt::TokenTree>,
-) -> ExpandResult<Fragment> {
-    let mut buf: Vec<tt::TokenTree> = Vec::new();
+    separator: Option<&Separator>,
+    builder: &mut tt::TopSubtreeBuilder<Span>,
+    marker: impl Fn(&mut Span) + Copy,
+) -> ExpandResult<()> {
     ctx.nesting.push(NestingState { idx: 0, at_end: false, hit: false });
     // Dirty hack to make macro-expansion terminate.
     // This should be replaced by a proper macro-by-example implementation
     let limit = 65536;
-    let mut has_seps = 0;
     let mut counter = 0;
     let mut err = None;
 
+    let initial_restore_point = builder.restore_point();
+    let mut restore_point = builder.restore_point();
     loop {
-        let ExpandResult { value: mut t, err: e } = expand_subtree(ctx, template, None, arena);
+        let ExpandResult { value: (), err: e } =
+            expand_subtree_with_delimiter(ctx, template, builder, None, marker);
         let nesting_state = ctx.nesting.last_mut().unwrap();
         if nesting_state.at_end || !nesting_state.hit {
             break;
@@ -321,20 +460,18 @@ fn expand_repeat(
         nesting_state.idx += 1;
         nesting_state.hit = false;
 
+        builder.remove_last_subtree_if_invisible();
+
+        restore_point = builder.restore_point();
+
         counter += 1;
         if counter == limit {
-            tracing::warn!(
-                "expand_tt in repeat pattern exceed limit => {:#?}\n{:#?}",
-                template,
-                ctx
-            );
-            return ExpandResult {
-                value: Fragment::Tokens(
-                    tt::Subtree { delimiter: tt::Delimiter::unspecified(), token_trees: vec![] }
-                        .into(),
-                ),
-                err: Some(ExpandError::LimitExceeded),
-            };
+            // FIXME: This is a bug here, we get here when we shouldn't, see https://github.com/rust-lang/rust-analyzer/issues/18910.
+            // If we don't restore we emit a lot of nodes which causes a stack overflow down the road. For now just ignore them,
+            // there is always an error here anyway.
+            builder.restore(initial_restore_point);
+            err = Some(ExpandError::new(ctx.call_site, ExpandErrorKind::LimitExceeded));
+            break;
         }
 
         if e.is_some() {
@@ -342,24 +479,14 @@ fn expand_repeat(
             continue;
         }
 
-        t.delimiter = tt::Delimiter::unspecified();
-        push_subtree(&mut buf, t);
-
         if let Some(sep) = separator {
-            has_seps = match sep {
-                Separator::Ident(ident) => {
-                    buf.push(tt::Leaf::from(ident.clone()).into());
-                    1
-                }
-                Separator::Literal(lit) => {
-                    buf.push(tt::Leaf::from(lit.clone()).into());
-                    1
-                }
+            match sep {
+                Separator::Ident(ident) => builder.push(tt::Leaf::from(ident.clone())),
+                Separator::Literal(lit) => builder.push(tt::Leaf::from(lit.clone())),
                 Separator::Puncts(puncts) => {
                     for &punct in puncts {
-                        buf.push(tt::Leaf::from(punct).into());
+                        builder.push(tt::Leaf::from(punct));
                     }
-                    puncts.len()
                 }
             };
         }
@@ -368,76 +495,73 @@ fn expand_repeat(
             break;
         }
     }
+    // Lose the last separator and last after-the-end round.
+    builder.restore(restore_point);
 
     ctx.nesting.pop().unwrap();
-    for _ in 0..has_seps {
-        buf.pop();
-    }
 
     // Check if it is a single token subtree without any delimiter
     // e.g {Delimiter:None> ['>'] /Delimiter:None>}
-    let tt = tt::Subtree { delimiter: tt::Delimiter::unspecified(), token_trees: buf }.into();
 
-    if RepeatKind::OneOrMore == kind && counter == 0 {
-        return ExpandResult {
-            value: Fragment::Tokens(tt),
-            err: Some(ExpandError::UnexpectedToken),
-        };
+    if RepeatKind::OneOrMore == kind && counter == 0 && err.is_none() {
+        err = Some(ExpandError::new(ctx.call_site, ExpandErrorKind::UnexpectedToken));
     }
-    ExpandResult { value: Fragment::Tokens(tt), err }
+    ExpandResult { value: (), err }
 }
 
-fn push_fragment(buf: &mut Vec<tt::TokenTree>, fragment: Fragment) {
-    match fragment {
-        Fragment::Tokens(tt::TokenTree::Subtree(tt)) => push_subtree(buf, tt),
-        Fragment::Expr(tt::TokenTree::Subtree(mut tt)) => {
-            if tt.delimiter.kind == tt::DelimiterKind::Invisible {
-                tt.delimiter = tt::Delimiter {
-                    open: tt::TokenId::UNSPECIFIED,
-                    close: tt::TokenId::UNSPECIFIED,
-                    kind: tt::DelimiterKind::Parenthesis,
-                };
+/// Inserts the path separator `::` between an identifier and its following generic
+/// argument list, and then pushes into the buffer. See [`Fragment::Path`] for why
+/// we need this fixup.
+fn fix_up_and_push_path_tt(
+    ctx: &ExpandCtx<'_>,
+    builder: &mut tt::TopSubtreeBuilder<Span>,
+    subtree: tt::TokenTreesView<'_, Span>,
+) {
+    let mut prev_was_ident = false;
+    // Note that we only need to fix up the top-level `TokenTree`s because the
+    // context of the paths in the descendant `Subtree`s won't be changed by the
+    // mbe transcription.
+    let mut iter = subtree.iter();
+    while let Some(tt) = iter.next_as_view() {
+        if prev_was_ident {
+            // Pedantically, `(T) -> U` in `FnOnce(T) -> U` is treated as a generic
+            // argument list and thus needs `::` between it and `FnOnce`. However in
+            // today's Rust this type of path *semantically* cannot appear as a
+            // top-level expression-context path, so we can safely ignore it.
+            if let [tt::TokenTree::Leaf(tt::Leaf::Punct(tt::Punct { char: '<', .. }))] =
+                tt.flat_tokens()
+            {
+                builder.extend([
+                    tt::Leaf::Punct(tt::Punct {
+                        char: ':',
+                        spacing: tt::Spacing::Joint,
+                        span: ctx.call_site,
+                    }),
+                    tt::Leaf::Punct(tt::Punct {
+                        char: ':',
+                        spacing: tt::Spacing::Alone,
+                        span: ctx.call_site,
+                    }),
+                ]);
             }
-            buf.push(tt.into())
         }
-        Fragment::Tokens(tt) | Fragment::Expr(tt) => buf.push(tt),
-    }
-}
-
-fn push_subtree(buf: &mut Vec<tt::TokenTree>, tt: tt::Subtree) {
-    match tt.delimiter.kind {
-        tt::DelimiterKind::Invisible => buf.extend(tt.token_trees),
-        _ => buf.push(tt.into()),
+        prev_was_ident = matches!(tt.flat_tokens(), [tt::TokenTree::Leaf(tt::Leaf::Ident(_))]);
+        builder.extend_with_tt(tt);
     }
 }
 
 /// Handles `${count(t, depth)}`. `our_depth` is the recursion depth and `count_depth` is the depth
 /// defined by the metavar expression.
-fn count(
-    ctx: &ExpandCtx<'_>,
-    binding: &Binding,
-    our_depth: usize,
-    count_depth: Option<usize>,
-) -> Result<usize, CountError> {
+fn count(binding: &Binding<'_>, depth_curr: usize, depth_max: usize) -> usize {
     match binding {
-        Binding::Nested(bs) => match count_depth {
-            None => bs.iter().map(|b| count(ctx, b, our_depth + 1, None)).sum(),
-            Some(0) => Ok(bs.len()),
-            Some(d) => bs.iter().map(|b| count(ctx, b, our_depth + 1, Some(d - 1))).sum(),
-        },
-        Binding::Empty => Ok(0),
-        Binding::Fragment(_) | Binding::Missing(_) => {
-            if our_depth == 0 {
-                // `${count(t)}` is placed inside the innermost repetition. This includes cases
-                // where `t` is not a repeated fragment.
-                Err(CountError::Misplaced)
-            } else if count_depth.is_none() {
-                Ok(1)
+        Binding::Nested(bs) => {
+            if depth_curr == depth_max {
+                bs.len()
             } else {
-                // We've reached at the innermost repeated fragment, but the user wants us to go
-                // further!
-                Err(CountError::OutOfBounds)
+                bs.iter().map(|b| count(b, depth_curr + 1, depth_max)).sum()
             }
         }
+        Binding::Empty => 0,
+        Binding::Fragment(_) | Binding::Missing(_) => 1,
     }
 }

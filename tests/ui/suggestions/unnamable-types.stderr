@@ -8,10 +8,12 @@ error[E0121]: the placeholder `_` is not allowed within types on item signatures
   --> $DIR/unnamable-types.rs:10:11
    |
 LL | static B: _ = "abc";
-   |           ^
-   |           |
-   |           not allowed in type signatures
-   |           help: replace with the correct type: `&str`
+   |           ^ not allowed in type signatures
+   |
+help: replace this with a fully-specified type
+   |
+LL | static B: &str = "abc";
+   |           ~~~~
 
 error[E0121]: the placeholder `_` is not allowed within types on item signatures for constants
   --> $DIR/unnamable-types.rs:17:10
@@ -19,7 +21,7 @@ error[E0121]: the placeholder `_` is not allowed within types on item signatures
 LL | const C: _ = || 42;
    |          ^ not allowed in type signatures
    |
-note: however, the inferred type `[closure@unnamable-types.rs:17:14]` cannot be named
+note: however, the inferred type `{closure@unnamable-types.rs:17:14}` cannot be named
   --> $DIR/unnamable-types.rs:17:14
    |
 LL | const C: _ = || 42;
@@ -31,7 +33,7 @@ error: missing type for `const` item
 LL | const D = S { t: { let i = 0; move || -> i32 { i } } };
    |        ^
    |
-note: however, the inferred type `S<[closure@unnamable-types.rs:23:31]>` cannot be named
+note: however, the inferred type `S<{closure@unnamable-types.rs:23:31}>` cannot be named
   --> $DIR/unnamable-types.rs:23:11
    |
 LL | const D = S { t: { let i = 0; move || -> i32 { i } } };
@@ -52,14 +54,14 @@ LL | const F = S { t: foo };
 error: missing type for `const` item
   --> $DIR/unnamable-types.rs:37:8
    |
-LL | const G = || -> i32 { yield 0; return 1; };
+LL | const G = #[coroutine] || -> i32 { yield 0; return 1; };
    |        ^
    |
-note: however, the inferred type `[generator@$DIR/unnamable-types.rs:37:11: 37:20]` cannot be named
-  --> $DIR/unnamable-types.rs:37:11
+note: however, the inferred type `{coroutine@$DIR/unnamable-types.rs:37:24: 37:33}` cannot be named
+  --> $DIR/unnamable-types.rs:37:24
    |
-LL | const G = || -> i32 { yield 0; return 1; };
-   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+LL | const G = #[coroutine] || -> i32 { yield 0; return 1; };
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error: aborting due to 7 previous errors
 

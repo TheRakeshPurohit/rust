@@ -1,5 +1,5 @@
-// aux-build:format-string-proc-macro.rs
-// check-pass
+//@ proc-macro: format-string-proc-macro.rs
+//@ check-pass
 
 extern crate format_string_proc_macro;
 

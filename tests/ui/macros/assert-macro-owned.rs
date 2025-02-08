@@ -1,6 +1,7 @@
-// run-fail
-// error-pattern:panicked at 'test-assert-owned'
-// ignore-emscripten no processes
+//@ run-fail
+//@ error-pattern:panicked
+//@ error-pattern:test-assert-owned
+//@ needs-subprocess
 
 #![allow(non_fmt_panics)]
 

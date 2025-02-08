@@ -1,18 +1,20 @@
 #![allow(clippy::similar_names)] // `expr` and `expn`
 
-use crate::visitors::{for_each_expr, Descend};
+use std::sync::Arc;
+
+use crate::get_unique_attr;
+use crate::visitors::{Descend, for_each_expr_without_closures};
 
 use arrayvec::ArrayVec;
 use rustc_ast::{FormatArgs, FormatArgument, FormatPlaceholder};
 use rustc_data_structures::fx::FxHashMap;
+use rustc_data_structures::sync::OnceLock;
 use rustc_hir::{self as hir, Expr, ExprKind, HirId, Node, QPath};
-use rustc_lint::LateContext;
+use rustc_lint::{LateContext, LintContext};
 use rustc_span::def_id::DefId;
 use rustc_span::hygiene::{self, MacroKind, SyntaxContext};
-use rustc_span::{sym, BytePos, ExpnData, ExpnId, ExpnKind, Span, Symbol};
-use std::cell::RefCell;
+use rustc_span::{BytePos, ExpnData, ExpnId, ExpnKind, Span, SpanData, Symbol, sym};
 use std::ops::ControlFlow;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 const FORMAT_MACRO_DIAG_ITEMS: &[Symbol] = &[
     sym::assert_eq_macro,
@@ -37,7 +39,9 @@ pub fn is_format_macro(cx: &LateContext<'_>, macro_def_id: DefId) -> bool {
     if let Some(name) = cx.tcx.get_diagnostic_name(macro_def_id) {
         FORMAT_MACRO_DIAG_ITEMS.contains(&name)
     } else {
-        false
+        // Allow users to tag any macro as being format!-like
+        // TODO: consider deleting FORMAT_MACRO_DIAG_ITEMS and using just this method
+        get_unique_attr(cx.sess(), cx.tcx.get_attrs_unchecked(macro_def_id), "format_args").is_some()
     }
 }
 
@@ -94,7 +98,7 @@ pub fn expn_is_local(expn: ExpnId) -> bool {
     std::iter::once((expn, data))
         .chain(backtrace)
         .find_map(|(_, data)| data.macro_def_id)
-        .map_or(true, DefId::is_local)
+        .is_none_or(DefId::is_local)
 }
 
 /// Returns an iterator of macro expansions that created the given span.
@@ -118,8 +122,18 @@ pub fn macro_backtrace(span: Span) -> impl Iterator<Item = MacroCall> {
 
 /// If the macro backtrace of `span` has a macro call at the root expansion
 /// (i.e. not a nested macro call), returns `Some` with the `MacroCall`
+///
+/// If you only want to check whether the root macro has a specific name,
+/// consider using [`matching_root_macro_call`] instead.
 pub fn root_macro_call(span: Span) -> Option<MacroCall> {
     macro_backtrace(span).last()
+}
+
+/// A combination of [`root_macro_call`] and
+/// [`is_diagnostic_item`](rustc_middle::ty::TyCtxt::is_diagnostic_item) that returns a `MacroCall`
+/// at the root expansion if only it matches the given name.
+pub fn matching_root_macro_call(cx: &LateContext<'_>, span: Span, name: Symbol) -> Option<MacroCall> {
+    root_macro_call(span).filter(|mc| cx.tcx.is_diagnostic_item(name, mc.def_id))
 }
 
 /// Like [`root_macro_call`], but only returns `Some` if `node` is the "first node"
@@ -141,10 +155,11 @@ pub fn first_node_macro_backtrace(cx: &LateContext<'_>, node: &impl HirNode) -> 
 }
 
 /// If `node` is the "first node" in a macro expansion, returns `Some` with the `ExpnId` of the
-/// macro call site (i.e. the parent of the macro expansion). This generally means that `node`
-/// is the outermost node of an entire macro expansion, but there are some caveats noted below.
-/// This is useful for finding macro calls while visiting the HIR without processing the macro call
-/// at every node within its expansion.
+/// macro call site (i.e. the parent of the macro expansion).
+///
+/// This generally means that `node` is the outermost node of an entire macro expansion, but there
+/// are some caveats noted below. This is useful for finding macro calls while visiting the HIR
+/// without processing the macro call at every node within its expansion.
 ///
 /// If you already have immediate access to the parent node, it is simpler to
 /// just check the context of that span directly (e.g. `parent.span.from_expansion()`).
@@ -192,7 +207,9 @@ pub fn first_node_in_macro(cx: &LateContext<'_>, node: &impl HirNode) -> Option<
 
 /// Is `def_id` of `std::panic`, `core::panic` or any inner implementation macros
 pub fn is_panic(cx: &LateContext<'_>, def_id: DefId) -> bool {
-    let Some(name) = cx.tcx.get_diagnostic_name(def_id) else { return false };
+    let Some(name) = cx.tcx.get_diagnostic_name(def_id) else {
+        return false;
+    };
     matches!(
         name,
         sym::core_panic_macro
@@ -205,7 +222,9 @@ pub fn is_panic(cx: &LateContext<'_>, def_id: DefId) -> bool {
 
 /// Is `def_id` of `assert!` or `debug_assert!`
 pub fn is_assert_macro(cx: &LateContext<'_>, def_id: DefId) -> bool {
-    let Some(name) = cx.tcx.get_diagnostic_name(def_id) else { return false };
+    let Some(name) = cx.tcx.get_diagnostic_name(def_id) else {
+        return false;
+    };
     matches!(name, sym::assert_macro | sym::debug_assert_macro)
 }
 
@@ -223,13 +242,29 @@ pub enum PanicExpn<'a> {
 
 impl<'a> PanicExpn<'a> {
     pub fn parse(expr: &'a Expr<'a>) -> Option<Self> {
-        let ExprKind::Call(callee, [arg, rest @ ..]) = &expr.kind else { return None };
-        let ExprKind::Path(QPath::Resolved(_, path)) = &callee.kind else { return None };
-        let result = match path.segments.last().unwrap().ident.as_str() {
-            "panic" if arg.span.ctxt() == expr.span.ctxt() => Self::Empty,
+        let ExprKind::Call(callee, args) = &expr.kind else {
+            return None;
+        };
+        let ExprKind::Path(QPath::Resolved(_, path)) = &callee.kind else {
+            return None;
+        };
+        let name = path.segments.last().unwrap().ident.as_str();
+
+        // This has no argument
+        if name == "panic_cold_explicit" {
+            return Some(Self::Empty);
+        }
+
+        let [arg, rest @ ..] = args else {
+            return None;
+        };
+        let result = match name {
+            "panic" if arg.span.eq_ctxt(expr.span) => Self::Empty,
             "panic" | "panic_str" => Self::Str(arg),
-            "panic_display" => {
-                let ExprKind::AddrOf(_, _, e) = &arg.kind else { return None };
+            "panic_display" | "panic_cold_display" => {
+                let ExprKind::AddrOf(_, _, e) = &arg.kind else {
+                    return None;
+                };
                 Self::Display(e)
             },
             "panic_fmt" => Self::Format(arg),
@@ -294,7 +329,7 @@ fn find_assert_args_inner<'a, const N: usize>(
         Some(inner_name) => find_assert_within_debug_assert(cx, expr, expn, Symbol::intern(inner_name))?,
     };
     let mut args = ArrayVec::new();
-    let panic_expn = for_each_expr(expr, |e| {
+    let panic_expn = for_each_expr_without_closures(expr, |e| {
         if args.is_full() {
             match PanicExpn::parse(e) {
                 Some(expn) => ControlFlow::Break(expn),
@@ -320,7 +355,7 @@ fn find_assert_within_debug_assert<'a>(
     expn: ExpnId,
     assert_name: Symbol,
 ) -> Option<(&'a Expr<'a>, ExpnId)> {
-    for_each_expr(expr, |e| {
+    for_each_expr_without_closures(expr, |e| {
         if !e.span.from_expansion() {
             return ControlFlow::Continue(Descend::No);
         }
@@ -357,72 +392,65 @@ fn is_assert_arg(cx: &LateContext<'_>, expr: &Expr<'_>, assert_expn: ExpnId) -> 
     }
 }
 
-thread_local! {
-    /// We preserve the [`FormatArgs`] structs from the early pass for use in the late pass to be
-    /// able to access the many features of a [`LateContext`].
+/// Stores AST [`FormatArgs`] nodes for use in late lint passes, as they are in a desugared form in
+/// the HIR
+#[derive(Default, Clone)]
+pub struct FormatArgsStorage(Arc<OnceLock<FxHashMap<Span, FormatArgs>>>);
+
+impl FormatArgsStorage {
+    /// Returns an AST [`FormatArgs`] node if a `format_args` expansion is found as a descendant of
+    /// `expn_id`
     ///
-    /// A thread local is used because [`FormatArgs`] is `!Send` and `!Sync`, we are making an
-    /// assumption that the early pass that populates the map and the later late passes will all be
-    /// running on the same thread.
-    static AST_FORMAT_ARGS: RefCell<FxHashMap<Span, FormatArgs>> = {
-        static CALLED: AtomicBool = AtomicBool::new(false);
-        debug_assert!(
-            !CALLED.swap(true, Ordering::SeqCst),
-            "incorrect assumption: `AST_FORMAT_ARGS` should only be accessed by a single thread",
-        );
-
-        RefCell::default()
-    };
-}
-
-/// Record [`rustc_ast::FormatArgs`] for use in late lint passes, this should only be called by
-/// `FormatArgsCollector`
-pub fn collect_ast_format_args(span: Span, format_args: &FormatArgs) {
-    AST_FORMAT_ARGS.with(|ast_format_args| {
-        ast_format_args.borrow_mut().insert(span, format_args.clone());
-    });
-}
-
-/// Calls `callback` with an AST [`FormatArgs`] node if a `format_args` expansion is found as a
-/// descendant of `expn_id`
-pub fn find_format_args(cx: &LateContext<'_>, start: &Expr<'_>, expn_id: ExpnId, callback: impl FnOnce(&FormatArgs)) {
-    let format_args_expr = for_each_expr(start, |expr| {
-        let ctxt = expr.span.ctxt();
-        if ctxt.outer_expn().is_descendant_of(expn_id) {
-            if macro_backtrace(expr.span)
-                .map(|macro_call| cx.tcx.item_name(macro_call.def_id))
-                .any(|name| matches!(name, sym::const_format_args | sym::format_args | sym::format_args_nl))
-            {
-                ControlFlow::Break(expr)
+    /// See also [`find_format_arg_expr`]
+    pub fn get(&self, cx: &LateContext<'_>, start: &Expr<'_>, expn_id: ExpnId) -> Option<&FormatArgs> {
+        let format_args_expr = for_each_expr_without_closures(start, |expr| {
+            let ctxt = expr.span.ctxt();
+            if ctxt.outer_expn().is_descendant_of(expn_id) {
+                if macro_backtrace(expr.span)
+                    .map(|macro_call| cx.tcx.item_name(macro_call.def_id))
+                    .any(|name| matches!(name, sym::const_format_args | sym::format_args | sym::format_args_nl))
+                {
+                    ControlFlow::Break(expr)
+                } else {
+                    ControlFlow::Continue(Descend::Yes)
+                }
             } else {
-                ControlFlow::Continue(Descend::Yes)
+                ControlFlow::Continue(Descend::No)
             }
-        } else {
-            ControlFlow::Continue(Descend::No)
-        }
-    });
+        })?;
 
-    if let Some(expr) = format_args_expr {
-        AST_FORMAT_ARGS.with(|ast_format_args| {
-            ast_format_args.borrow().get(&expr.span).map(callback);
-        });
+        debug_assert!(self.0.get().is_some(), "`FormatArgsStorage` not yet populated");
+
+        self.0.get()?.get(&format_args_expr.span.with_parent(None))
+    }
+
+    /// Should only be called by `FormatArgsCollector`
+    pub fn set(&self, format_args: FxHashMap<Span, FormatArgs>) {
+        self.0
+            .set(format_args)
+            .expect("`FormatArgsStorage::set` should only be called once");
     }
 }
 
-/// Attempt to find the [`rustc_hir::Expr`] that corresponds to the [`FormatArgument`]'s value, if
-/// it cannot be found it will return the [`rustc_ast::Expr`].
-pub fn find_format_arg_expr<'hir, 'ast>(
-    start: &'hir Expr<'hir>,
-    target: &'ast FormatArgument,
-) -> Result<&'hir rustc_hir::Expr<'hir>, &'ast rustc_ast::Expr> {
-    for_each_expr(start, |expr| {
-        if expr.span == target.expr.span {
+/// Attempt to find the [`rustc_hir::Expr`] that corresponds to the [`FormatArgument`]'s value
+pub fn find_format_arg_expr<'hir>(start: &'hir Expr<'hir>, target: &FormatArgument) -> Option<&'hir Expr<'hir>> {
+    let SpanData {
+        lo,
+        hi,
+        ctxt,
+        parent: _,
+    } = target.expr.span.data();
+
+    for_each_expr_without_closures(start, |expr| {
+        // When incremental compilation is enabled spans gain a parent during AST to HIR lowering,
+        // since we're comparing an AST span to a HIR one we need to ignore the parent field
+        let data = expr.span.data();
+        if data.lo == lo && data.hi == hi && data.ctxt == ctxt {
             ControlFlow::Break(expr)
         } else {
             ControlFlow::Continue(())
         }
     })
-    .ok_or(&target.expr)
 }
 
 /// Span of the `:` and format specifiers

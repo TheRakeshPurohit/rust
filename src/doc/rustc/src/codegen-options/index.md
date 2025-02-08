@@ -42,6 +42,18 @@ generated code, but may be slower to compile.
 The default value, if not specified, is 16 for non-incremental builds. For
 incremental builds the default is 256 which allows caching to be more granular.
 
+## collapse-macro-debuginfo
+
+This flag controls whether code locations from a macro definition are collapsed into a single
+location associated with that macro's call site, when generating debuginfo for this crate.
+
+This option, if passed, overrides both default collapsing behavior and `#[collapse_debuginfo]`
+attributes in code.
+
+* `y`, `yes`, `on`, `true`: collapse code locations in debuginfo.
+* `n`, `no`, `off` or `false`: do not collapse code locations in debuginfo.
+* `external`: collapse code locations in debuginfo only if the macro comes from a different crate.
+
 ## control-flow-guard
 
 This flag controls whether LLVM enables the Windows [Control Flow
@@ -107,17 +119,14 @@ files. It takes one of the following values:
 * `n`, `no`, `off` or `false`: omit bitcode from rlibs.
 
 LLVM bitcode is required when rustc is performing link-time optimization (LTO).
-It is also required on some targets like iOS ones where vendors look for LLVM
-bitcode. Embedded bitcode will appear in rustc-generated object files inside of
-a section whose name is defined by the target platform. Most of the time this is
-`.llvmbc`.
+Embedded bitcode will appear in rustc-generated object files inside of a section
+whose name is defined by the target platform. Most of the time this is `.llvmbc`.
 
 The use of `-C embed-bitcode=no` can significantly improve compile times and
 reduce generated file sizes if your compilation does not actually need bitcode
-(e.g. if you're not compiling for iOS or you're not performing LTO). For these
-reasons, Cargo uses `-C embed-bitcode=no` whenever possible. Likewise, if you
-are building directly with `rustc` we recommend using `-C embed-bitcode=no`
-whenever you are not using LTO.
+(e.g. if you're not performing LTO). For these reasons, Cargo uses `-C embed-bitcode=no`
+whenever possible. Likewise, if you are building directly with `rustc` we recommend
+using `-C embed-bitcode=no` whenever you are not using LTO.
 
 If combined with `-C lto`, `-C embed-bitcode=no` will cause `rustc` to abort
 at start-up, because the combination is invalid.
@@ -172,20 +181,9 @@ incremental files will be stored.
 
 ## inline-threshold
 
-This option lets you set the default threshold for inlining a function. It
-takes an unsigned integer as a value. Inlining is based on a cost model, where
-a higher threshold will allow more inlining.
+This option is deprecated and does nothing.
 
-The default depends on the [opt-level](#opt-level):
-
-| opt-level | Threshold |
-|-----------|-----------|
-| 0         | N/A, only inlines always-inline functions |
-| 1         | N/A, only inlines always-inline functions and LLVM lifetime intrinsics |
-| 2         | 225 |
-| 3         | 275 |
-| s         | 75 |
-| z         | 25 |
+Consider using `-Cllvm-args=--inline-threshold=...`.
 
 ## instrument-coverage
 
@@ -209,19 +207,19 @@ options should be separated by spaces.
 
 ## link-dead-code
 
-This flag controls whether the linker will keep dead code. It takes one of
-the following values:
+Tries to generate and link dead code that would otherwise not be generated or
+linked. It takes one of the following values:
 
-* `y`, `yes`, `on`, `true` or no value: keep dead code.
+* `y`, `yes`, `on`, `true` or no value: try to keep dead code.
 * `n`, `no`, `off` or `false`: remove dead code (the default).
 
-An example of when this flag might be useful is when trying to construct code coverage
-metrics.
+This flag was historically used to help improve some older forms of code
+coverage measurement. Its use is not recommended.
 
 ## link-self-contained
 
 On `windows-gnu`, `linux-musl`, and `wasi` targets, this flag controls whether the
-linker will use libraries and objects shipped with Rust instead or those in the system.
+linker will use libraries and objects shipped with Rust instead of those in the system.
 It takes one of the following values:
 
 * no value: rustc will use heuristic to disable self-contained mode if system has necessary tools.
@@ -249,11 +247,6 @@ flavor. Valid options are:
 * `gcc`: use the `cc` executable, which is typically gcc or clang on many systems.
 * `ld`: use the `ld` executable.
 * `msvc`: use the `link.exe` executable from Microsoft Visual Studio MSVC.
-* `ptx-linker`: use
-  [`rust-ptx-linker`](https://github.com/denzp/rust-ptx-linker) for Nvidia
-  NVPTX GPGPU support.
-* `bpf-linker`: use
-  [`bpf-linker`](https://github.com/alessandrod/bpf-linker) for eBPF support.
 * `wasm-ld`: use the [`wasm-ld`](https://lld.llvm.org/WebAssembly.html)
   executable, a port of LLVM `lld` for WebAssembly.
 * `ld64.lld`: use the LLVM `lld` executable with the [`-flavor darwin`
@@ -263,7 +256,7 @@ flavor. Valid options are:
 * `lld-link`: use the LLVM `lld` executable with the [`-flavor link`
   flag][lld-flavor] for Microsoft's `link.exe`.
 
-[lld-flavor]: https://lld.llvm.org/Driver.html
+[lld-flavor]: https://releases.llvm.org/12.0.0/tools/lld/docs/Driver.html
 
 ## linker-plugin-lto
 
@@ -414,13 +407,16 @@ See also the [`no-prepopulate-passes`](#no-prepopulate-passes) flag.
 
 By default, `rustc` prefers to statically link dependencies. This option will
 indicate that dynamic linking should be used if possible if both a static and
-dynamic versions of a library are available. There is an internal algorithm
-for determining whether or not it is possible to statically or dynamically
-link with a dependency. For example, `cdylib` crate types may only use static
-linkage. This flag takes one of the following values:
+dynamic versions of a library are available.
 
-* `y`, `yes`, `on`, `true` or no value: use dynamic linking.
-* `n`, `no`, `off` or `false`: use static linking (the default).
+There is [an internal algorithm](https://github.com/rust-lang/rust/blob/master/compiler/rustc_metadata/src/dependency_format.rs)
+for determining whether or not it is possible to statically or dynamically link
+with a dependency.
+
+This flag takes one of the following values:
+
+* `y`, `yes`, `on`, `true` or no value: prefer dynamic linking.
+* `n`, `no`, `off` or `false`: prefer static linking (the default).
 
 ## profile-generate
 
@@ -483,6 +479,26 @@ If the target doesn't support both position-independent and statically linked ex
 then `-C target-feature=+crt-static` "wins" over `-C relocation-model=pic`,
 and the linker is instructed (`-static`) to produce a statically linked
 but not position-independent executable.
+
+## relro-level
+
+This flag controls what level of RELRO (Relocation Read-Only) is enabled. RELRO is an exploit
+mitigation which makes the Global Offset Table (GOT) read-only.
+
+Supported values for this option are:
+
+- `off`: Dynamically linked functions are resolved lazily and the GOT is writable.
+- `partial`: Dynamically linked functions are resolved lazily and written into the Procedure
+  Linking Table (PLT) part of the GOT (`.got.plt`). The non-PLT part of the GOT (`.got`) is made
+  read-only and both are moved to prevent writing from buffer overflows.
+- `full`: Dynamically linked functions are resolved at the start of program execution and the
+  Global Offset Table (`.got`/`.got.plt`) is populated eagerly and then made read-only. The GOT is
+  also moved to prevent writing from buffer overflows. Full RELRO uses more memory and increases
+  process startup time.
+
+This flag is ignored on platforms where RELRO is not supported (targets which do not use the ELF
+binary format), such as Windows or macOS. Each rustc target has its own default for RELRO. rustc
+enables Full RELRO by default on platforms where it is supported.
 
 ## remark
 
@@ -553,14 +569,23 @@ data from binaries during linking.
 
 Supported values for this option are:
 
-- `none` - debuginfo and symbols (if they exist) are copied to the produced
-  binary or separate files depending on the target (e.g. `.pdb` files in case
-  of MSVC).
+- `none` - debuginfo and symbols are not modified.
 - `debuginfo` - debuginfo sections and debuginfo symbols from the symbol table
-  section are stripped at link time and are not copied to the produced binary
-  or separate files.
+  section are stripped at link time and are not copied to the produced binary.
+  This should leave backtraces mostly-intact but may make using a debugger like
+  gdb or lldb ineffectual. Prior to 1.79, this unintentionally disabled the
+  generation of `*.pdb` files on MSVC, resulting in the absence of symbols.
 - `symbols` - same as `debuginfo`, but the rest of the symbol table section is
-  stripped as well if the linker supports it.
+  stripped as well, depending on platform support. On platforms which depend on
+  this symbol table for backtraces, profiling, and similar, this can affect
+  them so negatively as to make the trace incomprehensible. Programs which may
+  be combined with others, such as CLI pipelines and developer tooling, or even
+  anything which wants crash-reporting, should usually avoid `-Cstrip=symbols`.
+
+Note that, at any level, removing debuginfo only necessarily impacts "friendly"
+introspection. `-Cstrip` cannot be relied on as a meaningful security or
+obfuscation measure, as disassemblers and decompilers can extract considerable
+information even in the absence of symbols.
 
 ## symbol-mangling-version
 
@@ -569,20 +594,22 @@ for the purpose of generating object code and linking.
 
 Supported values for this option are:
 
-* `v0` — The "v0" mangling scheme. The specific format is not specified at
-  this time.
+* `v0` — The "v0" mangling scheme.
 
 The default, if not specified, will use a compiler-chosen default which may
 change in the future.
 
+See the [Symbol Mangling] chapter for details on symbol mangling and the mangling format.
+
 [name mangling]: https://en.wikipedia.org/wiki/Name_mangling
+[Symbol Mangling]: ../symbol-mangling/index.md
 
 ## target-cpu
 
 This instructs `rustc` to generate code specifically for a particular processor.
 
 You can run `rustc --print target-cpus` to see the valid options to pass
-and the default target CPU for the current buid target.
+and the default target CPU for the current build target.
 Each target has a default base CPU. Special values include:
 
 * `native` can be passed to use the processor of the host machine.

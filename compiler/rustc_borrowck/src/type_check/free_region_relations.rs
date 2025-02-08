@@ -1,27 +1,28 @@
 use rustc_data_structures::frozen::Frozen;
 use rustc_data_structures::transitive_relation::{TransitiveRelation, TransitiveRelationBuilder};
+use rustc_hir::def::DefKind;
 use rustc_infer::infer::canonical::QueryRegionConstraints;
-use rustc_infer::infer::outlives;
 use rustc_infer::infer::outlives::env::RegionBoundPairs;
 use rustc_infer::infer::region_constraints::GenericKind;
-use rustc_infer::infer::InferCtxt;
+use rustc_infer::infer::{InferCtxt, outlives};
+use rustc_infer::traits::ScrubbedTraitError;
 use rustc_middle::mir::ConstraintCategory;
+use rustc_middle::traits::ObligationCause;
 use rustc_middle::traits::query::OutlivesBound;
-use rustc_middle::ty::{self, RegionVid, Ty};
-use rustc_span::{Span, DUMMY_SP};
+use rustc_middle::ty::{self, RegionVid, Ty, TypeVisitableExt};
+use rustc_span::{ErrorGuaranteed, Span};
+use rustc_trait_selection::solve::NoSolution;
+use rustc_trait_selection::traits::query::type_op::custom::CustomTypeOp;
 use rustc_trait_selection::traits::query::type_op::{self, TypeOp};
-use std::rc::Rc;
+use tracing::{debug, instrument};
 use type_op::TypeOpOutput;
 
-use crate::{
-    type_check::constraint_conversion,
-    type_check::{Locations, MirTypeckRegionConstraints},
-    universal_regions::UniversalRegions,
-};
+use crate::type_check::{Locations, MirTypeckRegionConstraints, constraint_conversion};
+use crate::universal_regions::UniversalRegions;
 
 #[derive(Debug)]
 pub(crate) struct UniversalRegionRelations<'tcx> {
-    universal_regions: Rc<UniversalRegions<'tcx>>,
+    pub(crate) universal_regions: UniversalRegions<'tcx>,
 
     /// Stores the outlives relations that are known to hold from the
     /// implied bounds, in-scope where-clauses, and that sort of
@@ -44,6 +45,7 @@ type NormalizedInputsAndOutput<'tcx> = Vec<Ty<'tcx>>;
 pub(crate) struct CreateResult<'tcx> {
     pub(crate) universal_region_relations: Frozen<UniversalRegionRelations<'tcx>>,
     pub(crate) region_bound_pairs: RegionBoundPairs<'tcx>,
+    pub(crate) known_type_outlives_obligations: Vec<ty::PolyTypeOutlivesPredicate<'tcx>>,
     pub(crate) normalized_inputs_and_output: NormalizedInputsAndOutput<'tcx>,
 }
 
@@ -51,7 +53,7 @@ pub(crate) fn create<'tcx>(
     infcx: &InferCtxt<'tcx>,
     param_env: ty::ParamEnv<'tcx>,
     implicit_region_bound: ty::Region<'tcx>,
-    universal_regions: &Rc<UniversalRegions<'tcx>>,
+    universal_regions: UniversalRegions<'tcx>,
     constraints: &mut MirTypeckRegionConstraints<'tcx>,
 ) -> CreateResult<'tcx> {
     UniversalRegionRelationsBuilder {
@@ -59,7 +61,7 @@ pub(crate) fn create<'tcx>(
         param_env,
         implicit_region_bound,
         constraints,
-        universal_regions: universal_regions.clone(),
+        universal_regions,
         region_bound_pairs: Default::default(),
         outlives: Default::default(),
         inverse_outlives: Default::default(),
@@ -159,6 +161,13 @@ impl UniversalRegionRelations<'_> {
         self.outlives.contains(fr1, fr2)
     }
 
+    /// Returns `true` if fr1 is known to equal fr2.
+    ///
+    /// This will only ever be true for universally quantified regions.
+    pub(crate) fn equal(&self, fr1: RegionVid, fr2: RegionVid) -> bool {
+        self.outlives.contains(fr1, fr2) && self.outlives.contains(fr2, fr1)
+    }
+
     /// Returns a vector of free regions `x` such that `fr1: x` is
     /// known to hold.
     pub(crate) fn regions_outlived_by(&self, fr1: RegionVid) -> Vec<RegionVid> {
@@ -171,12 +180,12 @@ impl UniversalRegionRelations<'_> {
     }
 }
 
-struct UniversalRegionRelationsBuilder<'this, 'tcx> {
-    infcx: &'this InferCtxt<'tcx>,
+struct UniversalRegionRelationsBuilder<'a, 'tcx> {
+    infcx: &'a InferCtxt<'tcx>,
     param_env: ty::ParamEnv<'tcx>,
-    universal_regions: Rc<UniversalRegions<'tcx>>,
+    universal_regions: UniversalRegions<'tcx>,
     implicit_region_bound: ty::Region<'tcx>,
-    constraints: &'this mut MirTypeckRegionConstraints<'tcx>,
+    constraints: &'a mut MirTypeckRegionConstraints<'tcx>,
 
     // outputs:
     outlives: TransitiveRelationBuilder<RegionVid>,
@@ -195,9 +204,12 @@ impl<'tcx> UniversalRegionRelationsBuilder<'_, 'tcx> {
 
     #[instrument(level = "debug", skip(self))]
     pub(crate) fn create(mut self) -> CreateResult<'tcx> {
-        let span = self.infcx.tcx.def_span(self.universal_regions.defining_ty.def_id());
+        let tcx = self.infcx.tcx;
+        let defining_ty_def_id = self.universal_regions.defining_ty.def_id().expect_local();
+        let span = tcx.def_span(defining_ty_def_id);
 
-        // Insert the facts we know from the predicates. Why? Why not.
+        // Insert the `'a: 'b` we know from the predicates.
+        // This does not consider the type-outlives.
         let param_env = self.param_env;
         self.add_outlives_bounds(outlives::explicit_outlives_bounds(param_env));
 
@@ -207,11 +219,25 @@ impl<'tcx> UniversalRegionRelationsBuilder<'_, 'tcx> {
         //   region `'r`, all of which are provided by our caller
         let fr_static = self.universal_regions.fr_static;
         let fr_fn_body = self.universal_regions.fr_fn_body;
-        for fr in self.universal_regions.universal_regions() {
+        for fr in self.universal_regions.universal_regions_iter() {
             debug!("build: relating free region {:?} to itself and to 'static", fr);
             self.relate_universal_regions(fr, fr);
             self.relate_universal_regions(fr_static, fr);
             self.relate_universal_regions(fr, fr_fn_body);
+        }
+
+        // Normalize the assumptions we use to borrowck the program.
+        let mut constraints = vec![];
+        let mut known_type_outlives_obligations = vec![];
+        for bound in param_env.caller_bounds() {
+            if let Some(outlives) = bound.as_type_outlives_clause() {
+                self.normalize_and_push_type_outlives_obligation(
+                    outlives,
+                    span,
+                    &mut known_type_outlives_obligations,
+                    &mut constraints,
+                );
+            };
         }
 
         let unnormalized_input_output_tys = self
@@ -231,24 +257,23 @@ impl<'tcx> UniversalRegionRelationsBuilder<'_, 'tcx> {
         //   the `relations` is built.
         let mut normalized_inputs_and_output =
             Vec::with_capacity(self.universal_regions.unnormalized_input_tys.len() + 1);
-        let mut constraints = vec![];
         for ty in unnormalized_input_output_tys {
             debug!("build: input_or_output={:?}", ty);
             // We add implied bounds from both the unnormalized and normalized ty.
             // See issue #87748
-            let constraints_unnorm = self.add_implied_bounds(ty);
+            let constraints_unnorm = self.add_implied_bounds(ty, span);
             if let Some(c) = constraints_unnorm {
                 constraints.push(c)
             }
-            let TypeOpOutput { output: norm_ty, constraints: constraints_normalize, .. } = self
-                .param_env
-                .and(type_op::normalize::Normalize::new(ty))
-                .fully_perform(self.infcx, span)
-                .unwrap_or_else(|guar| TypeOpOutput {
-                    output: self.infcx.tcx.ty_error(guar),
-                    constraints: None,
-                    error_info: None,
-                });
+            let TypeOpOutput { output: norm_ty, constraints: constraints_normalize, .. } =
+                param_env
+                    .and(type_op::normalize::Normalize { value: ty })
+                    .fully_perform(self.infcx, span)
+                    .unwrap_or_else(|guar| TypeOpOutput {
+                        output: Ty::new_error(self.infcx.tcx, guar),
+                        constraints: None,
+                        error_info: None,
+                    });
             if let Some(c) = constraints_normalize {
                 constraints.push(c)
             }
@@ -266,7 +291,7 @@ impl<'tcx> UniversalRegionRelationsBuilder<'_, 'tcx> {
             // ```
             // Both &Self::Bar and &() are WF
             if ty != norm_ty {
-                let constraints_norm = self.add_implied_bounds(norm_ty);
+                let constraints_norm = self.add_implied_bounds(norm_ty, span);
                 if let Some(c) = constraints_norm {
                     constraints.push(c)
                 }
@@ -275,8 +300,39 @@ impl<'tcx> UniversalRegionRelationsBuilder<'_, 'tcx> {
             normalized_inputs_and_output.push(norm_ty);
         }
 
+        // Add implied bounds from impl header.
+        if matches!(tcx.def_kind(defining_ty_def_id), DefKind::AssocFn | DefKind::AssocConst) {
+            for &(ty, _) in tcx.assumed_wf_types(tcx.local_parent(defining_ty_def_id)) {
+                let result: Result<_, ErrorGuaranteed> = param_env
+                    .and(type_op::normalize::Normalize { value: ty })
+                    .fully_perform(self.infcx, span);
+                let Ok(TypeOpOutput { output: norm_ty, constraints: c, .. }) = result else {
+                    continue;
+                };
+
+                constraints.extend(c);
+
+                // We currently add implied bounds from the normalized ty only.
+                // This is more conservative and matches wfcheck behavior.
+                let c = self.add_implied_bounds(norm_ty, span);
+                constraints.extend(c);
+            }
+        }
+
         for c in constraints {
-            self.push_region_constraints(c, span);
+            constraint_conversion::ConstraintConversion::new(
+                self.infcx,
+                &self.universal_regions,
+                &self.region_bound_pairs,
+                self.implicit_region_bound,
+                param_env,
+                &known_type_outlives_obligations,
+                Locations::All(span),
+                span,
+                ConstraintCategory::Internal,
+                self.constraints,
+            )
+            .convert_all(c);
         }
 
         CreateResult {
@@ -285,27 +341,48 @@ impl<'tcx> UniversalRegionRelationsBuilder<'_, 'tcx> {
                 outlives: self.outlives.freeze(),
                 inverse_outlives: self.inverse_outlives.freeze(),
             }),
+            known_type_outlives_obligations,
             region_bound_pairs: self.region_bound_pairs,
             normalized_inputs_and_output,
         }
     }
 
-    #[instrument(skip(self, data), level = "debug")]
-    fn push_region_constraints(&mut self, data: &QueryRegionConstraints<'tcx>, span: Span) {
-        debug!("constraints generated: {:#?}", data);
+    fn normalize_and_push_type_outlives_obligation(
+        &self,
+        mut outlives: ty::PolyTypeOutlivesPredicate<'tcx>,
+        span: Span,
+        known_type_outlives_obligations: &mut Vec<ty::PolyTypeOutlivesPredicate<'tcx>>,
+        constraints: &mut Vec<&QueryRegionConstraints<'tcx>>,
+    ) {
+        // In the new solver, normalize the type-outlives obligation assumptions.
+        if self.infcx.next_trait_solver() {
+            let Ok(TypeOpOutput {
+                output: normalized_outlives,
+                constraints: constraints_normalize,
+                error_info: _,
+            }) = CustomTypeOp::new(
+                |ocx| {
+                    ocx.deeply_normalize(
+                        &ObligationCause::dummy_with_span(span),
+                        self.param_env,
+                        outlives,
+                    )
+                    .map_err(|_: Vec<ScrubbedTraitError<'tcx>>| NoSolution)
+                },
+                "normalize type outlives obligation",
+            )
+            .fully_perform(self.infcx, span)
+            else {
+                self.infcx.dcx().delayed_bug(format!("could not normalize {outlives:?}"));
+                return;
+            };
+            outlives = normalized_outlives;
+            if let Some(c) = constraints_normalize {
+                constraints.push(c);
+            }
+        }
 
-        constraint_conversion::ConstraintConversion::new(
-            self.infcx,
-            &self.universal_regions,
-            &self.region_bound_pairs,
-            self.implicit_region_bound,
-            self.param_env,
-            Locations::All(span),
-            span,
-            ConstraintCategory::Internal,
-            &mut self.constraints,
-        )
-        .convert_all(data);
+        known_type_outlives_obligations.push(outlives);
     }
 
     /// Update the type of a single local, which should represent
@@ -313,13 +390,21 @@ impl<'tcx> UniversalRegionRelationsBuilder<'_, 'tcx> {
     /// the same time, compute and add any implied bounds that come
     /// from this local.
     #[instrument(level = "debug", skip(self))]
-    fn add_implied_bounds(&mut self, ty: Ty<'tcx>) -> Option<&'tcx QueryRegionConstraints<'tcx>> {
+    fn add_implied_bounds(
+        &mut self,
+        ty: Ty<'tcx>,
+        span: Span,
+    ) -> Option<&'tcx QueryRegionConstraints<'tcx>> {
         let TypeOpOutput { output: bounds, constraints, .. } = self
             .param_env
-            .and(type_op::implied_outlives_bounds::ImpliedOutlivesBounds { ty })
-            .fully_perform(self.infcx, DUMMY_SP)
-            .unwrap_or_else(|_| bug!("failed to compute implied bounds {:?}", ty));
+            .and(type_op::ImpliedOutlivesBounds { ty })
+            .fully_perform(self.infcx, span)
+            .map_err(|_: ErrorGuaranteed| debug!("failed to compute implied bounds {:?}", ty))
+            .ok()?;
         debug!(?bounds, ?constraints);
+        // Because of #109628, we may have unexpected placeholders. Ignore them!
+        // FIXME(#109628): panic in this case once the issue is fixed.
+        let bounds = bounds.into_iter().filter(|bound| !bound.has_placeholders());
         self.add_outlives_bounds(bounds);
         constraints
     }

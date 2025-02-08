@@ -1,22 +1,29 @@
 //! Various batch processing tasks, intended primarily for debugging.
 
-pub mod flags;
-pub mod load_cargo;
-mod parse;
-mod symbols;
-mod highlight;
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+
 mod analysis_stats;
 mod diagnostics;
-mod ssr;
+pub mod flags;
+mod highlight;
 mod lsif;
+mod parse;
+mod run_tests;
+mod rustc_tests;
 mod scip;
+mod ssr;
+mod symbols;
+mod unresolved_references;
 
 mod progress_report;
 
 use std::io::Read;
 
 use anyhow::Result;
-use ide::AnalysisHost;
+use hir::{Module, Name};
+use hir_ty::db::HirDatabase;
+use ide::{AnalysisHost, Edition};
+use itertools::Itertools;
 use vfs::Vfs;
 
 #[derive(Clone, Copy)]
@@ -36,7 +43,7 @@ impl Verbosity {
     }
 }
 
-fn read_stdin() -> Result<String> {
+fn read_stdin() -> anyhow::Result<String> {
     let mut buff = String::new();
     std::io::stdin().read_to_string(&mut buff)?;
     Ok(buff)
@@ -50,21 +57,35 @@ fn report_metric(metric: &str, value: u64, unit: &str) {
 }
 
 fn print_memory_usage(mut host: AnalysisHost, vfs: Vfs) {
-    let mut mem = host.per_query_memory_usage();
+    let mem = host.per_query_memory_usage();
 
     let before = profile::memory_usage();
     drop(vfs);
     let vfs = before.allocated - profile::memory_usage().allocated;
-    mem.push(("VFS".into(), vfs));
 
     let before = profile::memory_usage();
     drop(host);
-    mem.push(("Unaccounted".into(), before.allocated - profile::memory_usage().allocated));
+    let unaccounted = before.allocated - profile::memory_usage().allocated;
+    let remaining = profile::memory_usage().allocated;
 
-    mem.push(("Remaining".into(), profile::memory_usage().allocated));
-
-    for (name, bytes) in mem {
+    for (name, bytes, entries) in mem {
         // NOTE: Not a debug print, so avoid going through the `eprintln` defined above.
-        eprintln!("{bytes:>8} {name}");
+        eprintln!("{bytes:>8} {entries:>6} {name}");
     }
+    eprintln!("{vfs:>8}        VFS");
+
+    eprintln!("{unaccounted:>8}        Unaccounted");
+
+    eprintln!("{remaining:>8}        Remaining");
+}
+
+fn full_name_of_item(db: &dyn HirDatabase, module: Module, name: Name) -> String {
+    module
+        .path_to_root(db)
+        .into_iter()
+        .rev()
+        .filter_map(|it| it.name(db))
+        .chain(Some(name))
+        .map(|it| it.display(db.upcast(), Edition::LATEST).to_string())
+        .join("::")
 }

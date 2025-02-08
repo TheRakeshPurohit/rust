@@ -1,8 +1,8 @@
-// run-pass
+//@ run-pass
 
 #![allow(unused_must_use)]
 #![allow(path_statements)]
-// aux-build:derive-a.rs
+//@ proc-macro: derive-a.rs
 
 #[macro_use]
 extern crate derive_a;

@@ -1,35 +1,32 @@
 pub mod debug;
-mod dep_node;
+pub mod dep_node;
+mod edges;
 mod graph;
 mod query;
 mod serialized;
 
-pub use dep_node::{DepKindStruct, DepNode, DepNodeParams, WorkProductId};
-pub use graph::{
-    hash_result, DepGraph, DepGraphData, DepNodeColor, DepNodeIndex, TaskDeps, TaskDepsRef,
-    WorkProduct,
-};
+use std::panic;
+
+pub use dep_node::{DepKind, DepKindStruct, DepNode, DepNodeParams, WorkProductId};
+pub(crate) use graph::DepGraphData;
+pub use graph::{DepGraph, DepNodeIndex, TaskDepsRef, WorkProduct, WorkProductMap, hash_result};
 pub use query::DepGraphQuery;
-pub use serialized::{SerializedDepGraph, SerializedDepNodeIndex};
-
-use crate::ich::StableHashingContext;
 use rustc_data_structures::profiling::SelfProfilerRef;
-use rustc_serialize::{opaque::FileEncoder, Encodable};
 use rustc_session::Session;
+pub use serialized::{SerializedDepGraph, SerializedDepNodeIndex};
+use tracing::instrument;
 
-use std::hash::Hash;
-use std::{fmt, panic};
-
-use self::graph::{print_markframe_trace, MarkFrame};
+use self::graph::{MarkFrame, print_markframe_trace};
+use crate::ich::StableHashingContext;
 
 pub trait DepContext: Copy {
-    type DepKind: self::DepKind;
+    type Deps: Deps;
 
     /// Create a hashing context for hashing new results.
     fn with_stable_hashing_context<R>(self, f: impl FnOnce(StableHashingContext<'_>) -> R) -> R;
 
     /// Access the DepGraph.
-    fn dep_graph(&self) -> &DepGraph<Self::DepKind>;
+    fn dep_graph(&self) -> &DepGraph<Self::Deps>;
 
     /// Access the profiler.
     fn profiler(&self) -> &SelfProfilerRef;
@@ -37,10 +34,10 @@ pub trait DepContext: Copy {
     /// Access the compiler session.
     fn sess(&self) -> &Session;
 
-    fn dep_kind_info(&self, dep_node: Self::DepKind) -> &DepKindStruct<Self>;
+    fn dep_kind_info(&self, dep_node: DepKind) -> &DepKindStruct<Self>;
 
     #[inline(always)]
-    fn fingerprint_style(self, kind: Self::DepKind) -> FingerprintStyle {
+    fn fingerprint_style(self, kind: DepKind) -> FingerprintStyle {
         let data = self.dep_kind_info(kind);
         if data.is_anon {
             return FingerprintStyle::Opaque;
@@ -50,36 +47,36 @@ pub trait DepContext: Copy {
 
     #[inline(always)]
     /// Return whether this kind always require evaluation.
-    fn is_eval_always(self, kind: Self::DepKind) -> bool {
+    fn is_eval_always(self, kind: DepKind) -> bool {
         self.dep_kind_info(kind).is_eval_always
     }
 
     /// Try to force a dep node to execute and see if it's green.
+    ///
+    /// Returns true if the query has actually been forced. It is valid that a query
+    /// fails to be forced, e.g. when the query key cannot be reconstructed from the
+    /// dep-node or when the query kind outright does not support it.
     #[inline]
     #[instrument(skip(self, frame), level = "debug")]
-    fn try_force_from_dep_node(
-        self,
-        dep_node: DepNode<Self::DepKind>,
-        frame: Option<&MarkFrame<'_>>,
-    ) -> bool {
+    fn try_force_from_dep_node(self, dep_node: DepNode, frame: Option<&MarkFrame<'_>>) -> bool {
         let cb = self.dep_kind_info(dep_node.kind);
         if let Some(f) = cb.force_from_dep_node {
-            if let Err(value) = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                f(self, dep_node);
-            })) {
-                if !value.is::<rustc_errors::FatalErrorMarker>() {
-                    print_markframe_trace(self.dep_graph(), frame);
+            match panic::catch_unwind(panic::AssertUnwindSafe(|| f(self, dep_node))) {
+                Err(value) => {
+                    if !value.is::<rustc_errors::FatalErrorMarker>() {
+                        print_markframe_trace(self.dep_graph(), frame);
+                    }
+                    panic::resume_unwind(value)
                 }
-                panic::resume_unwind(value)
+                Ok(query_has_been_forced) => query_has_been_forced,
             }
-            true
         } else {
             false
         }
     }
 
     /// Load data from the on-disk cache.
-    fn try_load_from_on_disk_cache(self, dep_node: DepNode<Self::DepKind>) {
+    fn try_load_from_on_disk_cache(self, dep_node: DepNode) {
         let cb = self.dep_kind_info(dep_node.kind);
         if let Some(f) = cb.try_load_from_on_disk_cache {
             f(self, dep_node)
@@ -87,15 +84,37 @@ pub trait DepContext: Copy {
     }
 }
 
+pub trait Deps {
+    /// Execute the operation with provided dependencies.
+    fn with_deps<OP, R>(deps: TaskDepsRef<'_>, op: OP) -> R
+    where
+        OP: FnOnce() -> R;
+
+    /// Access dependencies from current implicit context.
+    fn read_deps<OP>(op: OP)
+    where
+        OP: for<'a> FnOnce(TaskDepsRef<'a>);
+
+    /// We use this for most things when incr. comp. is turned off.
+    const DEP_KIND_NULL: DepKind;
+
+    /// We use this to create a forever-red node.
+    const DEP_KIND_RED: DepKind;
+
+    /// This is the highest value a `DepKind` can have. It's used during encoding to
+    /// pack information into the unused bits.
+    const DEP_KIND_MAX: u16;
+}
+
 pub trait HasDepContext: Copy {
-    type DepKind: self::DepKind;
-    type DepContext: self::DepContext<DepKind = Self::DepKind>;
+    type Deps: self::Deps;
+    type DepContext: self::DepContext<Deps = Self::Deps>;
 
     fn dep_context(&self) -> &Self::DepContext;
 }
 
 impl<T: DepContext> HasDepContext for T {
-    type DepKind = T::DepKind;
+    type Deps = T::Deps;
     type DepContext = Self;
 
     fn dep_context(&self) -> &Self::DepContext {
@@ -104,7 +123,7 @@ impl<T: DepContext> HasDepContext for T {
 }
 
 impl<T: HasDepContext, Q: Copy> HasDepContext for (T, Q) {
-    type DepKind = T::DepKind;
+    type Deps = T::Deps;
     type DepContext = T::DepContext;
 
     fn dep_context(&self) -> &Self::DepContext {
@@ -135,26 +154,4 @@ impl FingerprintStyle {
             FingerprintStyle::Opaque => false,
         }
     }
-}
-
-/// Describe the different families of dependency nodes.
-pub trait DepKind: Copy + fmt::Debug + Eq + Hash + Send + Encodable<FileEncoder> + 'static {
-    /// DepKind to use when incr. comp. is turned off.
-    const NULL: Self;
-
-    /// DepKind to use to create the initial forever-red node.
-    const RED: Self;
-
-    /// Implementation of `std::fmt::Debug` for `DepNode`.
-    fn debug_node(node: &DepNode<Self>, f: &mut fmt::Formatter<'_>) -> fmt::Result;
-
-    /// Execute the operation with provided dependencies.
-    fn with_deps<OP, R>(deps: TaskDepsRef<'_, Self>, op: OP) -> R
-    where
-        OP: FnOnce() -> R;
-
-    /// Access dependencies from current implicit context.
-    fn read_deps<OP>(op: OP)
-    where
-        OP: for<'a> FnOnce(TaskDepsRef<'a, Self>);
 }

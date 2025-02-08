@@ -1,4 +1,4 @@
-// check-pass
+//@ check-pass
 //! The presence of an `align(X)` annotation must be accounted for.
 
 #![crate_type = "lib"]
@@ -6,12 +6,11 @@
 #![allow(dead_code, incomplete_features, non_camel_case_types)]
 
 mod assert {
-    use std::mem::{Assume, BikeshedIntrinsicFrom};
-    pub struct Context;
+    use std::mem::{Assume, TransmuteFrom};
 
     pub fn is_maybe_transmutable<Src, Dst>()
     where
-        Dst: BikeshedIntrinsicFrom<Src, Context, {
+        Dst: TransmuteFrom<Src, {
             Assume {
                 alignment: true,
                 lifetimes: true,

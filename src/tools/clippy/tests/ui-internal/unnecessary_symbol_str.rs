@@ -1,7 +1,7 @@
-//@run-rustfix
 #![feature(rustc_private)]
 #![deny(clippy::internal)]
 #![allow(
+    clippy::slow_symbol_comparisons,
     clippy::borrow_deref_ref,
     clippy::unnecessary_operation,
     unused_must_use,

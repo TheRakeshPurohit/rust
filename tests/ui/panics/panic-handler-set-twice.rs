@@ -1,11 +1,11 @@
-// run-pass
-// needs-unwind
+//@ run-pass
+//@ needs-unwind
 #![allow(unused_variables)]
 #![allow(stable_features)]
 
 #![feature(std_panic)]
 
-// ignore-emscripten no threads support
+//@ needs-threads
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::panic;

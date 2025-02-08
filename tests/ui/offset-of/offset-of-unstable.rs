@@ -1,6 +1,4 @@
-// aux-build:offset-of-staged-api.rs
-
-#![feature(offset_of)]
+//@ aux-build:offset-of-staged-api.rs
 
 use std::mem::offset_of;
 

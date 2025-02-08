@@ -1,22 +1,21 @@
-// run-pass
-// ignore-emscripten FIXME(#45351)
+//@ run-pass
+//@ ignore-emscripten FIXME(#45351)
 
-#![feature(repr_simd, platform_intrinsics)]
-
-#[repr(simd)]
-#[derive(Copy, Clone, Debug)]
-pub struct Char3(pub i8, pub i8, pub i8);
+#![feature(repr_simd, intrinsics)]
 
 #[repr(simd)]
 #[derive(Copy, Clone, Debug)]
-pub struct Short3(pub i16, pub i16, pub i16);
+pub struct Char3(pub [i8; 3]);
 
-extern "platform-intrinsic" {
-    fn simd_cast<T, U>(x: T) -> U;
-}
+#[repr(simd)]
+#[derive(Copy, Clone, Debug)]
+pub struct Short3(pub [i16; 3]);
+
+#[rustc_intrinsic]
+unsafe fn simd_cast<T, U>(x: T) -> U;
 
 fn main() {
-    let cast: Short3 = unsafe { simd_cast(Char3(10, -3, -9)) };
+    let cast: Short3 = unsafe { simd_cast(Char3([10, -3, -9])) };
 
     println!("{:?}", cast);
 }

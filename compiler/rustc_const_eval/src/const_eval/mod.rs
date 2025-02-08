@@ -1,122 +1,92 @@
 // Not in interpret to make sure we do not use private implementation details
 
-use crate::errors::MaxNumNodesInConstErr;
-use crate::interpret::{
-    intern_const_alloc_recursive, ConstValue, InternKind, InterpCx, InterpResult, Scalar,
-};
-use rustc_middle::mir;
-use rustc_middle::mir::interpret::{EvalToValTreeResult, GlobalId};
-use rustc_middle::ty::{self, TyCtxt};
-use rustc_span::{source_map::DUMMY_SP, symbol::Symbol};
+use rustc_abi::VariantIdx;
+use rustc_middle::query::Key;
+use rustc_middle::ty::layout::LayoutOf;
+use rustc_middle::ty::{self, Ty, TyCtxt};
+use rustc_middle::{bug, mir};
+use tracing::instrument;
 
+use crate::interpret::InterpCx;
+
+mod dummy_machine;
 mod error;
 mod eval_queries;
 mod fn_queries;
 mod machine;
 mod valtrees;
 
-pub use error::*;
-pub use eval_queries::*;
-pub use fn_queries::*;
-pub use machine::*;
-pub(crate) use valtrees::{const_to_valtree_inner, valtree_to_const_value};
-
-pub(crate) fn const_caller_location(
-    tcx: TyCtxt<'_>,
-    (file, line, col): (Symbol, u32, u32),
-) -> ConstValue<'_> {
-    trace!("const_caller_location: {}:{}:{}", file, line, col);
-    let mut ecx = mk_eval_cx(tcx, DUMMY_SP, ty::ParamEnv::reveal_all(), false);
-
-    let loc_place = ecx.alloc_caller_location(file, line, col);
-    if intern_const_alloc_recursive(&mut ecx, InternKind::Constant, &loc_place).is_err() {
-        bug!("intern_const_alloc_recursive should not error in this case")
-    }
-    ConstValue::Scalar(Scalar::from_maybe_pointer(loc_place.ptr, &tcx))
-}
+pub use self::dummy_machine::*;
+pub use self::error::*;
+pub use self::eval_queries::*;
+pub use self::fn_queries::*;
+pub use self::machine::*;
+pub(crate) use self::valtrees::{eval_to_valtree, valtree_to_const_value};
 
 // We forbid type-level constants that contain more than `VALTREE_MAX_NODES` nodes.
 const VALTREE_MAX_NODES: usize = 100000;
 
-pub(crate) enum ValTreeCreationError {
+pub(crate) enum ValTreeCreationError<'tcx> {
     NodesOverflow,
-    NonSupportedType,
-    Other,
+    /// Values of this type, or this particular value, are not supported as valtrees.
+    NonSupportedType(Ty<'tcx>),
 }
-pub(crate) type ValTreeCreationResult<'tcx> = Result<ty::ValTree<'tcx>, ValTreeCreationError>;
-
-/// Evaluates a constant and turns it into a type-level constant value.
-pub(crate) fn eval_to_valtree<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    param_env: ty::ParamEnv<'tcx>,
-    cid: GlobalId<'tcx>,
-) -> EvalToValTreeResult<'tcx> {
-    let const_alloc = tcx.eval_to_allocation_raw(param_env.and(cid))?;
-
-    // FIXME Need to provide a span to `eval_to_valtree`
-    let ecx = mk_eval_cx(
-        tcx, DUMMY_SP, param_env,
-        // It is absolutely crucial for soundness that
-        // we do not read from static items or other mutable memory.
-        false,
-    );
-    let place = ecx.raw_const_to_mplace(const_alloc).unwrap();
-    debug!(?place);
-
-    let mut num_nodes = 0;
-    let valtree_result = const_to_valtree_inner(&ecx, &place, &mut num_nodes);
-
-    match valtree_result {
-        Ok(valtree) => Ok(Some(valtree)),
-        Err(err) => {
-            let did = cid.instance.def_id();
-            let global_const_id = cid.display(tcx);
-            match err {
-                ValTreeCreationError::NodesOverflow => {
-                    let span = tcx.hir().span_if_local(did);
-                    tcx.sess.emit_err(MaxNumNodesInConstErr { span, global_const_id });
-
-                    Ok(None)
-                }
-                ValTreeCreationError::NonSupportedType | ValTreeCreationError::Other => Ok(None),
-            }
-        }
-    }
-}
+pub(crate) type ValTreeCreationResult<'tcx> = Result<ty::ValTree<'tcx>, ValTreeCreationError<'tcx>>;
 
 #[instrument(skip(tcx), level = "debug")]
-pub(crate) fn try_destructure_mir_constant<'tcx>(
+pub(crate) fn try_destructure_mir_constant_for_user_output<'tcx>(
     tcx: TyCtxt<'tcx>,
-    param_env: ty::ParamEnv<'tcx>,
-    val: mir::ConstantKind<'tcx>,
-) -> InterpResult<'tcx, mir::DestructuredConstant<'tcx>> {
-    trace!("destructure_mir_constant: {:?}", val);
-    let ecx = mk_eval_cx(tcx, DUMMY_SP, param_env, false);
-    let op = ecx.eval_mir_constant(&val, None, None)?;
+    val: mir::ConstValue<'tcx>,
+    ty: Ty<'tcx>,
+) -> Option<mir::DestructuredConstant<'tcx>> {
+    let typing_env = ty::TypingEnv::fully_monomorphized();
+    // FIXME: use a proper span here?
+    let (ecx, op) = mk_eval_cx_for_const_val(tcx.at(rustc_span::DUMMY_SP), typing_env, val, ty)?;
 
     // We go to `usize` as we cannot allocate anything bigger anyway.
-    let (field_count, variant, down) = match val.ty().kind() {
-        ty::Array(_, len) => (len.eval_target_usize(tcx, param_env) as usize, None, op),
+    let (field_count, variant, down) = match ty.kind() {
+        ty::Array(_, len) => (len.try_to_target_usize(tcx)? as usize, None, op),
         ty::Adt(def, _) if def.variants().is_empty() => {
-            throw_ub!(Unreachable)
+            return None;
         }
         ty::Adt(def, _) => {
-            let variant = ecx.read_discriminant(&op)?.1;
-            let down = ecx.operand_downcast(&op, variant)?;
+            let variant = ecx.read_discriminant(&op).discard_err()?;
+            let down = ecx.project_downcast(&op, variant).discard_err()?;
             (def.variants()[variant].fields.len(), Some(variant), down)
         }
-        ty::Tuple(substs) => (substs.len(), None, op),
+        ty::Tuple(args) => (args.len(), None, op),
         _ => bug!("cannot destructure mir constant {:?}", val),
     };
 
     let fields_iter = (0..field_count)
         .map(|i| {
-            let field_op = ecx.operand_field(&down, i)?;
-            let val = op_to_const(&ecx, &field_op);
-            Ok(mir::ConstantKind::Val(val, field_op.layout.ty))
+            let field_op = ecx.project_field(&down, i).discard_err()?;
+            let val = op_to_const(&ecx, &field_op, /* for diagnostics */ true);
+            Some((val, field_op.layout.ty))
         })
-        .collect::<InterpResult<'tcx, Vec<_>>>()?;
+        .collect::<Option<Vec<_>>>()?;
     let fields = tcx.arena.alloc_from_iter(fields_iter);
 
-    Ok(mir::DestructuredConstant { variant, fields })
+    Some(mir::DestructuredConstant { variant, fields })
+}
+
+/// Computes the tag (if any) for a given type and variant.
+#[instrument(skip(tcx), level = "debug")]
+pub fn tag_for_variant_provider<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    (ty, variant_index): (Ty<'tcx>, VariantIdx),
+) -> Option<ty::ScalarInt> {
+    assert!(ty.is_enum());
+
+    // FIXME: This uses an empty `TypingEnv` even though
+    // it may be used by a generic CTFE.
+    let ecx = InterpCx::new(
+        tcx,
+        ty.default_span(tcx),
+        ty::TypingEnv::fully_monomorphized(),
+        crate::const_eval::DummyMachine,
+    );
+
+    let layout = ecx.layout_of(ty).unwrap();
+    ecx.tag_for_variant(layout, variant_index).unwrap().map(|(tag, _tag_field)| tag)
 }

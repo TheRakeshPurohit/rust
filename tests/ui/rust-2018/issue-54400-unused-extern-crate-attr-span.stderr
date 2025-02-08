@@ -1,7 +1,7 @@
 error: unused extern crate
   --> $DIR/issue-54400-unused-extern-crate-attr-span.rs:12:1
    |
-LL | / #[cfg(blandiloquence)]
+LL | / #[cfg(not(FALSE))]
 LL | | extern crate edition_lint_paths;
    | | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-
    | |________________________________|
@@ -14,5 +14,5 @@ LL | #![deny(rust_2018_idioms)]
    |         ^^^^^^^^^^^^^^^^
    = note: `#[deny(unused_extern_crates)]` implied by `#[deny(rust_2018_idioms)]`
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 

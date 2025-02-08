@@ -4,14 +4,15 @@
 // general routines.
 
 use rustc_infer::infer::TyCtxtInferExt;
-use rustc_infer::traits::{FulfillmentErrorCode, TraitEngineExt as _};
-use rustc_middle::traits::{CodegenObligationError, DefiningAnchor};
-use rustc_middle::ty::{self, TyCtxt};
-use rustc_trait_selection::traits::error_reporting::TypeErrCtxtExt;
+use rustc_middle::bug;
+use rustc_middle::traits::CodegenObligationError;
+use rustc_middle::ty::{self, PseudoCanonicalInput, TyCtxt, TypeVisitableExt};
+use rustc_trait_selection::error_reporting::InferCtxtErrorExt;
 use rustc_trait_selection::traits::{
-    ImplSource, Obligation, ObligationCause, SelectionContext, TraitEngine, TraitEngineExt,
+    ImplSource, Obligation, ObligationCause, ObligationCtxt, ScrubbedTraitError, SelectionContext,
     Unimplemented,
 };
+use tracing::debug;
 
 /// Attempts to resolve an obligation to an `ImplSource`. The result is
 /// a shallow `ImplSource` resolution, meaning that we do not
@@ -20,22 +21,17 @@ use rustc_trait_selection::traits::{
 /// obligations *could be* resolved if we wanted to.
 ///
 /// This also expects that `trait_ref` is fully normalized.
-pub fn codegen_select_candidate<'tcx>(
+pub(crate) fn codegen_select_candidate<'tcx>(
     tcx: TyCtxt<'tcx>,
-    (param_env, trait_ref): (ty::ParamEnv<'tcx>, ty::PolyTraitRef<'tcx>),
+    key: PseudoCanonicalInput<'tcx, ty::TraitRef<'tcx>>,
 ) -> Result<&'tcx ImplSource<'tcx, ()>, CodegenObligationError> {
+    let PseudoCanonicalInput { typing_env, value: trait_ref } = key;
     // We expect the input to be fully normalized.
-    debug_assert_eq!(trait_ref, tcx.normalize_erasing_regions(param_env, trait_ref));
+    debug_assert_eq!(trait_ref, tcx.normalize_erasing_regions(typing_env, trait_ref));
 
     // Do the initial selection for the obligation. This yields the
     // shallow result we are looking for -- that is, what specific impl.
-    let infcx = tcx
-        .infer_ctxt()
-        .ignoring_regions()
-        .with_opaque_type_inference(DefiningAnchor::Bubble)
-        .build();
-    //~^ HACK `Bubble` is required for
-    // this test to pass: type-alias-impl-trait/assoc-projection-ice.rs
+    let (infcx, param_env) = tcx.infer_ctxt().ignoring_regions().build_with_typing_env(typing_env);
     let mut selcx = SelectionContext::new(&infcx);
 
     let obligation_cause = ObligationCause::dummy();
@@ -55,21 +51,22 @@ pub fn codegen_select_candidate<'tcx>(
     // Currently, we use a fulfillment context to completely resolve
     // all nested obligations. This is because they can inform the
     // inference of the impl's type parameters.
-    let mut fulfill_cx = <dyn TraitEngine<'tcx>>::new(&infcx);
-    let impl_source = selection.map(|predicate| {
-        fulfill_cx.register_predicate_obligation(&infcx, predicate);
+    // FIXME(-Znext-solver): Doesn't need diagnostics if new solver.
+    let ocx = ObligationCtxt::new(&infcx);
+    let impl_source = selection.map(|obligation| {
+        ocx.register_obligation(obligation);
     });
 
     // In principle, we only need to do this so long as `impl_source`
     // contains unbound type parameters. It could be a slight
     // optimization to stop iterating early.
-    let errors = fulfill_cx.select_all_or_error(&infcx);
+    let errors = ocx.select_all_or_error();
     if !errors.is_empty() {
         // `rustc_monomorphize::collector` assumes there are no type errors.
         // Cycle errors are the only post-monomorphization errors possible; emit them now so
         // `rustc_ty_utils::resolve_associated_item` doesn't return `None` post-monomorphization.
         for err in errors {
-            if let FulfillmentErrorCode::CodeCycle(cycle) = err.code {
+            if let ScrubbedTraitError::Cycle(cycle) = err {
                 infcx.err_ctxt().report_overflow_obligation_cycle(&cycle);
             }
         }
@@ -77,12 +74,23 @@ pub fn codegen_select_candidate<'tcx>(
     }
 
     let impl_source = infcx.resolve_vars_if_possible(impl_source);
-    let impl_source = infcx.tcx.erase_regions(impl_source);
-
-    // Opaque types may have gotten their hidden types constrained, but we can ignore them safely
-    // as they will get constrained elsewhere, too.
-    // (ouz-a) This is required for `type-alias-impl-trait/assoc-projection-ice.rs` to pass
-    let _ = infcx.take_opaque_types();
+    let impl_source = tcx.erase_regions(impl_source);
+    if impl_source.has_non_region_infer() {
+        // Unused generic types or consts on an impl get replaced with inference vars,
+        // but never resolved, causing the return value of a query to contain inference
+        // vars. We do not have a concept for this and will in fact ICE in stable hashing
+        // of the return value. So bail out instead.
+        match impl_source {
+            ImplSource::UserDefined(impl_) => {
+                tcx.dcx().span_delayed_bug(
+                    tcx.def_span(impl_.impl_def_id),
+                    "this impl has unconstrained generic parameters",
+                );
+            }
+            _ => unreachable!(),
+        }
+        return Err(CodegenObligationError::FulfillmentError);
+    }
 
     Ok(&*tcx.arena.alloc(impl_source))
 }

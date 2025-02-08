@@ -1,6 +1,6 @@
-// run-fail
-// error-pattern:explicit
-// ignore-emscripten no processes
+//@ run-fail
+//@ error-pattern:explicit
+//@ needs-subprocess
 
 fn main() {
     panic!();

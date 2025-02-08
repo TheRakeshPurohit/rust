@@ -1,4 +1,4 @@
-// aux-build:expand-expr.rs
+//@ proc-macro: expand-expr.rs
 // no-remap-src-base: check_expand_expr_file!() fails when enabled.
 
 #![feature(concat_bytes)]
@@ -37,7 +37,7 @@ expand_expr_is!("hello", stringify!(hello));
 expand_expr_is!("10 + 20", stringify!(10 + 20));
 
 macro_rules! echo_tts {
-    ($($t:tt)*) => { $($t)* };  //~ ERROR: expected expression, found `$`
+    ($($t:tt)*) => { $($t)* };
 }
 
 macro_rules! echo_lit {
@@ -109,13 +109,13 @@ expand_expr_fail!("string"; hello); //~ ERROR: expected one of `.`, `?`, or an o
 
 // Invalid expressions produce errors in addition to returning `Err(())`.
 expand_expr_fail!($); //~ ERROR: expected expression, found `$`
-expand_expr_fail!(echo_tts!($));
+expand_expr_fail!(echo_tts!($)); //~ ERROR: expected expression, found `$`
 expand_expr_fail!(echo_pm!($)); //~ ERROR: expected expression, found `$`
 
 // We get errors reported and recover during macro expansion if the macro
 // doesn't produce a valid expression.
-expand_expr_is!("string", echo_tts!("string"; hello)); //~ ERROR: macro expansion ignores token `hello` and any following
-expand_expr_is!("string", echo_pm!("string"; hello)); //~ ERROR: macro expansion ignores token `;` and any following
+expand_expr_is!("string", echo_tts!("string"; hello)); //~ ERROR: macro expansion ignores `hello` and any tokens following
+expand_expr_is!("string", echo_pm!("string"; hello)); //~ ERROR: macro expansion ignores `;` and any tokens following
 
 // For now, fail if a non-literal expression is expanded.
 expand_expr_fail!(arbitrary_expression() + "etc");

@@ -4,18 +4,17 @@
 // switch to use those structures instead.
 
 use std::fmt::{self, Write};
-use std::mem;
-use std::ops;
+use std::{mem, ops};
 
-use rustc_ast::{LitKind, MetaItem, MetaItemKind, NestedMetaItem};
+use rustc_ast::{LitKind, MetaItem, MetaItemInner, MetaItemKind, MetaItemLit};
 use rustc_data_structures::fx::FxHashSet;
 use rustc_feature::Features;
 use rustc_session::parse::ParseSess;
-use rustc_span::symbol::{sym, Symbol};
-
 use rustc_span::Span;
+use rustc_span::symbol::{Symbol, sym};
 
 use crate::html::escape::Escape;
+use crate::joined::Joined as _;
 
 #[cfg(test)]
 mod tests;
@@ -43,14 +42,18 @@ pub(crate) struct InvalidCfgError {
 }
 
 impl Cfg {
-    /// Parses a `NestedMetaItem` into a `Cfg`.
+    /// Parses a `MetaItemInner` into a `Cfg`.
     fn parse_nested(
-        nested_cfg: &NestedMetaItem,
+        nested_cfg: &MetaItemInner,
         exclude: &FxHashSet<Cfg>,
     ) -> Result<Option<Cfg>, InvalidCfgError> {
         match nested_cfg {
-            NestedMetaItem::MetaItem(ref cfg) => Cfg::parse_without(cfg, exclude),
-            NestedMetaItem::Lit(ref lit) => {
+            MetaItemInner::MetaItem(ref cfg) => Cfg::parse_without(cfg, exclude),
+            MetaItemInner::Lit(MetaItemLit { kind: LitKind::Bool(b), .. }) => match *b {
+                true => Ok(Some(Cfg::True)),
+                false => Ok(Some(Cfg::False)),
+            },
+            MetaItemInner::Lit(ref lit) => {
                 Err(InvalidCfgError { msg: "unexpected literal", span: lit.span })
             }
         }
@@ -88,11 +91,11 @@ impl Cfg {
             },
             MetaItemKind::List(ref items) => {
                 let orig_len = items.len();
-                let sub_cfgs =
+                let mut sub_cfgs =
                     items.iter().filter_map(|i| Cfg::parse_nested(i, exclude).transpose());
                 let ret = match name {
-                    sym::all => sub_cfgs.fold(Ok(Cfg::True), |x, y| Ok(x? & y?)),
-                    sym::any => sub_cfgs.fold(Ok(Cfg::False), |x, y| Ok(x? | y?)),
+                    sym::all => sub_cfgs.try_fold(Cfg::True, |x, y| Ok(x & y?)),
+                    sym::any => sub_cfgs.try_fold(Cfg::False, |x, y| Ok(x | y?)),
                     sym::not => {
                         if orig_len == 1 {
                             let mut sub_cfgs = sub_cfgs.collect::<Vec<_>>();
@@ -122,26 +125,26 @@ impl Cfg {
     ///
     /// If the content is not properly formatted, it will return an error indicating what and where
     /// the error is.
-    pub(crate) fn parse(cfg: &MetaItem) -> Result<Cfg, InvalidCfgError> {
-        Self::parse_without(cfg, &FxHashSet::default()).map(|ret| ret.unwrap())
+    pub(crate) fn parse(cfg: &MetaItemInner) -> Result<Cfg, InvalidCfgError> {
+        Self::parse_nested(cfg, &FxHashSet::default()).map(|ret| ret.unwrap())
     }
 
     /// Checks whether the given configuration can be matched in the current session.
     ///
     /// Equivalent to `attr::cfg_matches`.
     // FIXME: Actually make use of `features`.
-    pub(crate) fn matches(&self, parse_sess: &ParseSess, features: Option<&Features>) -> bool {
+    pub(crate) fn matches(&self, psess: &ParseSess, features: Option<&Features>) -> bool {
         match *self {
             Cfg::False => false,
             Cfg::True => true,
-            Cfg::Not(ref child) => !child.matches(parse_sess, features),
+            Cfg::Not(ref child) => !child.matches(psess, features),
             Cfg::All(ref sub_cfgs) => {
-                sub_cfgs.iter().all(|sub_cfg| sub_cfg.matches(parse_sess, features))
+                sub_cfgs.iter().all(|sub_cfg| sub_cfg.matches(psess, features))
             }
             Cfg::Any(ref sub_cfgs) => {
-                sub_cfgs.iter().any(|sub_cfg| sub_cfg.matches(parse_sess, features))
+                sub_cfgs.iter().any(|sub_cfg| sub_cfg.matches(psess, features))
             }
-            Cfg::Cfg(name, value) => parse_sess.config.contains(&(name, value)),
+            Cfg::Cfg(name, value) => psess.config.contains(&(name, value)),
         }
     }
 
@@ -164,8 +167,8 @@ impl Cfg {
     /// Renders the configuration for human display, as a short HTML description.
     pub(crate) fn render_short_html(&self) -> String {
         let mut msg = Display(self, Format::ShortHtml).to_string();
-        if self.should_capitalize_first_letter() &&
-            let Some(i) = msg.find(|c: char| c.is_ascii_alphanumeric())
+        if self.should_capitalize_first_letter()
+            && let Some(i) = msg.find(|c: char| c.is_ascii_alphanumeric())
         {
             msg[i..i + 1].make_ascii_uppercase();
         }
@@ -224,30 +227,28 @@ impl Cfg {
     /// `Cfg`.
     ///
     /// See `tests::test_simplify_with` for examples.
-    pub(crate) fn simplify_with(&self, assume: &Cfg) -> Option<Cfg> {
+    pub(crate) fn simplify_with(&self, assume: &Self) -> Option<Self> {
         if self == assume {
-            return None;
-        }
-
-        if let Cfg::All(a) = self {
+            None
+        } else if let Cfg::All(a) = self {
             let mut sub_cfgs: Vec<Cfg> = if let Cfg::All(b) = assume {
                 a.iter().filter(|a| !b.contains(a)).cloned().collect()
             } else {
                 a.iter().filter(|&a| a != assume).cloned().collect()
             };
             let len = sub_cfgs.len();
-            return match len {
+            match len {
                 0 => None,
                 1 => sub_cfgs.pop(),
                 _ => Some(Cfg::All(sub_cfgs)),
-            };
-        } else if let Cfg::All(b) = assume {
-            if b.contains(self) {
-                return None;
             }
+        } else if let Cfg::All(b) = assume
+            && b.contains(self)
+        {
+            None
+        } else {
+            Some(self.clone())
         }
-
-        Some(self.clone())
     }
 }
 
@@ -389,18 +390,81 @@ fn write_with_opt_paren<T: fmt::Display>(
     Ok(())
 }
 
-impl<'a> fmt::Display for Display<'a> {
+impl Display<'_> {
+    fn display_sub_cfgs(
+        &self,
+        fmt: &mut fmt::Formatter<'_>,
+        sub_cfgs: &[Cfg],
+        separator: &str,
+    ) -> fmt::Result {
+        use fmt::Display as _;
+
+        let short_longhand = self.1.is_long() && {
+            let all_crate_features =
+                sub_cfgs.iter().all(|sub_cfg| matches!(sub_cfg, Cfg::Cfg(sym::feature, Some(_))));
+            let all_target_features = sub_cfgs
+                .iter()
+                .all(|sub_cfg| matches!(sub_cfg, Cfg::Cfg(sym::target_feature, Some(_))));
+
+            if all_crate_features {
+                fmt.write_str("crate features ")?;
+                true
+            } else if all_target_features {
+                fmt.write_str("target features ")?;
+                true
+            } else {
+                false
+            }
+        };
+
+        fmt::from_fn(|f| {
+            sub_cfgs
+                .iter()
+                .map(|sub_cfg| {
+                    fmt::from_fn(move |fmt| {
+                        if let Cfg::Cfg(_, Some(feat)) = sub_cfg
+                            && short_longhand
+                        {
+                            if self.1.is_html() {
+                                write!(fmt, "<code>{feat}</code>")?;
+                            } else {
+                                write!(fmt, "`{feat}`")?;
+                            }
+                        } else {
+                            write_with_opt_paren(fmt, !sub_cfg.is_all(), Display(sub_cfg, self.1))?;
+                        }
+                        Ok(())
+                    })
+                })
+                .joined(separator, f)
+        })
+        .fmt(fmt)?;
+
+        Ok(())
+    }
+}
+
+impl fmt::Display for Display<'_> {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self.0 {
             Cfg::Not(ref child) => match **child {
                 Cfg::Any(ref sub_cfgs) => {
                     let separator =
                         if sub_cfgs.iter().all(Cfg::is_simple) { " nor " } else { ", nor " };
-                    for (i, sub_cfg) in sub_cfgs.iter().enumerate() {
-                        fmt.write_str(if i == 0 { "neither " } else { separator })?;
-                        write_with_opt_paren(fmt, !sub_cfg.is_all(), Display(sub_cfg, self.1))?;
-                    }
-                    Ok(())
+                    fmt.write_str("neither ")?;
+
+                    sub_cfgs
+                        .iter()
+                        .map(|sub_cfg| {
+                            fmt::from_fn(|fmt| {
+                                write_with_opt_paren(
+                                    fmt,
+                                    !sub_cfg.is_all(),
+                                    Display(sub_cfg, self.1),
+                                )
+                            })
+                        })
+                        .joined(separator, fmt)
                 }
                 ref simple @ Cfg::Cfg(..) => write!(fmt, "non-{}", Display(simple, self.1)),
                 ref c => write!(fmt, "not ({})", Display(c, self.1)),
@@ -408,79 +472,9 @@ impl<'a> fmt::Display for Display<'a> {
 
             Cfg::Any(ref sub_cfgs) => {
                 let separator = if sub_cfgs.iter().all(Cfg::is_simple) { " or " } else { ", or " };
-
-                let short_longhand = self.1.is_long() && {
-                    let all_crate_features = sub_cfgs
-                        .iter()
-                        .all(|sub_cfg| matches!(sub_cfg, Cfg::Cfg(sym::feature, Some(_))));
-                    let all_target_features = sub_cfgs
-                        .iter()
-                        .all(|sub_cfg| matches!(sub_cfg, Cfg::Cfg(sym::target_feature, Some(_))));
-
-                    if all_crate_features {
-                        fmt.write_str("crate features ")?;
-                        true
-                    } else if all_target_features {
-                        fmt.write_str("target features ")?;
-                        true
-                    } else {
-                        false
-                    }
-                };
-
-                for (i, sub_cfg) in sub_cfgs.iter().enumerate() {
-                    if i != 0 {
-                        fmt.write_str(separator)?;
-                    }
-                    if let (true, Cfg::Cfg(_, Some(feat))) = (short_longhand, sub_cfg) {
-                        if self.1.is_html() {
-                            write!(fmt, "<code>{}</code>", feat)?;
-                        } else {
-                            write!(fmt, "`{}`", feat)?;
-                        }
-                    } else {
-                        write_with_opt_paren(fmt, !sub_cfg.is_all(), Display(sub_cfg, self.1))?;
-                    }
-                }
-                Ok(())
+                self.display_sub_cfgs(fmt, sub_cfgs, separator)
             }
-
-            Cfg::All(ref sub_cfgs) => {
-                let short_longhand = self.1.is_long() && {
-                    let all_crate_features = sub_cfgs
-                        .iter()
-                        .all(|sub_cfg| matches!(sub_cfg, Cfg::Cfg(sym::feature, Some(_))));
-                    let all_target_features = sub_cfgs
-                        .iter()
-                        .all(|sub_cfg| matches!(sub_cfg, Cfg::Cfg(sym::target_feature, Some(_))));
-
-                    if all_crate_features {
-                        fmt.write_str("crate features ")?;
-                        true
-                    } else if all_target_features {
-                        fmt.write_str("target features ")?;
-                        true
-                    } else {
-                        false
-                    }
-                };
-
-                for (i, sub_cfg) in sub_cfgs.iter().enumerate() {
-                    if i != 0 {
-                        fmt.write_str(" and ")?;
-                    }
-                    if let (true, Cfg::Cfg(_, Some(feat))) = (short_longhand, sub_cfg) {
-                        if self.1.is_html() {
-                            write!(fmt, "<code>{}</code>", feat)?;
-                        } else {
-                            write!(fmt, "`{}`", feat)?;
-                        }
-                    } else {
-                        write_with_opt_paren(fmt, !sub_cfg.is_simple(), Display(sub_cfg, self.1))?;
-                    }
-                }
-                Ok(())
-            }
+            Cfg::All(ref sub_cfgs) => self.display_sub_cfgs(fmt, sub_cfgs, " and "),
 
             Cfg::True => fmt.write_str("everywhere"),
             Cfg::False => fmt.write_str("nowhere"),
@@ -511,16 +505,19 @@ impl<'a> fmt::Display for Display<'a> {
                         "wasi" => "WASI",
                         "watchos" => "watchOS",
                         "windows" => "Windows",
+                        "visionos" => "visionOS",
                         _ => "",
                     },
                     (sym::target_arch, Some(arch)) => match arch.as_str() {
                         "aarch64" => "AArch64",
                         "arm" => "ARM",
-                        "asmjs" => "JavaScript",
                         "loongarch64" => "LoongArch LA64",
                         "m68k" => "M68k",
+                        "csky" => "CSKY",
                         "mips" => "MIPS",
+                        "mips32r6" => "MIPS Release 6",
                         "mips64" => "MIPS-64",
+                        "mips64r6" => "MIPS-64 Release 6",
                         "msp430" => "MSP430",
                         "powerpc" => "PowerPC",
                         "powerpc64" => "PowerPC-64",
@@ -549,21 +546,21 @@ impl<'a> fmt::Display for Display<'a> {
                         "sgx" => "SGX",
                         _ => "",
                     },
-                    (sym::target_endian, Some(endian)) => return write!(fmt, "{}-endian", endian),
-                    (sym::target_pointer_width, Some(bits)) => return write!(fmt, "{}-bit", bits),
+                    (sym::target_endian, Some(endian)) => return write!(fmt, "{endian}-endian"),
+                    (sym::target_pointer_width, Some(bits)) => return write!(fmt, "{bits}-bit"),
                     (sym::target_feature, Some(feat)) => match self.1 {
                         Format::LongHtml => {
-                            return write!(fmt, "target feature <code>{}</code>", feat);
+                            return write!(fmt, "target feature <code>{feat}</code>");
                         }
-                        Format::LongPlain => return write!(fmt, "target feature `{}`", feat),
-                        Format::ShortHtml => return write!(fmt, "<code>{}</code>", feat),
+                        Format::LongPlain => return write!(fmt, "target feature `{feat}`"),
+                        Format::ShortHtml => return write!(fmt, "<code>{feat}</code>"),
                     },
                     (sym::feature, Some(feat)) => match self.1 {
                         Format::LongHtml => {
-                            return write!(fmt, "crate feature <code>{}</code>", feat);
+                            return write!(fmt, "crate feature <code>{feat}</code>");
                         }
-                        Format::LongPlain => return write!(fmt, "crate feature `{}`", feat),
-                        Format::ShortHtml => return write!(fmt, "<code>{}</code>", feat),
+                        Format::LongPlain => return write!(fmt, "crate feature `{feat}`"),
+                        Format::ShortHtml => return write!(fmt, "<code>{feat}</code>"),
                     },
                     _ => "",
                 };
@@ -578,12 +575,12 @@ impl<'a> fmt::Display for Display<'a> {
                             Escape(v.as_str())
                         )
                     } else {
-                        write!(fmt, r#"`{}="{}"`"#, name, v)
+                        write!(fmt, r#"`{name}="{v}"`"#)
                     }
                 } else if self.1.is_html() {
                     write!(fmt, "<code>{}</code>", Escape(name.as_str()))
                 } else {
-                    write!(fmt, "`{}`", name)
+                    write!(fmt, "`{name}`")
                 }
             }
         }

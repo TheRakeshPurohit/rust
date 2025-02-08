@@ -1,10 +1,8 @@
-use rustc_macros::Diagnostic;
-use rustc_session::config::CrateType;
-use rustc_span::{Span, Symbol};
-use rustc_target::spec::TargetTriple;
-
 use std::io;
 use std::path::Path;
+
+use rustc_macros::Diagnostic;
+use rustc_span::{Span, Symbol};
 
 #[derive(Diagnostic)]
 #[diag(interface_ferris_identifier)]
@@ -91,13 +89,6 @@ pub struct FailedWritingFile<'a> {
 pub struct ProcMacroCratePanicAbort;
 
 #[derive(Diagnostic)]
-#[diag(interface_unsupported_crate_type_for_target)]
-pub struct UnsupportedCrateTypeForTarget<'a> {
-    pub crate_type: CrateType,
-    pub target_triple: &'a TargetTriple,
-}
-
-#[derive(Diagnostic)]
 #[diag(interface_multiple_output_types_adaption)]
 pub struct MultipleOutputTypesAdaption;
 
@@ -112,3 +103,12 @@ pub struct IgnoringOutDir;
 #[derive(Diagnostic)]
 #[diag(interface_multiple_output_types_to_stdout)]
 pub struct MultipleOutputTypesToStdout;
+
+#[derive(Diagnostic)]
+#[diag(interface_abi_required_feature)]
+#[note]
+#[note(interface_abi_required_feature_issue)]
+pub(crate) struct AbiRequiredTargetFeature<'a> {
+    pub feature: &'a str,
+    pub enabled: &'a str,
+}

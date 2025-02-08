@@ -1,18 +1,14 @@
-// run-pass
-// ignore-wasm32-bare no libc to test ffi with
-// ignore-sgx no libc
+//@ run-pass
+//@ ignore-sgx no libc
 
-#![feature(rustc_private)]
-
-extern crate libc;
 use std::ffi::CString;
 
 mod mlibc {
-    use libc::{c_char, size_t};
+    use std::ffi::c_char;
 
     extern "C" {
         #[link_name = "strlen"]
-        pub fn my_strlen(str: *const c_char) -> size_t;
+        pub fn my_strlen(str: *const c_char) -> usize;
     }
 }
 

@@ -1,8 +1,7 @@
-// run-pass
+//@ run-pass
 #![allow(dead_code)]
 // Issue #5192
 
-// pretty-expanded FIXME #23616
 
 pub trait EventLoop { fn foo(&self) {} }
 

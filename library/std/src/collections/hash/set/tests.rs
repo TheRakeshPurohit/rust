@@ -1,9 +1,8 @@
-use super::super::map::RandomState;
 use super::HashSet;
-
-use crate::panic::{catch_unwind, AssertUnwindSafe};
-use crate::sync::atomic::{AtomicU32, Ordering};
+use crate::hash::RandomState;
+use crate::panic::{AssertUnwindSafe, catch_unwind};
 use crate::sync::Arc;
+use crate::sync::atomic::{AtomicU32, Ordering};
 
 #[test]
 fn test_zero_capacities() {
@@ -352,7 +351,7 @@ fn test_replace() {
     use crate::hash;
 
     #[derive(Debug)]
-    struct Foo(&'static str, i32);
+    struct Foo(&'static str, #[allow(dead_code)] i32);
 
     impl PartialEq for Foo {
         fn eq(&self, other: &Self) -> bool {
@@ -430,6 +429,7 @@ fn test_extract_if() {
 }
 
 #[test]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
 fn test_extract_if_drop_panic_leak() {
     static PREDS: AtomicU32 = AtomicU32::new(0);
     static DROPS: AtomicU32 = AtomicU32::new(0);
@@ -460,6 +460,7 @@ fn test_extract_if_drop_panic_leak() {
 }
 
 #[test]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
 fn test_extract_if_pred_panic_leak() {
     static PREDS: AtomicU32 = AtomicU32::new(0);
     static DROPS: AtomicU32 = AtomicU32::new(0);

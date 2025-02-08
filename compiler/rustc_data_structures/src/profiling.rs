@@ -81,26 +81,27 @@
 //!
 //! [mm]: https://github.com/rust-lang/measureme/
 
-use crate::cold_path;
-use crate::fx::FxHashMap;
-
 use std::borrow::Borrow;
 use std::collections::hash_map::Entry;
 use std::error::Error;
 use std::fmt::Display;
-use std::fs;
 use std::intrinsics::unlikely;
 use std::path::Path;
-use std::process;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::{fs, process};
 
 pub use measureme::EventId;
 use measureme::{EventIdBuilder, Profiler, SerializableString, StringId};
 use parking_lot::RwLock;
 use smallvec::SmallVec;
+use tracing::warn;
+
+use crate::fx::FxHashMap;
+use crate::outline;
 
 bitflags::bitflags! {
+    #[derive(Clone, Copy)]
     struct EventFilter: u16 {
         const GENERIC_ACTIVITIES  = 1 << 0;
         const QUERY_PROVIDERS     = 1 << 1;
@@ -114,14 +115,14 @@ bitflags::bitflags! {
         const INCR_RESULT_HASHING = 1 << 8;
         const ARTIFACT_SIZES = 1 << 9;
 
-        const DEFAULT = Self::GENERIC_ACTIVITIES.bits |
-                        Self::QUERY_PROVIDERS.bits |
-                        Self::QUERY_BLOCKED.bits |
-                        Self::INCR_CACHE_LOADS.bits |
-                        Self::INCR_RESULT_HASHING.bits |
-                        Self::ARTIFACT_SIZES.bits;
+        const DEFAULT = Self::GENERIC_ACTIVITIES.bits() |
+                        Self::QUERY_PROVIDERS.bits() |
+                        Self::QUERY_BLOCKED.bits() |
+                        Self::INCR_CACHE_LOADS.bits() |
+                        Self::INCR_RESULT_HASHING.bits() |
+                        Self::ARTIFACT_SIZES.bits();
 
-        const ARGS = Self::QUERY_KEYS.bits | Self::FUNCTION_ARGS.bits;
+        const ARGS = Self::QUERY_KEYS.bits() | Self::FUNCTION_ARGS.bits();
     }
 }
 
@@ -560,7 +561,7 @@ impl SelfProfiler {
         // ASLR is disabled and the heap is otherwise deterministic.
         let pid: u32 = process::id();
         let filename = format!("{crate_name}-{pid:07}.rustc_profile");
-        let path = output_directory.join(&filename);
+        let path = output_directory.join(filename);
         let profiler =
             Profiler::with_counter(&path, measureme::counters::Counter::by_name(counter_name)?)?;
 
@@ -697,7 +698,7 @@ impl<'a> TimingGuard<'a> {
     #[inline]
     pub fn finish_with_query_invocation_id(self, query_invocation_id: QueryInvocationId) {
         if let Some(guard) = self.0 {
-            cold_path(|| {
+            outline(|| {
                 let event_id = StringId::new_virtual(query_invocation_id.0);
                 let event_id = EventId::from_virtual(event_id);
                 guard.finish_with_override_event_id(event_id);
@@ -859,22 +860,21 @@ fn get_thread_id() -> u32 {
 }
 
 // Memory reporting
-cfg_if! {
-    if #[cfg(windows)] {
+#[cfg(bootstrap)]
+cfg_match! {
+    cfg(windows) => {
         pub fn get_resident_set_size() -> Option<usize> {
             use std::mem;
 
             use windows::{
-                // FIXME: change back to K32GetProcessMemoryInfo when windows crate
-                // updated to 0.49.0+ to drop dependency on psapi.dll
-                Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
+                Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
                 Win32::System::Threading::GetCurrentProcess,
             };
 
             let mut pmc = PROCESS_MEMORY_COUNTERS::default();
             let pmc_size = mem::size_of_val(&pmc);
             unsafe {
-                GetProcessMemoryInfo(
+                K32GetProcessMemoryInfo(
                     GetCurrentProcess(),
                     &mut pmc,
                     pmc_size as u32,
@@ -885,7 +885,8 @@ cfg_if! {
 
             Some(pmc.WorkingSetSize)
         }
-    } else if #[cfg(target_os = "macos")] {
+    }
+    cfg(target_os = "macos")  => {
         pub fn get_resident_set_size() -> Option<usize> {
             use libc::{c_int, c_void, getpid, proc_pidinfo, proc_taskinfo, PROC_PIDTASKINFO};
             use std::mem;
@@ -903,7 +904,8 @@ cfg_if! {
                 }
             }
         }
-    } else if #[cfg(unix)] {
+    }
+    cfg(unix) => {
         pub fn get_resident_set_size() -> Option<usize> {
             let field = 1;
             let contents = fs::read("/proc/self/statm").ok()?;
@@ -912,7 +914,70 @@ cfg_if! {
             let npages = s.parse::<usize>().ok()?;
             Some(npages * 4096)
         }
-    } else {
+    }
+    _ => {
+        pub fn get_resident_set_size() -> Option<usize> {
+            None
+        }
+    }
+}
+
+#[cfg(not(bootstrap))]
+cfg_match! {
+    windows => {
+        pub fn get_resident_set_size() -> Option<usize> {
+            use std::mem;
+
+            use windows::{
+                Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
+                Win32::System::Threading::GetCurrentProcess,
+            };
+
+            let mut pmc = PROCESS_MEMORY_COUNTERS::default();
+            let pmc_size = mem::size_of_val(&pmc);
+            unsafe {
+                K32GetProcessMemoryInfo(
+                    GetCurrentProcess(),
+                    &mut pmc,
+                    pmc_size as u32,
+                )
+            }
+            .ok()
+            .ok()?;
+
+            Some(pmc.WorkingSetSize)
+        }
+    }
+    target_os = "macos" => {
+        pub fn get_resident_set_size() -> Option<usize> {
+            use libc::{c_int, c_void, getpid, proc_pidinfo, proc_taskinfo, PROC_PIDTASKINFO};
+            use std::mem;
+            const PROC_TASKINFO_SIZE: c_int = mem::size_of::<proc_taskinfo>() as c_int;
+
+            unsafe {
+                let mut info: proc_taskinfo = mem::zeroed();
+                let info_ptr = &mut info as *mut proc_taskinfo as *mut c_void;
+                let pid = getpid() as c_int;
+                let ret = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, info_ptr, PROC_TASKINFO_SIZE);
+                if ret == PROC_TASKINFO_SIZE {
+                    Some(info.pti_resident_size as usize)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+    unix => {
+        pub fn get_resident_set_size() -> Option<usize> {
+            let field = 1;
+            let contents = fs::read("/proc/self/statm").ok()?;
+            let contents = String::from_utf8(contents).ok()?;
+            let s = contents.split_whitespace().nth(field)?;
+            let npages = s.parse::<usize>().ok()?;
+            Some(npages * 4096)
+        }
+    }
+    _ => {
         pub fn get_resident_set_size() -> Option<usize> {
             None
         }

@@ -1,12 +1,12 @@
-// compile-flags: --document-private-items --document-hidden-items
+//@ compile-flags: --document-private-items --document-hidden-items
 
 // This is a regression test for #98009.
 
-// @has "$.index[*][?(@.name=='this_compiles')]"
-// @has "$.index[*][?(@.name=='this_does_not')]"
-// @has "$.index[*][?(@.name=='Events')]"
-// @has "$.index[*][?(@.name=='Other')]"
-// @has "$.index[*][?(@.name=='Trait')]"
+//@ has "$.index[*][?(@.name=='this_compiles')]"
+//@ has "$.index[*][?(@.name=='this_does_not')]"
+//@ has "$.index[*][?(@.name=='Events')]"
+//@ has "$.index[*][?(@.name=='Other')]"
+//@ has "$.index[*][?(@.name=='Trait')]"
 
 struct Events<R>(R);
 
@@ -16,12 +16,19 @@ pub trait Trait<T> {
     fn handle(value: T) -> Self;
 }
 
-impl<T, U> Trait<U> for T where T: From<U> {
-    fn handle(_: U) -> Self { unimplemented!() }
+impl<T, U> Trait<U> for T
+where
+    T: From<U>,
+{
+    fn handle(_: U) -> Self {
+        unimplemented!()
+    }
 }
 
 impl<'a, R> Trait<&'a mut Events<R>> for Other {
-    fn handle(_: &'a mut Events<R>) -> Self { unimplemented!() }
+    fn handle(_: &'a mut Events<R>) -> Self {
+        unimplemented!()
+    }
 }
 
 fn this_compiles<'a, R>(value: &'a mut Events<R>) {

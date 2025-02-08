@@ -1,5 +1,5 @@
-// run-pass
-// ignore-emscripten no threads support
+//@ run-pass
+//@ needs-threads
 
 use std::sync::mpsc::channel;
 use std::thread;
@@ -7,7 +7,7 @@ use std::thread;
 pub fn main() {
     let (tx, rx) = channel::<&'static str>();
 
-    let t = thread::spawn(move|| {
+    let t = thread::spawn(move || {
         assert_eq!(rx.recv().unwrap(), "hello, world");
     });
 

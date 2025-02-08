@@ -1,4 +1,4 @@
-// edition: 2021
+//@ edition: 2021
 
 trait Has {
     fn has() {}
@@ -7,5 +7,6 @@ trait Has {
 trait HasNot {}
 
 fn main() {
-    HasNot::has(); //~ ERROR
+    HasNot::has();
+    //~^ ERROR expected a type, found a trait
 }

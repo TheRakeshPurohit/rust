@@ -1,4 +1,6 @@
-// run-pass
+//@ run-pass
+
+#![allow(unpredictable_function_pointer_comparisons)]
 
 fn main() {
     // We shouldn't promote this

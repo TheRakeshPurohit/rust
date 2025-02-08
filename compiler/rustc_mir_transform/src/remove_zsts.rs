@@ -1,26 +1,25 @@
 //! Removes operations on ZST places, and convert ZST operands to constants.
 
-use crate::MirPass;
-use rustc_middle::mir::interpret::ConstValue;
 use rustc_middle::mir::visit::*;
 use rustc_middle::mir::*;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 
-pub struct RemoveZsts;
+pub(super) struct RemoveZsts;
 
-impl<'tcx> MirPass<'tcx> for RemoveZsts {
+impl<'tcx> crate::MirPass<'tcx> for RemoveZsts {
     fn is_enabled(&self, sess: &rustc_session::Session) -> bool {
         sess.mir_opt_level() > 0
     }
 
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
-        // Avoid query cycles (generators require optimized MIR for layout).
-        if tcx.type_of(body.source.def_id()).subst_identity().is_generator() {
+        // Avoid query cycles (coroutines require optimized MIR for layout).
+        if tcx.type_of(body.source.def_id()).instantiate_identity().is_coroutine() {
             return;
         }
-        let param_env = tcx.param_env_reveal_all_normalized(body.source.def_id());
+
+        let typing_env = body.typing_env(tcx);
         let local_decls = &body.local_decls;
-        let mut replacer = Replacer { tcx, param_env, local_decls };
+        let mut replacer = Replacer { tcx, typing_env, local_decls };
         for var_debug_info in &mut body.var_debug_info {
             replacer.visit_var_debug_info(var_debug_info);
         }
@@ -28,47 +27,60 @@ impl<'tcx> MirPass<'tcx> for RemoveZsts {
             replacer.visit_basic_block_data(bb, data);
         }
     }
+
+    fn is_required(&self) -> bool {
+        true
+    }
 }
 
 struct Replacer<'a, 'tcx> {
     tcx: TyCtxt<'tcx>,
-    param_env: ty::ParamEnv<'tcx>,
+    typing_env: ty::TypingEnv<'tcx>,
     local_decls: &'a LocalDecls<'tcx>,
 }
 
 /// A cheap, approximate check to avoid unnecessary `layout_of` calls.
-fn maybe_zst(ty: Ty<'_>) -> bool {
+///
+/// `Some(true)` is definitely ZST; `Some(false)` is definitely *not* ZST.
+///
+/// `None` may or may not be, and must check `layout_of` to be sure.
+fn trivially_zst<'tcx>(ty: Ty<'tcx>, tcx: TyCtxt<'tcx>) -> Option<bool> {
     match ty.kind() {
-        // maybe ZST (could be more precise)
-        ty::Adt(..)
-        | ty::Array(..)
-        | ty::Closure(..)
-        | ty::Tuple(..)
-        | ty::Alias(ty::Opaque, ..) => true,
         // definitely ZST
-        ty::FnDef(..) | ty::Never => true,
-        // unreachable or can't be ZST
-        _ => false,
+        ty::FnDef(..) | ty::Never => Some(true),
+        ty::Tuple(fields) if fields.is_empty() => Some(true),
+        ty::Array(_ty, len) if let Some(0) = len.try_to_target_usize(tcx) => Some(true),
+        // clearly not ZST
+        ty::Bool
+        | ty::Char
+        | ty::Int(..)
+        | ty::Uint(..)
+        | ty::Float(..)
+        | ty::RawPtr(..)
+        | ty::Ref(..)
+        | ty::FnPtr(..) => Some(false),
+        // check `layout_of` to see (including unreachable things we won't actually see)
+        _ => None,
     }
 }
 
 impl<'tcx> Replacer<'_, 'tcx> {
     fn known_to_be_zst(&self, ty: Ty<'tcx>) -> bool {
-        if !maybe_zst(ty) {
-            return false;
+        if let Some(is_zst) = trivially_zst(ty, self.tcx) {
+            is_zst
+        } else {
+            self.tcx
+                .layout_of(self.typing_env.as_query_input(ty))
+                .is_ok_and(|layout| layout.is_zst())
         }
-        let Ok(layout) = self.tcx.layout_of(self.param_env.and(ty)) else {
-            return false;
-        };
-        layout.is_zst()
     }
 
-    fn make_zst(&self, ty: Ty<'tcx>) -> Constant<'tcx> {
+    fn make_zst(&self, ty: Ty<'tcx>) -> ConstOperand<'tcx> {
         debug_assert!(self.known_to_be_zst(ty));
-        Constant {
+        ConstOperand {
             span: rustc_span::DUMMY_SP,
             user_ty: None,
-            literal: ConstantKind::Val(ConstValue::ZeroSized, ty),
+            const_: Const::Val(ConstValue::ZeroSized, ty),
         }
     }
 }
@@ -87,24 +99,15 @@ impl<'tcx> MutVisitor<'tcx> for Replacer<'_, 'tcx> {
                     var_debug_info.value = VarDebugInfoContents::Const(self.make_zst(place_ty))
                 }
             }
-            VarDebugInfoContents::Composite { ty, fragments: _ } => {
-                if self.known_to_be_zst(ty) {
-                    var_debug_info.value = VarDebugInfoContents::Const(self.make_zst(ty))
-                }
-            }
         }
     }
 
-    fn visit_operand(&mut self, operand: &mut Operand<'tcx>, loc: Location) {
+    fn visit_operand(&mut self, operand: &mut Operand<'tcx>, _: Location) {
         if let Operand::Constant(_) = operand {
             return;
         }
         let op_ty = operand.ty(self.local_decls, self.tcx);
-        if self.known_to_be_zst(op_ty)
-            && self.tcx.consider_optimizing(|| {
-                format!("RemoveZsts - Operand: {:?} Location: {:?}", operand, loc)
-            })
-        {
+        if self.known_to_be_zst(op_ty) {
             *operand = Operand::Constant(Box::new(self.make_zst(op_ty)))
         }
     }
@@ -126,14 +129,12 @@ impl<'tcx> MutVisitor<'tcx> for Replacer<'_, 'tcx> {
             StatementKind::Coverage(_)
             | StatementKind::Intrinsic(_)
             | StatementKind::Nop
+            | StatementKind::BackwardIncompatibleDropHint { .. }
             | StatementKind::ConstEvalCounter => None,
         };
         if let Some(place_for_ty) = place_for_ty
             && let ty = place_for_ty.ty(self.local_decls, self.tcx).ty
             && self.known_to_be_zst(ty)
-            && self.tcx.consider_optimizing(|| {
-                format!("RemoveZsts - Place: {:?} SourceInfo: {:?}", place_for_ty, statement.source_info)
-            })
         {
             statement.make_nop();
         } else {

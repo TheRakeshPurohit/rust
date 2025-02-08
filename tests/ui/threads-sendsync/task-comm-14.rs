@@ -1,6 +1,6 @@
-// run-pass
+//@ run-pass
 #![allow(unused_parens)]
-// ignore-emscripten no threads support
+//@ needs-threads
 
 use std::sync::mpsc::{channel, Sender};
 use std::thread;
@@ -13,7 +13,10 @@ pub fn main() {
     while (i > 0) {
         println!("{}", i);
         let tx = tx.clone();
-        thread::spawn({let i = i; move|| { child(i, &tx) }});
+        thread::spawn({
+            let i = i;
+            move || child(i, &tx)
+        });
         i = i - 1;
     }
 

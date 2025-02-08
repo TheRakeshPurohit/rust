@@ -1,4 +1,3 @@
-// run-pass
-// pretty-expanded FIXME #23616
+//@ run-pass
 
 extern "Rust" fn main() {}

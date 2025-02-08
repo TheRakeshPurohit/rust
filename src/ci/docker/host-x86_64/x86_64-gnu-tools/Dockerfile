@@ -56,18 +56,43 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   lsb-release \
   xdg-utils \
   wget \
+  # libgccjit dependencies
+  flex \
+  libmpfr-dev \
+  libgmp-dev \
+  libmpc3 \
+  libmpc-dev \
   && rm -rf /var/lib/apt/lists/*
 
 COPY scripts/sccache.sh /scripts/
 RUN sh /scripts/sccache.sh
 
+# Fix rustc_codegen_gcc lto issues.
+ENV GCC_EXEC_PREFIX="/usr/lib/gcc/"
+
 COPY host-x86_64/x86_64-gnu-tools/checktools.sh /tmp/
 
-RUN curl -sL https://nodejs.org/dist/v14.20.0/node-v14.20.0-linux-x64.tar.xz | tar -xJ
-ENV NODE_FOLDER=/node-v14.20.0-linux-x64/bin
-ENV PATH="$NODE_FOLDER:${PATH}"
+COPY scripts/nodejs.sh /scripts/
+RUN sh /scripts/nodejs.sh /node
+ENV PATH="/node/bin:${PATH}"
 
 COPY host-x86_64/x86_64-gnu-tools/browser-ui-test.version /tmp/
+
+ENV RUST_CONFIGURE_ARGS \
+  --build=x86_64-unknown-linux-gnu \
+  --save-toolstates=/tmp/toolstate/toolstates.json \
+  --enable-new-symbol-mangling
+
+ENV HOST_TARGET x86_64-unknown-linux-gnu
+
+# FIXME(#133381): currently rustc alt builds do *not* have rustc debug
+# assertions enabled! Therefore, we cannot force download CI rustc.
+#ENV FORCE_CI_RUSTC 1
+
+COPY scripts/shared.sh /scripts/
+COPY scripts/build-gccjit.sh /scripts/
+
+RUN /scripts/build-gccjit.sh /scripts
 
 # For now, we need to use `--unsafe-perm=true` to go around an issue when npm tries
 # to create a new folder. For reference:
@@ -77,12 +102,6 @@ COPY host-x86_64/x86_64-gnu-tools/browser-ui-test.version /tmp/
 #
 # The `browser-ui-test.version` file is also used by bootstrap to emit warnings in case
 # the local version of the package is different than the one used by the CI.
-RUN npm install -g browser-ui-test@$(head -n 1 /tmp/browser-ui-test.version) --unsafe-perm=true
-
-ENV RUST_CONFIGURE_ARGS \
-  --build=x86_64-unknown-linux-gnu \
-  --save-toolstates=/tmp/toolstate/toolstates.json
-
 ENV SCRIPT /tmp/checktools.sh ../x.py && \
-  NODE_PATH=`npm root -g` python3 ../x.py test tests/rustdoc-gui --stage 2 \
-    --test-args "'--no-sandbox --jobs 1'"
+  npm install browser-ui-test@$(head -n 1 /tmp/browser-ui-test.version) --unsafe-perm=true && \
+  python3 ../x.py test tests/rustdoc-gui --stage 2 --test-args "'--jobs 1'"

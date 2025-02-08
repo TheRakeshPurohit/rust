@@ -1,8 +1,30 @@
-error: internal compiler error: compiler/rustc_middle/src/ty/normalize_erasing_regions.rs:LL:CC: Failed to normalize <for<'a, 'b> fn(&'a Alias<'b>) {foo} as std::ops::FnOnce<(&&S,)>>::Output, maybe try to call `try_normalize_erasing_regions` instead
+error: `~const` can only be applied to `#[const_trait]` traits
+  --> $DIR/normalize-tait-in-const.rs:27:35
+   |
+LL | const fn with_positive<F: for<'a> ~const Fn(&'a Alias<'a>) + ~const Destruct>(fun: F) {
+   |                                   ^^^^^^ can't be applied to `Fn`
+   |
+note: `Fn` can't be used with `~const` because it isn't annotated with `#[const_trait]`
+  --> $SRC_DIR/core/src/ops/function.rs:LL:COL
 
-query stack during panic:
-#0 [eval_to_allocation_raw] const-evaluating + checking `BAR`
-#1 [eval_to_const_value_raw] simplifying constant for the type system `BAR`
-end of query stack
-error: aborting due to previous error
+error: `~const` can only be applied to `#[const_trait]` traits
+  --> $DIR/normalize-tait-in-const.rs:27:35
+   |
+LL | const fn with_positive<F: for<'a> ~const Fn(&'a Alias<'a>) + ~const Destruct>(fun: F) {
+   |                                   ^^^^^^ can't be applied to `Fn`
+   |
+note: `Fn` can't be used with `~const` because it isn't annotated with `#[const_trait]`
+  --> $SRC_DIR/core/src/ops/function.rs:LL:COL
+   = note: duplicate diagnostic emitted due to `-Z deduplicate-diagnostics=no`
 
+error[E0015]: cannot call non-const closure in constant functions
+  --> $DIR/normalize-tait-in-const.rs:28:5
+   |
+LL |     fun(filter_positive());
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: calls in constant functions are limited to constant functions, tuple structs and tuple variants
+
+error: aborting due to 3 previous errors
+
+For more information about this error, try `rustc --explain E0015`.

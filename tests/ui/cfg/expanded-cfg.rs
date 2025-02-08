@@ -1,4 +1,6 @@
-// check-pass
+//@ check-pass
+
+#![allow(unexpected_cfgs)] // since we different cfgs
 
 macro_rules! mac {
     {} => {

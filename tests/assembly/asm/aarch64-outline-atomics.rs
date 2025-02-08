@@ -1,13 +1,14 @@
-// assembly-output: emit-asm
-// compile-flags: -O
-// compile-flags: --target aarch64-unknown-linux-gnu
-// needs-llvm-components: aarch64
-// only-aarch64
-// only-linux
+//@ assembly-output: emit-asm
+//@ compile-flags: -O
+//@ compile-flags: --target aarch64-unknown-linux-gnu
+//@ needs-llvm-components: aarch64
+//@ only-aarch64
+//@ only-linux
 
 #![crate_type = "rlib"]
 
-use std::sync::atomic::{AtomicI32, Ordering::*};
+use std::sync::atomic::AtomicI32;
+use std::sync::atomic::Ordering::*;
 
 pub fn compare_exchange(a: &AtomicI32) {
     // On AArch64 LLVM should outline atomic operations.

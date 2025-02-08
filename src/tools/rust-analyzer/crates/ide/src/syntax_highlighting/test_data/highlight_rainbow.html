@@ -29,6 +29,7 @@ pre                 { color: #DCDCCC; background: #3F3F3F; font-size: 22px; padd
 .numeric_literal    { color: #BFEBBF; }
 .bool_literal       { color: #BFE6EB; }
 .macro              { color: #94BFF3; }
+.proc_macro         { color: #94BFF3; text-decoration: underline; }
 .derive             { color: #94BFF3; font-style: italic; }
 .module             { color: #AFD8AF; }
 .value_param        { color: #DCDCCC; }
@@ -39,18 +40,20 @@ pre                 { color: #DCDCCC; background: #3F3F3F; font-size: 22px; padd
 .keyword            { color: #F0DFAF; font-weight: bold; }
 .control            { font-style: italic; }
 .reference          { font-style: italic; font-weight: bold; }
+.const              { font-weight: bolder; }
 
-.unresolved_reference { color: #FC5555; text-decoration: wavy underline; }
+.invalid_escape_sequence { color: #FC5555; text-decoration: wavy underline; }
+.unresolved_reference    { color: #FC5555; text-decoration: wavy underline; }
 </style>
 <pre><code><span class="keyword">fn</span> <span class="function declaration">main</span><span class="parenthesis">(</span><span class="parenthesis">)</span> <span class="brace">{</span>
-    <span class="keyword">let</span> <span class="variable declaration reference" data-binding-hash="8121853618659664005" style="color: hsl(273,88%,88%);">hello</span> <span class="operator">=</span> <span class="string_literal">"hello"</span><span class="semicolon">;</span>
-    <span class="keyword">let</span> <span class="variable declaration" data-binding-hash="2705725358298919760" style="color: hsl(76,47%,83%);">x</span> <span class="operator">=</span> <span class="variable reference" data-binding-hash="8121853618659664005" style="color: hsl(273,88%,88%);">hello</span><span class="operator">.</span><span class="unresolved_reference">to_string</span><span class="parenthesis">(</span><span class="parenthesis">)</span><span class="semicolon">;</span>
-    <span class="keyword">let</span> <span class="variable declaration" data-binding-hash="3365759661443752373" style="color: hsl(15,86%,51%);">y</span> <span class="operator">=</span> <span class="variable reference" data-binding-hash="8121853618659664005" style="color: hsl(273,88%,88%);">hello</span><span class="operator">.</span><span class="unresolved_reference">to_string</span><span class="parenthesis">(</span><span class="parenthesis">)</span><span class="semicolon">;</span>
+    <span class="keyword">let</span> <span class="variable declaration reference" data-binding-hash="16711699953829236520" style="color: hsl(345,54%,46%);">hello</span> <span class="operator">=</span> <span class="string_literal">"hello"</span><span class="semicolon">;</span>
+    <span class="keyword">let</span> <span class="variable declaration" data-binding-hash="10753541418856619067" style="color: hsl(51,52%,47%);">x</span> <span class="operator">=</span> <span class="variable reference" data-binding-hash="16711699953829236520" style="color: hsl(345,54%,46%);">hello</span><span class="operator">.</span><span class="unresolved_reference">to_string</span><span class="parenthesis">(</span><span class="parenthesis">)</span><span class="semicolon">;</span>
+    <span class="keyword">let</span> <span class="variable declaration" data-binding-hash="9865812862466303869" style="color: hsl(329,86%,55%);">y</span> <span class="operator">=</span> <span class="variable reference" data-binding-hash="16711699953829236520" style="color: hsl(345,54%,46%);">hello</span><span class="operator">.</span><span class="unresolved_reference">to_string</span><span class="parenthesis">(</span><span class="parenthesis">)</span><span class="semicolon">;</span>
 
-    <span class="keyword">let</span> <span class="variable declaration reference" data-binding-hash="794745962933817518" style="color: hsl(127,71%,87%);">x</span> <span class="operator">=</span> <span class="string_literal">"other color please!"</span><span class="semicolon">;</span>
-    <span class="keyword">let</span> <span class="variable declaration" data-binding-hash="6717528807933952652" style="color: hsl(90,74%,79%);">y</span> <span class="operator">=</span> <span class="variable reference" data-binding-hash="794745962933817518" style="color: hsl(127,71%,87%);">x</span><span class="operator">.</span><span class="unresolved_reference">to_string</span><span class="parenthesis">(</span><span class="parenthesis">)</span><span class="semicolon">;</span>
+    <span class="keyword">let</span> <span class="variable declaration reference" data-binding-hash="4890670724659097491" style="color: hsl(330,46%,45%);">x</span> <span class="operator">=</span> <span class="string_literal">"other color please!"</span><span class="semicolon">;</span>
+    <span class="keyword">let</span> <span class="variable declaration" data-binding-hash="4002942168268782293" style="color: hsl(114,87%,67%);">y</span> <span class="operator">=</span> <span class="variable reference" data-binding-hash="4890670724659097491" style="color: hsl(330,46%,45%);">x</span><span class="operator">.</span><span class="unresolved_reference">to_string</span><span class="parenthesis">(</span><span class="parenthesis">)</span><span class="semicolon">;</span>
 <span class="brace">}</span>
 
 <span class="keyword">fn</span> <span class="function declaration">bar</span><span class="parenthesis">(</span><span class="parenthesis">)</span> <span class="brace">{</span>
-    <span class="keyword">let</span> <span class="keyword">mut</span> <span class="variable declaration mutable reference" data-binding-hash="8121853618659664005" style="color: hsl(273,88%,88%);">hello</span> <span class="operator">=</span> <span class="string_literal">"hello"</span><span class="semicolon">;</span>
+    <span class="keyword">let</span> <span class="keyword">mut</span> <span class="variable declaration mutable reference" data-binding-hash="16711699953829236520" style="color: hsl(345,54%,46%);">hello</span> <span class="operator">=</span> <span class="string_literal">"hello"</span><span class="semicolon">;</span>
 <span class="brace">}</span></code></pre>

@@ -1,18 +1,15 @@
+use rustc_ast::ptr::P;
+use rustc_ast::token::{self, Delimiter, IdentIsRaw};
+use rustc_ast::tokenstream::{DelimSpan, TokenStream, TokenTree};
 use rustc_ast::{
-    ptr::P,
-    token,
-    tokenstream::{DelimSpan, TokenStream, TokenTree},
-    BinOpKind, BorrowKind, DelimArgs, Expr, ExprKind, ItemKind, MacCall, MacDelimiter, MethodCall,
-    Mutability, Path, PathSegment, Stmt, StructRest, UnOp, UseTree, UseTreeKind, DUMMY_NODE_ID,
+    BinOpKind, BorrowKind, DUMMY_NODE_ID, DelimArgs, Expr, ExprKind, ItemKind, MacCall, MethodCall,
+    Mutability, Path, PathSegment, Stmt, StructRest, UnOp, UseTree, UseTreeKind,
 };
 use rustc_ast_pretty::pprust;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_expand::base::ExtCtxt;
-use rustc_span::{
-    symbol::{sym, Ident, Symbol},
-    Span,
-};
-use thin_vec::{thin_vec, ThinVec};
+use rustc_span::{Ident, Span, Symbol, sym};
+use thin_vec::{ThinVec, thin_vec};
 
 pub(super) struct Context<'cx, 'a> {
     // An optimization.
@@ -57,7 +54,6 @@ impl<'cx, 'a> Context<'cx, 'a> {
     /// Builds the whole `assert!` expression. For example, `let elem = 1; assert!(elem == 1);` expands to:
     ///
     /// ```rust
-    /// #![feature(generic_assert_internals)]
     /// let elem = 1;
     /// {
     ///   #[allow(unused_imports)]
@@ -120,10 +116,13 @@ impl<'cx, 'a> Context<'cx, 'a> {
                 thin_vec![self.cx.attr_nested_word(sym::allow, sym::unused_imports, self.span)],
                 ItemKind::Use(UseTree {
                     prefix: self.cx.path(self.span, self.cx.std_path(&[sym::asserting])),
-                    kind: UseTreeKind::Nested(thin_vec![
-                        nested_tree(self, sym::TryCaptureGeneric),
-                        nested_tree(self, sym::TryCapturePrintable),
-                    ]),
+                    kind: UseTreeKind::Nested {
+                        items: thin_vec![
+                            nested_tree(self, sym::TryCaptureGeneric),
+                            nested_tree(self, sym::TryCapturePrintable),
+                        ],
+                        span: self.span,
+                    },
                     span: self.span,
                 }),
             ),
@@ -150,7 +149,7 @@ impl<'cx, 'a> Context<'cx, 'a> {
     fn build_panic(&self, expr_str: &str, panic_path: Path) -> P<Expr> {
         let escaped_expr_str = escape_to_fmt(expr_str);
         let initial = [
-            TokenTree::token_alone(
+            TokenTree::token_joint(
                 token::Literal(token::Lit {
                     kind: token::LitKind::Str,
                     symbol: Symbol::intern(&if self.fmt_string.is_empty() {
@@ -169,7 +168,10 @@ impl<'cx, 'a> Context<'cx, 'a> {
         ];
         let captures = self.capture_decls.iter().flat_map(|cap| {
             [
-                TokenTree::token_alone(token::Ident(cap.ident.name, false), cap.ident.span),
+                TokenTree::token_joint(
+                    token::Ident(cap.ident.name, IdentIsRaw::No),
+                    cap.ident.span,
+                ),
                 TokenTree::token_alone(token::Comma, self.span),
             ]
         });
@@ -179,7 +181,7 @@ impl<'cx, 'a> Context<'cx, 'a> {
                 path: panic_path,
                 args: P(DelimArgs {
                     dspan: DelimSpan::from_single(self.span),
-                    delim: MacDelimiter::Parenthesis,
+                    delim: Delimiter::Parenthesis,
                     tokens: initial.into_iter().chain(captures).collect::<TokenStream>(),
                 }),
             })),
@@ -192,10 +194,9 @@ impl<'cx, 'a> Context<'cx, 'a> {
     fn manage_cond_expr(&mut self, expr: &mut P<Expr>) {
         match &mut expr.kind {
             ExprKind::AddrOf(_, mutability, local_expr) => {
-                self.with_is_consumed_management(
-                    matches!(mutability, Mutability::Mut),
-                    |this| this.manage_cond_expr(local_expr)
-                );
+                self.with_is_consumed_management(matches!(mutability, Mutability::Mut), |this| {
+                    this.manage_cond_expr(local_expr)
+                });
             }
             ExprKind::Array(local_exprs) => {
                 for local_expr in local_exprs {
@@ -222,7 +223,7 @@ impl<'cx, 'a> Context<'cx, 'a> {
                     |this| {
                         this.manage_cond_expr(lhs);
                         this.manage_cond_expr(rhs);
-                    }
+                    },
                 );
             }
             ExprKind::Call(_, local_exprs) => {
@@ -236,14 +237,14 @@ impl<'cx, 'a> Context<'cx, 'a> {
             ExprKind::If(local_expr, _, _) => {
                 self.manage_cond_expr(local_expr);
             }
-            ExprKind::Index(prefix, suffix) => {
+            ExprKind::Index(prefix, suffix, _) => {
                 self.manage_cond_expr(prefix);
                 self.manage_cond_expr(suffix);
             }
-            ExprKind::Let(_, local_expr, _) => {
+            ExprKind::Let(_, local_expr, _, _) => {
                 self.manage_cond_expr(local_expr);
             }
-            ExprKind::Match(local_expr, _) => {
+            ExprKind::Match(local_expr, ..) => {
                 self.manage_cond_expr(local_expr);
             }
             ExprKind::MethodCall(call) => {
@@ -284,10 +285,9 @@ impl<'cx, 'a> Context<'cx, 'a> {
                 }
             }
             ExprKind::Unary(un_op, local_expr) => {
-                self.with_is_consumed_management(
-                    matches!(un_op, UnOp::Neg | UnOp::Not),
-                    |this| this.manage_cond_expr(local_expr)
-                );
+                self.with_is_consumed_management(matches!(un_op, UnOp::Neg | UnOp::Not), |this| {
+                    this.manage_cond_expr(local_expr)
+                });
             }
             // Expressions that are not worth or can not be captured.
             //
@@ -295,16 +295,17 @@ impl<'cx, 'a> Context<'cx, 'a> {
             // sync with the `rfc-2011-nicer-assert-messages/all-expr-kinds.rs` test.
             ExprKind::Assign(_, _, _)
             | ExprKind::AssignOp(_, _, _)
-            | ExprKind::Async(_, _)
+            | ExprKind::Gen(_, _, _, _)
             | ExprKind::Await(_, _)
             | ExprKind::Block(_, _)
             | ExprKind::Break(_, _)
             | ExprKind::Closure(_)
             | ExprKind::ConstBlock(_)
             | ExprKind::Continue(_)
-            | ExprKind::Err
+            | ExprKind::Dummy
+            | ExprKind::Err(_)
             | ExprKind::Field(_, _)
-            | ExprKind::ForLoop(_, _, _, _)
+            | ExprKind::ForLoop { .. }
             | ExprKind::FormatArgs(_)
             | ExprKind::IncludedBytes(..)
             | ExprKind::InlineAsm(_)
@@ -320,7 +321,9 @@ impl<'cx, 'a> Context<'cx, 'a> {
             | ExprKind::Underscore
             | ExprKind::While(_, _, _)
             | ExprKind::Yeet(_)
-            | ExprKind::Yield(_) => {}
+            | ExprKind::Become(_)
+            | ExprKind::Yield(_)
+            | ExprKind::UnsafeBinderCast(..) => {}
         }
     }
 

@@ -5,21 +5,20 @@ use rustdoc_json_types::{Item, ItemEnum, ItemKind, ItemSummary};
 pub(crate) enum Kind {
     Module,
     ExternCrate,
-    Import,
+    Use,
     Struct,
     StructField,
     Union,
     Enum,
     Variant,
     Function,
-    Typedef,
-    OpaqueTy,
+    TypeAlias,
     Constant,
     Trait,
     TraitAlias,
     Impl,
     Static,
-    ForeignType,
+    ExternType,
     Macro,
     ProcAttribute,
     ProcDerive,
@@ -37,7 +36,7 @@ impl Kind {
         match self {
             Module => true,
             ExternCrate => true,
-            Import => true,
+            Use => true,
             Union => true,
             Struct => true,
             Enum => true,
@@ -45,17 +44,16 @@ impl Kind {
             Trait => true,
             TraitAlias => true,
             Impl => true,
-            Typedef => true,
+            TypeAlias => true,
             Constant => true,
             Static => true,
             Macro => true,
             ProcMacro => true,
             Primitive => true,
-            ForeignType => true,
+            ExternType => true,
 
             // FIXME(adotinthevoid): I'm not sure if these are correct
             Keyword => false,
-            OpaqueTy => false,
             ProcAttribute => false,
             ProcDerive => false,
 
@@ -71,7 +69,7 @@ impl Kind {
     pub fn can_appear_in_import(self) -> bool {
         match self {
             Kind::Variant => true,
-            Kind::Import => false,
+            Kind::Use => false,
             other => other.can_appear_in_mod(),
         }
     }
@@ -92,20 +90,19 @@ impl Kind {
 
             Kind::Module => false,
             Kind::ExternCrate => false,
-            Kind::Import => false,
+            Kind::Use => false,
             Kind::Struct => false,
             Kind::StructField => false,
             Kind::Union => false,
             Kind::Enum => false,
             Kind::Variant => false,
-            Kind::Typedef => false,
-            Kind::OpaqueTy => false,
+            Kind::TypeAlias => false,
             Kind::Constant => false,
             Kind::Trait => false,
             Kind::TraitAlias => false,
             Kind::Impl => false,
             Kind::Static => false,
-            Kind::ForeignType => false,
+            Kind::ExternType => false,
             Kind::Macro => false,
             Kind::ProcAttribute => false,
             Kind::ProcDerive => false,
@@ -131,14 +128,14 @@ impl Kind {
         matches!(self, Kind::Trait | Kind::TraitAlias)
     }
     pub fn is_type(self) -> bool {
-        matches!(self, Kind::Struct | Kind::Enum | Kind::Union | Kind::Typedef)
+        matches!(self, Kind::Struct | Kind::Enum | Kind::Union | Kind::TypeAlias)
     }
 
     pub fn from_item(i: &Item) -> Self {
         use Kind::*;
         match i.inner {
             ItemEnum::Module(_) => Module,
-            ItemEnum::Import(_) => Import,
+            ItemEnum::Use(_) => Use,
             ItemEnum::Union(_) => Union,
             ItemEnum::Struct(_) => Struct,
             ItemEnum::StructField(_) => StructField,
@@ -148,14 +145,13 @@ impl Kind {
             ItemEnum::Trait(_) => Trait,
             ItemEnum::TraitAlias(_) => TraitAlias,
             ItemEnum::Impl(_) => Impl,
-            ItemEnum::Typedef(_) => Typedef,
-            ItemEnum::OpaqueTy(_) => OpaqueTy,
-            ItemEnum::Constant(_) => Constant,
+            ItemEnum::TypeAlias(_) => TypeAlias,
+            ItemEnum::Constant { .. } => Constant,
             ItemEnum::Static(_) => Static,
             ItemEnum::Macro(_) => Macro,
             ItemEnum::ProcMacro(_) => ProcMacro,
             ItemEnum::Primitive(_) => Primitive,
-            ItemEnum::ForeignType => ForeignType,
+            ItemEnum::ExternType => ExternType,
             ItemEnum::ExternCrate { .. } => ExternCrate,
             ItemEnum::AssocConst { .. } => AssocConst,
             ItemEnum::AssocType { .. } => AssocType,
@@ -170,14 +166,13 @@ impl Kind {
             ItemKind::Constant => Constant,
             ItemKind::Enum => Enum,
             ItemKind::ExternCrate => ExternCrate,
-            ItemKind::ForeignType => ForeignType,
+            ItemKind::ExternType => ExternType,
             ItemKind::Function => Function,
             ItemKind::Impl => Impl,
-            ItemKind::Import => Import,
+            ItemKind::Use => Use,
             ItemKind::Keyword => Keyword,
             ItemKind::Macro => Macro,
             ItemKind::Module => Module,
-            ItemKind::OpaqueTy => OpaqueTy,
             ItemKind::Primitive => Primitive,
             ItemKind::ProcAttribute => ProcAttribute,
             ItemKind::ProcDerive => ProcDerive,
@@ -186,7 +181,7 @@ impl Kind {
             ItemKind::StructField => StructField,
             ItemKind::Trait => Trait,
             ItemKind::TraitAlias => TraitAlias,
-            ItemKind::Typedef => Typedef,
+            ItemKind::TypeAlias => TypeAlias,
             ItemKind::Union => Union,
             ItemKind::Variant => Variant,
         }

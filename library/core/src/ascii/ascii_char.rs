@@ -3,8 +3,8 @@
 //! suggestions from rustc if you get anything slightly wrong in here, and overall
 //! helps with clarity as we're also referring to `char` intentionally in here.
 
-use crate::fmt;
 use crate::mem::transmute;
+use crate::{assert_unsafe_precondition, fmt};
 
 /// One of the 128 Unicode characters from U+0000 through U+007F,
 /// often known as the [ASCII] subset.
@@ -54,11 +54,11 @@ use crate::mem::transmute;
 /// [chart]: https://www.unicode.org/charts/PDF/U0000.pdf
 /// [NIST FIPS 1-2]: https://nvlpubs.nist.gov/nistpubs/Legacy/FIPS/fipspub1-2-1977.pdf
 /// [NamesList]: https://www.unicode.org/Public/15.0.0/ucd/NamesList.txt
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[unstable(feature = "ascii_char", issue = "110998")]
 #[repr(u8)]
 pub enum AsciiChar {
-    /// U+0000
+    /// U+0000 (The default variant)
     #[unstable(feature = "ascii_char_variants", issue = "110998")]
     Null = 0,
     /// U+0001
@@ -497,14 +497,18 @@ impl AsciiChar {
     /// Notably, it should not be expected to return hex digits, or any other
     /// reasonable extension of the decimal digits.
     ///
-    /// (This lose safety condition is intended to simplify soundness proofs
+    /// (This loose safety condition is intended to simplify soundness proofs
     /// when writing code using this method, since the implementation doesn't
     /// need something really specific, not to make those other arguments do
     /// something useful. It might be tightened before stabilization.)
     #[unstable(feature = "ascii_char", issue = "110998")]
     #[inline]
     pub const unsafe fn digit_unchecked(d: u8) -> Self {
-        debug_assert!(d < 10);
+        assert_unsafe_precondition!(
+            check_language_ub,
+            "`ascii::Char::digit_unchecked` input cannot exceed 9.",
+            (d: u8 = d) => d < 10
+        );
 
         // SAFETY: `'0'` through `'9'` are U+00030 through U+0039,
         // so because `d` must be 64 or less the addition can return at most
@@ -518,14 +522,14 @@ impl AsciiChar {
     /// Gets this ASCII character as a byte.
     #[unstable(feature = "ascii_char", issue = "110998")]
     #[inline]
-    pub const fn as_u8(self) -> u8 {
+    pub const fn to_u8(self) -> u8 {
         self as u8
     }
 
     /// Gets this ASCII character as a `char` Unicode Scalar Value.
     #[unstable(feature = "ascii_char", issue = "110998")]
     #[inline]
-    pub const fn as_char(self) -> char {
+    pub const fn to_char(self) -> char {
         self as u8 as char
     }
 
@@ -536,6 +540,22 @@ impl AsciiChar {
         crate::slice::from_ref(self).as_str()
     }
 }
+
+macro_rules! into_int_impl {
+    ($($ty:ty)*) => {
+        $(
+            #[unstable(feature = "ascii_char", issue = "110998")]
+            impl From<AsciiChar> for $ty {
+                #[inline]
+                fn from(chr: AsciiChar) -> $ty {
+                    chr as u8 as $ty
+                }
+            }
+        )*
+    }
+}
+
+into_int_impl!(u8 u16 u32 u64 u128 char);
 
 impl [AsciiChar] {
     /// Views this slice of ASCII characters as a UTF-8 `str`.
@@ -561,5 +581,36 @@ impl [AsciiChar] {
 impl fmt::Display for AsciiChar {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         <str as fmt::Display>::fmt(self.as_str(), f)
+    }
+}
+
+#[unstable(feature = "ascii_char", issue = "110998")]
+impl fmt::Debug for AsciiChar {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use AsciiChar::{Apostrophe, Null, ReverseSolidus as Backslash};
+
+        fn backslash(a: AsciiChar) -> ([AsciiChar; 6], usize) {
+            ([Apostrophe, Backslash, a, Apostrophe, Null, Null], 4)
+        }
+
+        let (buf, len) = match self {
+            AsciiChar::Null => backslash(AsciiChar::Digit0),
+            AsciiChar::CharacterTabulation => backslash(AsciiChar::SmallT),
+            AsciiChar::CarriageReturn => backslash(AsciiChar::SmallR),
+            AsciiChar::LineFeed => backslash(AsciiChar::SmallN),
+            AsciiChar::ReverseSolidus => backslash(AsciiChar::ReverseSolidus),
+            AsciiChar::Apostrophe => backslash(AsciiChar::Apostrophe),
+            _ if self.to_u8().is_ascii_control() => {
+                const HEX_DIGITS: [AsciiChar; 16] = *b"0123456789abcdef".as_ascii().unwrap();
+
+                let byte = self.to_u8();
+                let hi = HEX_DIGITS[usize::from(byte >> 4)];
+                let lo = HEX_DIGITS[usize::from(byte & 0xf)];
+                ([Apostrophe, Backslash, AsciiChar::SmallX, hi, lo, Apostrophe], 6)
+            }
+            _ => ([Apostrophe, *self, Apostrophe, Null, Null, Null], 3),
+        };
+
+        f.write_str(buf[..len].as_str())
     }
 }

@@ -1,5 +1,6 @@
-// run-pass
-// pretty-expanded FIXME #23616
+//@ run-pass
+
+#![allow(noop_method_call)]
 
 struct NoClone;
 

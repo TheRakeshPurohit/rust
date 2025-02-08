@@ -7,17 +7,19 @@
 // encountering a set of obligations like `?T: Foo` and `Trait::Projection =
 // ?T`. In the code below, these are `R: Bar` and `Fn::Output = R`.
 //
-// revisions: nofallback fallback
-// check-pass
+//@ revisions: nofallback fallback
+//@ check-pass
 
 #![cfg_attr(fallback, feature(never_type_fallback))]
 
-trait Bar { }
-impl Bar for () {  }
-impl Bar for u32 {  }
+trait Bar {}
+impl Bar for () {}
+impl Bar for u32 {}
 
 fn foo<R: Bar>(_: impl Fn() -> R) {}
 
 fn main() {
+    //[nofallback]~^ warn: this function depends on never type fallback being `()`
+    //[nofallback]~| warn: this was previously accepted by the compiler but is being phased out; it will become a hard error in Rust 2024 and in a future release in all editions!
     foo(|| panic!());
 }

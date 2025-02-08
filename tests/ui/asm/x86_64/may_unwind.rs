@@ -1,7 +1,7 @@
-// only-x86_64
-// run-pass
-// needs-asm-support
-// needs-unwind
+//@ only-x86_64
+//@ run-pass
+//@ needs-asm-support
+//@ needs-unwind
 
 #![feature(asm_unwind)]
 
@@ -16,7 +16,7 @@ impl Drop for Foo<'_> {
     }
 }
 
-extern "C" fn panicky() {
+extern "C-unwind" fn panicky() {
     resume_unwind(Box::new(()));
 }
 

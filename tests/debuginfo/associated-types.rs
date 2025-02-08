@@ -1,15 +1,10 @@
-// Some versions of the non-rust-enabled LLDB print the wrong generic
-// parameter type names in this test.
-// needs-rust-lldb
-
-// compile-flags:-g
+//@ compile-flags:-g
 
 // === GDB TESTS ===================================================================================
 // gdb-command:run
 
 // gdb-command:print arg
-// gdbg-check:$1 = {b = -1, b1 = 0}
-// gdbr-check:$1 = associated_types::Struct<i32> {b: -1, b1: 0}
+// gdb-check:$1 = associated_types::Struct<i32> {b: -1, b1: 0}
 // gdb-command:continue
 
 // gdb-command:print inferred
@@ -23,8 +18,7 @@
 // gdb-command:continue
 
 // gdb-command:print arg
-// gdbg-check:$5 = {__0 = 4, __1 = 5}
-// gdbr-check:$5 = (4, 5)
+// gdb-check:$5 = (4, 5)
 // gdb-command:continue
 
 // gdb-command:print a
@@ -42,43 +36,34 @@
 // === LLDB TESTS ==================================================================================
 // lldb-command:run
 
-// lldb-command:print arg
-// lldbg-check:[...]$0 = { b = -1, b1 = 0 }
-// lldbr-check:(associated_types::Struct<i32>) arg = { b = -1, b1 = 0 }
+// lldb-command:v arg
+// lldb-check:[...] { b = -1 b1 = 0 }
 // lldb-command:continue
 
-// lldb-command:print inferred
-// lldbg-check:[...]$1 = 1
-// lldbr-check:(i64) inferred = 1
-// lldb-command:print explicitly
-// lldbg-check:[...]$2 = 1
-// lldbr-check:(i64) explicitly = 1
+// lldb-command:v inferred
+// lldb-check:[...] 1
+// lldb-command:v explicitly
+// lldb-check:[...] 1
 // lldb-command:continue
 
-// lldb-command:print arg
-// lldbg-check:[...]$3 = 2
-// lldbr-check:(i64) arg = 2
+// lldb-command:v arg
+// lldb-check:[...] 2
 // lldb-command:continue
 
-// lldb-command:print arg
-// lldbg-check:[...]$4 = (4, 5)
-// lldbr-check:((i32, i64)) arg = { = 4 = 5 }
+// lldb-command:v arg
+// lldb-check:[...] { 0 = 4 1 = 5 }
 // lldb-command:continue
 
-// lldb-command:print a
-// lldbg-check:[...]$5 = 6
-// lldbr-check:(i32) a = 6
-// lldb-command:print b
-// lldbg-check:[...]$6 = 7
-// lldbr-check:(i64) b = 7
+// lldb-command:v a
+// lldb-check:[...] 6
+// lldb-command:v b
+// lldb-check:[...] 7
 // lldb-command:continue
 
-// lldb-command:print a
-// lldbg-check:[...]$7 = 8
-// lldbr-check:(i64) a = 8
-// lldb-command:print b
-// lldbg-check:[...]$8 = 9
-// lldbr-check:(i32) b = 9
+// lldb-command:v a
+// lldb-check:[...] 8
+// lldb-command:v b
+// lldb-check:[...] 9
 // lldb-command:continue
 
 #![allow(unused_variables)]

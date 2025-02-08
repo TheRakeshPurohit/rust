@@ -4,9 +4,8 @@ use clippy_utils::ty::implements_trait;
 use rustc_errors::Applicability;
 use rustc_hir::{Expr, ExprKind, Pat, PatKind};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
-use rustc_middle::lint::in_external_macro;
 use rustc_middle::ty::Ty;
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -46,13 +45,17 @@ fn unary_pattern(pat: &Pat<'_>) -> bool {
         pats.iter().all(unary_pattern)
     }
     match &pat.kind {
-        PatKind::Slice(_, _, _) | PatKind::Range(_, _, _) | PatKind::Binding(..) | PatKind::Wild | PatKind::Or(_) => {
-            false
-        },
+        PatKind::Slice(_, _, _)
+        | PatKind::Range(_, _, _)
+        | PatKind::Binding(..)
+        | PatKind::Wild
+        | PatKind::Never
+        | PatKind::Or(_)
+        | PatKind::Err(_) => false,
         PatKind::Struct(_, a, etc) => !etc && a.iter().all(|x| unary_pattern(x.pat)),
         PatKind::Tuple(a, etc) | PatKind::TupleStruct(_, a, etc) => etc.as_opt_usize().is_none() && array_rec(a),
-        PatKind::Ref(x, _) | PatKind::Box(x) => unary_pattern(x),
-        PatKind::Path(_) | PatKind::Lit(_) => true,
+        PatKind::Ref(x, _) | PatKind::Box(x) | PatKind::Deref(x) | PatKind::Guard(x, _) => unary_pattern(x),
+        PatKind::Expr(_) => true,
     }
 }
 
@@ -66,9 +69,10 @@ fn is_structural_partial_eq<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>, other: T
 
 impl<'tcx> LateLintPass<'tcx> for PatternEquality {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
-        if !in_external_macro(cx.sess(), expr.span)
-            && let ExprKind::Let(let_expr) = expr.kind
-            && unary_pattern(let_expr.pat) {
+        if let ExprKind::Let(let_expr) = expr.kind
+            && unary_pattern(let_expr.pat)
+            && !expr.span.in_external_macro(cx.sess().source_map())
+        {
             let exp_ty = cx.typeck_results().expr_ty(let_expr.init);
             let pat_ty = cx.typeck_results().pat_ty(let_expr.pat);
             let mut applicability = Applicability::MachineApplicable;
@@ -79,7 +83,9 @@ impl<'tcx> LateLintPass<'tcx> for PatternEquality {
                         "({})",
                         snippet_with_context(cx, let_expr.pat.span, expr.span.ctxt(), "..", &mut applicability).0,
                     ),
-                    _ => snippet_with_context(cx, let_expr.pat.span, expr.span.ctxt(), "..", &mut applicability).0.to_string(),
+                    _ => snippet_with_context(cx, let_expr.pat.span, expr.span.ctxt(), "..", &mut applicability)
+                        .0
+                        .to_string(),
                 };
                 span_lint_and_sugg(
                     cx,

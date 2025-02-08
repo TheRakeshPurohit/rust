@@ -52,7 +52,7 @@ if expr.span.from_expansion() {
 
 ### `Span.ctxt` method
 
-The `span`'s context, given by the method [`ctxt`] and returning [SpanContext],
+The `span`'s context, given by the method [`ctxt`] and returning [SyntaxContext],
 represents if the span is from a macro expansion and, if it is, which
 macro call expanded this span.
 
@@ -102,7 +102,7 @@ let x: Option<u32> = Some(42);
 m!(x, x.unwrap());
 ```
 
-If the `m!(x, x.unwrapp());` line is expanded, we would get two expanded
+If the `m!(x, x.unwrap());` line is expanded, we would get two expanded
 expressions:
 
 - `x.is_some()` (from the `$a.is_some()` line in the `m` macro)
@@ -120,7 +120,7 @@ assert_ne!(x_is_some_span.ctxt(), x_unwrap_span.ctxt());
 
 ### The `in_external_macro` function
 
-`rustc_middle::lint` provides a function ([`in_external_macro`]) that can
+`Span` provides a method ([`in_external_macro`]) that can
 detect if the given span is from a macro defined in a foreign crate.
 
 Therefore, if we really want a new lint to work with macro-generated code,
@@ -144,7 +144,7 @@ Also assume that we get the corresponding variable `foo_span` for the
 results in `true` (note that `cx` can be `EarlyContext` or `LateContext`):
 
 ```rust
-if in_external_macro(cx.sess(), foo_span) {
+if foo_span.in_external_macro(cx.sess().source_map()) {
     // We should ignore macro from a foreign crate.
     return;
 }
@@ -153,6 +153,6 @@ if in_external_macro(cx.sess(), foo_span) {
 [`ctxt`]: https://doc.rust-lang.org/stable/nightly-rustc/rustc_span/struct.Span.html#method.ctxt
 [expansion]: https://rustc-dev-guide.rust-lang.org/macro-expansion.html#expansion-and-ast-integration
 [`from_expansion`]: https://doc.rust-lang.org/stable/nightly-rustc/rustc_span/struct.Span.html#method.from_expansion
-[`in_external_macro`]: https://doc.rust-lang.org/stable/nightly-rustc/rustc_middle/lint/fn.in_external_macro.html
+[`in_external_macro`]: https://doc.rust-lang.org/stable/nightly-rustc/rustc_span/struct.Span.html#method.in_external_macro
 [Span]: https://doc.rust-lang.org/stable/nightly-rustc/rustc_span/struct.Span.html
-[SpanContext]: https://doc.rust-lang.org/stable/nightly-rustc/rustc_span/hygiene/struct.SyntaxContext.html
+[SyntaxContext]: https://doc.rust-lang.org/stable/nightly-rustc/rustc_span/hygiene/struct.SyntaxContext.html

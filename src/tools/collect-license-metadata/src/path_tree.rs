@@ -3,9 +3,10 @@
 //! responsible for that, by turning the list of paths into a tree and executing simplification
 //! passes over the tree to remove redundant information.
 
-use crate::licenses::{License, LicenseId, LicensesInterner};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+use crate::licenses::{License, LicenseId, LicensesInterner};
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "kebab-case", tag = "type")]
@@ -57,9 +58,7 @@ impl Node<LicenseId> {
                         Node::Directory { name, mut children, license: None } => {
                             directories.entry(name).or_insert_with(Vec::new).append(&mut children);
                         }
-                        file @ Node::File { .. } => {
-                            files.push(file);
-                        }
+                        file @ Node::File { .. } => files.push(file),
                         Node::Empty => {}
                         Node::Root { .. } => {
                             panic!("can't have a root inside another element");
@@ -155,7 +154,10 @@ impl Node<LicenseId> {
                         name: child_name,
                         children: child_children,
                         license: child_license,
-                    } = child else { continue };
+                    } = child
+                    else {
+                        continue;
+                    };
 
                     if child_license != license {
                         continue;

@@ -1,11 +1,7 @@
-// run-pass
-
 // The actual regression test from #63479. (Including this because my
 // first draft at fn-ptr-is-structurally-matchable.rs failed to actually
 // cover the case this hit; I've since expanded it accordingly, but the
 // experience left me wary of leaving this regression test out.)
-
-#![warn(pointer_structural_match)]
 
 #[derive(Eq)]
 struct A {
@@ -26,6 +22,7 @@ fn my_fn(_args: &[A]) {
 }
 
 const TEST: Fn = my_fn;
+const TEST2: (Fn, u8) = (TEST, 0);
 
 struct B(Fn);
 
@@ -33,8 +30,12 @@ fn main() {
   let s = B(my_fn);
   match s {
     B(TEST) => println!("matched"),
-     //~^ WARN pointers in patterns behave unpredictably
-    //~| WARN this was previously accepted by the compiler but is being phased out
+    //~^ ERROR behave unpredictably
     _ => panic!("didn't match")
   };
+  match (s.0, 0) {
+    TEST2 => println!("matched"),
+    //~^ ERROR behave unpredictably
+    _ => panic!("didn't match")
+  }
 }

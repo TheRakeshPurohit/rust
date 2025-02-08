@@ -1,10 +1,6 @@
-// only-x86_64
-// run-pass
-// needs-asm-support
-// revisions: mirunsafeck thirunsafeck
-// [thirunsafeck]compile-flags: -Z thir-unsafeck
-
-#![feature(asm_const)]
+//@ only-x86_64
+//@ run-pass
+//@ needs-asm-support
 
 use std::arch::{asm, global_asm};
 

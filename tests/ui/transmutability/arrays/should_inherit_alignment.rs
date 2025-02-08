@@ -1,4 +1,4 @@
-// check-pass
+//@ check-pass
 //! An array must inherit the alignment of its inner type.
 
 #![crate_type = "lib"]
@@ -6,12 +6,11 @@
 #![allow(dead_code, incomplete_features, non_camel_case_types)]
 
 mod assert {
-    use std::mem::{Assume, BikeshedIntrinsicFrom};
-    pub struct Context;
+    use std::mem::{Assume, TransmuteFrom};
 
     pub fn is_maybe_transmutable<Src, Dst>()
     where
-        Dst: BikeshedIntrinsicFrom<Src, Context, {
+        Dst: TransmuteFrom<Src, {
             Assume::ALIGNMENT
                 .and(Assume::LIFETIMES)
                 .and(Assume::SAFETY)

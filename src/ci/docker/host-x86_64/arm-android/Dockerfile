@@ -1,4 +1,4 @@
-FROM ubuntu:22.10
+FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 COPY scripts/android-base-apt-get.sh /scripts/
@@ -6,12 +6,13 @@ RUN sh /scripts/android-base-apt-get.sh
 
 COPY scripts/android-ndk.sh /scripts/
 RUN . /scripts/android-ndk.sh && \
-    download_ndk android-ndk-r25b-linux.zip
+    download_ndk android-ndk-r26d-linux.zip
 
 RUN dpkg --add-architecture i386 && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-  libgl1-mesa-glx \
+  libgl1 \
+  libglx-mesa0 \
   libpulse0 \
   libstdc++6:i386 \
   openjdk-8-jre-headless \
@@ -30,7 +31,7 @@ ENV PATH=$PATH:/android/sdk/platform-tools
 
 ENV TARGETS=arm-linux-androideabi
 
-ENV RUST_CONFIGURE_ARGS --arm-linux-androideabi-ndk=/android/ndk/toolchains/llvm/prebuilt/linux-x86_64/
+ENV RUST_CONFIGURE_ARGS --android-ndk=/android/ndk/
 
 ENV SCRIPT python3 ../x.py --stage 2 test --host='' --target $TARGETS
 

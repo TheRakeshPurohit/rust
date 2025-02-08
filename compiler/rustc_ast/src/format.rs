@@ -1,8 +1,10 @@
-use crate::ptr::P;
-use crate::Expr;
 use rustc_data_structures::fx::FxHashMap;
-use rustc_span::symbol::{Ident, Symbol};
-use rustc_span::Span;
+use rustc_macros::{Decodable, Encodable};
+use rustc_span::{Ident, Span, Symbol};
+
+use crate::Expr;
+use crate::ptr::P;
+use crate::token::LitKind;
 
 // Definitions:
 //
@@ -44,6 +46,10 @@ pub struct FormatArgs {
     pub span: Span,
     pub template: Vec<FormatArgsPiece>,
     pub arguments: FormatArguments,
+    /// The raw, un-split format string literal, with no escaping or processing.
+    ///
+    /// Generally only useful for lints that care about the raw bytes the user wrote.
+    pub uncooked_fmt_str: (LitKind, Symbol),
 }
 
 /// A piece of a format template string.
@@ -66,12 +72,6 @@ pub struct FormatArguments {
     num_explicit_args: usize,
     names: FxHashMap<Symbol, usize>,
 }
-
-// FIXME: Rustdoc has trouble proving Send/Sync for this. See #106930.
-#[cfg(parallel_compiler)]
-unsafe impl Sync for FormatArguments {}
-#[cfg(parallel_compiler)]
-unsafe impl Send for FormatArguments {}
 
 impl FormatArguments {
     pub fn new() -> Self {

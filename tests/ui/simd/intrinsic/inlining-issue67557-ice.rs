@@ -1,17 +1,19 @@
 // This used to cause an ICE for an internal index out of range due to simd_shuffle_indices being
 // passed the wrong Instance, causing issues with inlining. See #67557.
 //
-// run-pass
-// compile-flags: -Zmir-opt-level=4
-#![feature(platform_intrinsics, repr_simd)]
+//@ run-pass
+//@ compile-flags: -Zmir-opt-level=4
+#![feature(intrinsics, repr_simd)]
 
-extern "platform-intrinsic" {
-    fn simd_shuffle2<T, U>(x: T, y: T, idx: [u32; 2]) -> U;
-}
+#[rustc_intrinsic]
+unsafe fn simd_shuffle<T, I, U>(x: T, y: T, idx: I) -> U;
 
 #[repr(simd)]
 #[derive(Debug, PartialEq)]
-struct Simd2(u8, u8);
+struct Simd2([u8; 2]);
+
+#[repr(simd)]
+struct SimdShuffleIdx<const LEN: usize>([u32; LEN]);
 
 fn main() {
     unsafe {
@@ -21,6 +23,6 @@ fn main() {
 
 #[inline(always)]
 unsafe fn inline_me() -> Simd2 {
-    const IDX: [u32; 2] = [0, 3];
-    simd_shuffle2(Simd2(10, 11), Simd2(12, 13), IDX)
+    const IDX: SimdShuffleIdx<2> = SimdShuffleIdx([0, 3]);
+    simd_shuffle(Simd2([10, 11]), Simd2([12, 13]), IDX)
 }

@@ -11,6 +11,7 @@ LL | |     }
    |
    = note:   expected enum `Option<()>`
            found unit type `()`
+   = note: `while` loops evaluate to unit type `()`
 help: try adding an expression at the end of the block
    |
 LL ~     }
@@ -49,6 +50,7 @@ LL | |     }
    |
    = note:   expected enum `Option<()>`
            found unit type `()`
+   = note: `for` loops evaluate to unit type `()`
 help: try adding an expression at the end of the block
    |
 LL ~     }
@@ -61,6 +63,8 @@ LL +     Some(())
 error[E0308]: `?` operator has incompatible types
   --> $DIR/compatible-variants.rs:35:5
    |
+LL | fn d() -> Option<()> {
+   |           ---------- expected `Option<()>` because of return type
 LL |     c()?
    |     ^^^^ expected `Option<()>`, found `()`
    |
@@ -104,6 +108,7 @@ LL |         while false {}
    |
    = note:   expected enum `Option<()>`
            found unit type `()`
+   = note: `while` loops evaluate to unit type `()`
 help: try adding an expression at the end of the block
    |
 LL ~         while false {}

@@ -1,6 +1,4 @@
-// edition:2015
-// [next] compile-flags: -Zlower-impl-trait-in-trait-to-assoc-ty
-// revisions: current next
+//@ edition:2015
 
 async fn foo() {} //~ ERROR `async fn` is not permitted in Rust 2015
 
@@ -18,7 +16,6 @@ impl Foo {
 
 trait Bar {
     async fn foo() {} //~ ERROR `async fn` is not permitted in Rust 2015
-    //~^ ERROR functions in traits cannot be declared `async`
 }
 
 fn main() {

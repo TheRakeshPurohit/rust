@@ -1,10 +1,12 @@
-// run-pass
+//@ run-pass
 
 // Test to make sure the destructors run in the right order.
 // Each destructor sets it's tag in the corresponding entry
 // in ORDER matching up to when it ran.
 // Correct order is: matched, inner, outer
 
+// FIXME(static_mut_refs): Do not allow `static_mut_refs` lint
+#![allow(static_mut_refs)]
 
 static mut ORDER: [usize; 3] = [0, 0, 0];
 static mut INDEX: usize = 0;

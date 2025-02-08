@@ -144,10 +144,10 @@ it will not.
 ### `test(attr(...))`
 
 This form of the `doc` attribute allows you to add arbitrary attributes to all your doctests. For
-example, if you want your doctests to fail if they produce any warnings, you could add this:
+example, if you want your doctests to fail if they have dead code, you could add this:
 
 ```rust,no_run
-#![doc(test(attr(deny(warnings))))]
+#![doc(test(attr(deny(dead_code))))]
 ```
 
 ## At the item level
@@ -201,7 +201,7 @@ mod bar {
 # fn main() {}
 ```
 
-Here, because `bar` is not public, `Bar` wouldn't have its own page, so there's nowhere
+Here, because `bar` is not public, `bar` wouldn't have its own page, so there's nowhere
 to link to. `rustdoc` will inline these definitions, and so we end up in the same case
 as the `#[doc(inline)]` above; `Bar` is in a `Structs` section, as if it were defined at
 the top level. If we add the `no_inline` form of the attribute:

@@ -1,37 +1,57 @@
-use hir::{db::ExpandDatabase, HasSource, HirDisplay, Semantics};
-use ide_db::{base_db::FileId, source_change::SourceChange, RootDatabase};
+use either::Either;
+use hir::{db::ExpandDatabase, HasSource, HirDisplay, HirFileIdExt, Semantics, VariantId};
+use ide_db::text_edit::TextEdit;
+use ide_db::{source_change::SourceChange, EditionedFileId, RootDatabase};
 use syntax::{
     ast::{self, edit::IndentLevel, make},
     AstNode,
 };
-use text_edit::TextEdit;
 
-use crate::{fix, Assist, Diagnostic, DiagnosticsContext};
+use crate::{fix, Assist, Diagnostic, DiagnosticCode, DiagnosticsContext};
 
 // Diagnostic: no-such-field
 //
 // This diagnostic is triggered if created structure does not have field provided in record.
 pub(crate) fn no_such_field(ctx: &DiagnosticsContext<'_>, d: &hir::NoSuchField) -> Diagnostic {
-    Diagnostic::new(
-        "no-such-field",
-        "no such field",
-        ctx.sema.diagnostics_display_range(d.field.clone().map(|it| it.into())).range,
-    )
-    .with_fixes(fixes(ctx, d))
+    let node = d.field.map(Into::into);
+    if d.private {
+        // FIXME: quickfix to add required visibility
+        Diagnostic::new_with_syntax_node_ptr(
+            ctx,
+            DiagnosticCode::RustcHardError("E0451"),
+            "field is private",
+            node,
+        )
+    } else {
+        Diagnostic::new_with_syntax_node_ptr(
+            ctx,
+            match d.variant {
+                VariantId::EnumVariantId(_) => DiagnosticCode::RustcHardError("E0559"),
+                _ => DiagnosticCode::RustcHardError("E0560"),
+            },
+            "no such field",
+            node,
+        )
+        .with_fixes(fixes(ctx, d))
+    }
 }
 
 fn fixes(ctx: &DiagnosticsContext<'_>, d: &hir::NoSuchField) -> Option<Vec<Assist>> {
+    // FIXME: quickfix for pattern
     let root = ctx.sema.db.parse_or_expand(d.field.file_id);
-    missing_record_expr_field_fixes(
-        &ctx.sema,
-        d.field.file_id.original_file(ctx.sema.db),
-        &d.field.value.to_node(&root),
-    )
+    match &d.field.value.to_node(&root) {
+        Either::Left(node) => missing_record_expr_field_fixes(
+            &ctx.sema,
+            d.field.file_id.original_file(ctx.sema.db),
+            node,
+        ),
+        _ => None,
+    }
 }
 
 fn missing_record_expr_field_fixes(
     sema: &Semantics<'_, RootDatabase>,
-    usage_file_id: FileId,
+    usage_file_id: EditionedFileId,
     record_expr_field: &ast::RecordExprField,
 ) -> Option<Vec<Assist>> {
     let record_lit = ast::RecordExpr::cast(record_expr_field.syntax().parent()?.parent()?)?;
@@ -112,18 +132,69 @@ mod tests {
     use crate::tests::{check_diagnostics, check_fix, check_no_fix};
 
     #[test]
+    fn dont_work_for_field_with_disabled_cfg() {
+        check_diagnostics(
+            r#"
+struct Test {
+    #[cfg(feature = "hello")]
+    test: u32,
+    other: u32
+}
+
+fn main() {
+    let a = Test {
+        #[cfg(feature = "hello")]
+        test: 1,
+        other: 1
+    };
+
+    let Test {
+        #[cfg(feature = "hello")]
+        test,
+        mut other,
+        ..
+    } = a;
+
+    other += 1;
+}
+"#,
+        );
+    }
+
+    #[test]
     fn no_such_field_diagnostics() {
         check_diagnostics(
             r#"
 struct S { foo: i32, bar: () }
 impl S {
-    fn new() -> S {
+    fn new(
+        s@S {
+        //^ 💡 error: missing structure fields:
+        //|    - bar
+            foo,
+            baz: baz2,
+          //^^^^^^^^^ error: no such field
+            qux
+          //^^^ error: no such field
+        }: S
+    ) -> S {
+        S {
+      //^ 💡 error: missing structure fields:
+      //|    - bar
+            foo,
+            baz: baz2,
+          //^^^^^^^^^ error: no such field
+            qux
+          //^^^ error: no such field
+        } = s;
         S {
       //^ 💡 error: missing structure fields:
       //|    - bar
             foo: 92,
             baz: 62,
           //^^^^^^^ 💡 error: no such field
+            qux
+          //^^^ error: no such field
         }
     }
 }
@@ -293,5 +364,73 @@ fn main() {
 }
 "#,
         )
+    }
+
+    #[test]
+    fn test_struct_field_private() {
+        check_diagnostics(
+            r#"
+mod m {
+    pub struct Struct {
+        field: u32,
+        field2: u32,
+    }
+}
+fn f(s@m::Struct {
+    field: f,
+  //^^^^^^^^ error: field is private
+    field2
+  //^^^^^^ error: field is private
+}: m::Struct) {
+    // assignee expression
+    m::Struct {
+        field: 0,
+      //^^^^^^^^ error: field is private
+        field2
+      //^^^^^^ error: field is private
+    } = s;
+    m::Struct {
+        field: 0,
+      //^^^^^^^^ error: field is private
+        field2
+      //^^^^^^ error: field is private
+    };
+}
+"#,
+        )
+    }
+
+    #[test]
+    fn editions_between_macros() {
+        check_diagnostics(
+            r#"
+//- /edition2015.rs crate:edition2015 edition:2015
+#[macro_export]
+macro_rules! pass_expr_thorough {
+    ($e:expr) => { $e };
+}
+
+//- /edition2018.rs crate:edition2018 deps:edition2015 edition:2018
+async fn bar() {}
+async fn foo() {
+    edition2015::pass_expr_thorough!(bar().await);
+}
+        "#,
+        );
+        check_diagnostics(
+            r#"
+//- /edition2018.rs crate:edition2018 edition:2018
+pub async fn bar() {}
+#[macro_export]
+macro_rules! make_await {
+    () => { async { $crate::bar().await }; };
+}
+
+//- /edition2015.rs crate:edition2015 deps:edition2018 edition:2015
+fn foo() {
+    edition2018::make_await!();
+}
+        "#,
+        );
     }
 }

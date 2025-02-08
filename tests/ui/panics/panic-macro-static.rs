@@ -1,6 +1,7 @@
-// run-fail
-// error-pattern:panicked at 'test-fail-static'
-// ignore-emscripten no processes
+//@ run-fail
+//@ error-pattern:panicked
+//@ error-pattern:test-fail-static
+//@ needs-subprocess
 
 fn main() {
     panic!("test-fail-static");

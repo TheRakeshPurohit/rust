@@ -1,5 +1,6 @@
 //! Strip all private items from the output. Additionally implies strip_priv_imports.
 //! Basically, the goal is to remove items that are not relevant for public documentation.
+
 use crate::clean::{self, ItemIdSet};
 use crate::core::DocContext;
 use crate::fold::DocFolder;
@@ -7,7 +8,7 @@ use crate::passes::{ImplStripper, ImportStripper, Pass, Stripper};
 
 pub(crate) const STRIP_PRIVATE: Pass = Pass {
     name: "strip-private",
-    run: strip_private,
+    run: Some(strip_private),
     description: "strips all private items from a crate which cannot be seen externally, \
                   implies strip-priv-imports",
 };
@@ -17,7 +18,7 @@ pub(crate) const STRIP_PRIVATE: Pass = Pass {
 pub(crate) fn strip_private(mut krate: clean::Crate, cx: &mut DocContext<'_>) -> clean::Crate {
     // This stripper collects all *retained* nodes.
     let mut retained = ItemIdSet::default();
-    let is_json_output = cx.output_format.is_json() && !cx.show_coverage;
+    let is_json_output = cx.is_json_output();
 
     // strip all private items
     {
@@ -28,8 +29,12 @@ pub(crate) fn strip_private(mut krate: clean::Crate, cx: &mut DocContext<'_>) ->
             is_json_output,
             tcx: cx.tcx,
         };
-        krate =
-            ImportStripper { tcx: cx.tcx, is_json_output }.fold_crate(stripper.fold_crate(krate));
+        krate = ImportStripper {
+            tcx: cx.tcx,
+            is_json_output,
+            document_hidden: cx.render_options.document_hidden,
+        }
+        .fold_crate(stripper.fold_crate(krate));
     }
 
     // strip all impls referencing private items
@@ -39,6 +44,7 @@ pub(crate) fn strip_private(mut krate: clean::Crate, cx: &mut DocContext<'_>) ->
         cache: &cx.cache,
         is_json_output,
         document_private: cx.render_options.document_private,
+        document_hidden: cx.render_options.document_hidden,
     };
     stripper.fold_crate(krate)
 }

@@ -1,28 +1,37 @@
 //! MIR definitions and implementation
 
-use std::{fmt::Display, iter};
+use std::{collections::hash_map::Entry, fmt::Display, iter};
 
 use crate::{
-    consteval::usize_const, db::HirDatabase, display::HirDisplay, infer::PointerCast,
-    lang_items::is_box, mapping::ToChalk, CallableDefId, ClosureId, Const, ConstScalar,
-    InferenceResult, Interner, MemoryMap, Substitution, Ty, TyKind,
+    consteval::usize_const,
+    db::HirDatabase,
+    display::HirDisplay,
+    infer::{normalize, PointerCast},
+    lang_items::is_box,
+    mapping::ToChalk,
+    CallableDefId, ClosureId, Const, ConstScalar, InferenceResult, Interner, MemoryMap,
+    Substitution, TraitEnvironment, Ty, TyKind,
 };
 use base_db::CrateId;
 use chalk_ir::Mutability;
+use either::Either;
 use hir_def::{
-    hir::{BindingId, Expr, ExprId, Ordering, PatId},
-    DefWithBodyId, FieldId, StaticId, UnionId, VariantId,
+    body::Body,
+    hir::{BindingAnnotation, BindingId, Expr, ExprId, Ordering, PatId},
+    DefWithBodyId, FieldId, StaticId, TupleFieldId, UnionId, VariantId,
 };
 use la_arena::{Arena, ArenaMap, Idx, RawIdx};
 
+mod borrowck;
 mod eval;
 mod lower;
-mod borrowck;
-mod pretty;
 mod monomorphization;
+mod pretty;
 
 pub use borrowck::{borrowck_query, BorrowckResult, MutabilityReason};
-pub use eval::{interpret_mir, pad16, Evaluator, MirEvalError, VTableMap};
+pub use eval::{
+    interpret_mir, pad16, render_const_using_debug_impl, Evaluator, MirEvalError, VTableMap,
+};
 pub use lower::{
     lower_to_mir, mir_body_for_closure_query, mir_body_query, mir_body_recover, MirLowerError,
 };
@@ -30,6 +39,7 @@ pub use monomorphization::{
     monomorphize_mir_body_bad, monomorphized_mir_body_for_closure_query,
     monomorphized_mir_body_query, monomorphized_mir_body_recover,
 };
+use rustc_hash::FxHashMap;
 use smallvec::{smallvec, SmallVec};
 use stdx::{impl_from, never};
 
@@ -89,16 +99,16 @@ pub enum Operand {
 }
 
 impl Operand {
-    fn from_concrete_const(data: Vec<u8>, memory_map: MemoryMap, ty: Ty) -> Self {
+    fn from_concrete_const(data: Box<[u8]>, memory_map: MemoryMap, ty: Ty) -> Self {
         Operand::Constant(intern_const_scalar(ConstScalar::Bytes(data, memory_map), ty))
     }
 
-    fn from_bytes(data: Vec<u8>, ty: Ty) -> Self {
+    fn from_bytes(data: Box<[u8]>, ty: Ty) -> Self {
         Operand::from_concrete_const(data, MemoryMap::default(), ty)
     }
 
     fn const_zst(ty: Ty) -> Operand {
-        Self::from_bytes(vec![], ty)
+        Self::from_bytes(Box::default(), ty)
     }
 
     fn from_fn(
@@ -109,16 +119,16 @@ impl Operand {
         let ty =
             chalk_ir::TyKind::FnDef(CallableDefId::FunctionId(func_id).to_chalk(db), generic_args)
                 .intern(Interner);
-        Operand::from_bytes(vec![], ty)
+        Operand::from_bytes(Box::default(), ty)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ProjectionElem<V, T> {
     Deref,
-    Field(FieldId),
+    Field(Either<FieldId, TupleFieldId>),
     // FIXME: get rid of this, and use FieldId for tuples and closures
-    TupleOrClosureField(usize),
+    ClosureField(usize),
     Index(V),
     ConstantIndex { offset: u64, from_end: bool },
     Subslice { from: u64, to: u64 },
@@ -129,57 +139,74 @@ pub enum ProjectionElem<V, T> {
 impl<V, T> ProjectionElem<V, T> {
     pub fn projected_ty(
         &self,
-        base: Ty,
+        mut base: Ty,
         db: &dyn HirDatabase,
         closure_field: impl FnOnce(ClosureId, &Substitution, usize) -> Ty,
         krate: CrateId,
     ) -> Ty {
+        if matches!(base.kind(Interner), TyKind::Alias(_) | TyKind::AssociatedType(..)) {
+            base = normalize(
+                db,
+                // FIXME: we should get this from caller
+                TraitEnvironment::empty(krate),
+                base,
+            );
+        }
         match self {
-            ProjectionElem::Deref => match &base.data(Interner).kind {
+            ProjectionElem::Deref => match &base.kind(Interner) {
                 TyKind::Raw(_, inner) | TyKind::Ref(_, _, inner) => inner.clone(),
                 TyKind::Adt(adt, subst) if is_box(db, adt.0) => {
                     subst.at(Interner, 0).assert_ty_ref(Interner).clone()
                 }
                 _ => {
-                    never!("Overloaded deref on type {} is not a projection", base.display(db));
-                    return TyKind::Error.intern(Interner);
+                    never!(
+                        "Overloaded deref on type {} is not a projection",
+                        base.display(db, db.crate_graph()[krate].edition)
+                    );
+                    TyKind::Error.intern(Interner)
                 }
             },
-            ProjectionElem::Field(f) => match &base.data(Interner).kind {
+            ProjectionElem::Field(Either::Left(f)) => match &base.kind(Interner) {
                 TyKind::Adt(_, subst) => {
                     db.field_types(f.parent)[f.local_id].clone().substitute(Interner, subst)
                 }
-                _ => {
-                    never!("Only adt has field");
-                    return TyKind::Error.intern(Interner);
+                ty => {
+                    never!("Only adt has field, found {:?}", ty);
+                    TyKind::Error.intern(Interner)
                 }
             },
-            ProjectionElem::TupleOrClosureField(f) => match &base.data(Interner).kind {
+            ProjectionElem::Field(Either::Right(f)) => match &base.kind(Interner) {
                 TyKind::Tuple(_, subst) => subst
                     .as_slice(Interner)
-                    .get(*f)
+                    .get(f.index as usize)
                     .map(|x| x.assert_ty_ref(Interner))
                     .cloned()
                     .unwrap_or_else(|| {
                         never!("Out of bound tuple field");
                         TyKind::Error.intern(Interner)
                     }),
+                ty => {
+                    never!("Only tuple has tuple field: {:?}", ty);
+                    TyKind::Error.intern(Interner)
+                }
+            },
+            ProjectionElem::ClosureField(f) => match &base.kind(Interner) {
                 TyKind::Closure(id, subst) => closure_field(*id, subst, *f),
                 _ => {
-                    never!("Only tuple or closure has tuple or closure field");
-                    return TyKind::Error.intern(Interner);
+                    never!("Only closure has closure field");
+                    TyKind::Error.intern(Interner)
                 }
             },
             ProjectionElem::ConstantIndex { .. } | ProjectionElem::Index(_) => {
-                match &base.data(Interner).kind {
+                match &base.kind(Interner) {
                     TyKind::Array(inner, _) | TyKind::Slice(inner) => inner.clone(),
                     _ => {
                         never!("Overloaded index is not a projection");
-                        return TyKind::Error.intern(Interner);
+                        TyKind::Error.intern(Interner)
                     }
                 }
             }
-            &ProjectionElem::Subslice { from, to } => match &base.data(Interner).kind {
+            &ProjectionElem::Subslice { from, to } => match &base.kind(Interner) {
                 TyKind::Array(inner, c) => {
                     let next_c = usize_const(
                         db,
@@ -194,12 +221,12 @@ impl<V, T> ProjectionElem<V, T> {
                 TyKind::Slice(_) => base.clone(),
                 _ => {
                     never!("Subslice projection should only happen on slice and array");
-                    return TyKind::Error.intern(Interner);
+                    TyKind::Error.intern(Interner)
                 }
             },
             ProjectionElem::OpaqueCast(_) => {
                 never!("We don't emit these yet");
-                return TyKind::Error.intern(Interner);
+                TyKind::Error.intern(Interner)
             }
         }
     }
@@ -207,34 +234,97 @@ impl<V, T> ProjectionElem<V, T> {
 
 type PlaceElem = ProjectionElem<LocalId, Ty>;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProjectionId(u32);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionStore {
+    id_to_proj: FxHashMap<ProjectionId, Box<[PlaceElem]>>,
+    proj_to_id: FxHashMap<Box<[PlaceElem]>, ProjectionId>,
+}
+
+impl Default for ProjectionStore {
+    fn default() -> Self {
+        let mut this = Self { id_to_proj: Default::default(), proj_to_id: Default::default() };
+        // Ensure that [] will get the id 0 which is used in `ProjectionId::Empty`
+        this.intern(Box::new([]));
+        this
+    }
+}
+
+impl ProjectionStore {
+    pub fn shrink_to_fit(&mut self) {
+        self.id_to_proj.shrink_to_fit();
+        self.proj_to_id.shrink_to_fit();
+    }
+
+    pub fn intern_if_exist(&self, projection: &[PlaceElem]) -> Option<ProjectionId> {
+        self.proj_to_id.get(projection).copied()
+    }
+
+    pub fn intern(&mut self, projection: Box<[PlaceElem]>) -> ProjectionId {
+        let new_id = ProjectionId(self.proj_to_id.len() as u32);
+        match self.proj_to_id.entry(projection) {
+            Entry::Occupied(id) => *id.get(),
+            Entry::Vacant(e) => {
+                let key_clone = e.key().clone();
+                e.insert(new_id);
+                self.id_to_proj.insert(new_id, key_clone);
+                new_id
+            }
+        }
+    }
+}
+
+impl ProjectionId {
+    pub const EMPTY: ProjectionId = ProjectionId(0);
+
+    pub fn is_empty(self) -> bool {
+        self == ProjectionId::EMPTY
+    }
+
+    pub fn lookup(self, store: &ProjectionStore) -> &[PlaceElem] {
+        store.id_to_proj.get(&self).unwrap()
+    }
+
+    pub fn project(self, projection: PlaceElem, store: &mut ProjectionStore) -> ProjectionId {
+        let mut current = self.lookup(store).to_vec();
+        current.push(projection);
+        store.intern(current.into())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Place {
     pub local: LocalId,
-    pub projection: Box<[PlaceElem]>,
+    pub projection: ProjectionId,
 }
 
 impl Place {
-    fn is_parent(&self, child: &Place) -> bool {
-        self.local == child.local && child.projection.starts_with(&self.projection)
+    fn is_parent(&self, child: &Place, store: &ProjectionStore) -> bool {
+        self.local == child.local
+            && child.projection.lookup(store).starts_with(self.projection.lookup(store))
     }
 
-    fn iterate_over_parents(&self) -> impl Iterator<Item = Place> + '_ {
-        (0..self.projection.len())
-            .map(|x| &self.projection[0..x])
-            .map(|x| Place { local: self.local, projection: x.to_vec().into() })
+    /// The place itself is not included
+    fn iterate_over_parents<'a>(
+        &'a self,
+        store: &'a ProjectionStore,
+    ) -> impl Iterator<Item = Place> + 'a {
+        let projection = self.projection.lookup(store);
+        (0..projection.len()).map(|x| &projection[0..x]).filter_map(move |x| {
+            Some(Place { local: self.local, projection: store.intern_if_exist(x)? })
+        })
     }
 
-    fn project(&self, projection: PlaceElem) -> Place {
-        Place {
-            local: self.local,
-            projection: self.projection.iter().cloned().chain([projection]).collect(),
-        }
+    fn project(&self, projection: PlaceElem, store: &mut ProjectionStore) -> Place {
+        Place { local: self.local, projection: self.projection.project(projection, store) }
     }
 }
 
 impl From<LocalId> for Place {
     fn from(local: LocalId) -> Self {
-        Self { local, projection: vec![].into() }
+        Self { local, projection: ProjectionId::EMPTY }
     }
 }
 
@@ -247,7 +337,7 @@ pub enum AggregateKind {
     Adt(VariantId, Substitution),
     Union(UnionId, FieldId),
     Closure(Ty),
-    //Generator(LocalDefId, SubstsRef, Movability),
+    //Coroutine(LocalDefId, SubstsRef, Movability),
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -321,8 +411,8 @@ impl SwitchTargets {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Terminator {
-    span: MirSpan,
-    kind: TerminatorKind,
+    pub span: MirSpan,
+    pub kind: TerminatorKind,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -351,7 +441,7 @@ pub enum TerminatorKind {
     ///
     /// Only permitted in cleanup blocks. `Resume` is not permitted with `-C unwind=abort` after
     /// deaggregation runs.
-    Resume,
+    UnwindResume,
 
     /// Indicates that the landing pad is finished and that the process should abort.
     ///
@@ -367,8 +457,8 @@ pub enum TerminatorKind {
     /// `dest = move _0`. It might additionally do other things, like have side-effects in the
     /// aliasing model.
     ///
-    /// If the body is a generator body, this has slightly different semantics; it instead causes a
-    /// `GeneratorState::Returned(_0)` to be created (as if by an `Aggregate` rvalue) and assigned
+    /// If the body is a coroutine body, this has slightly different semantics; it instead causes a
+    /// `CoroutineState::Returned(_0)` to be created (as if by an `Aggregate` rvalue) and assigned
     /// to the return place.
     Return,
 
@@ -480,14 +570,14 @@ pub enum TerminatorKind {
 
     /// Marks a suspend point.
     ///
-    /// Like `Return` terminators in generator bodies, this computes `value` and then a
-    /// `GeneratorState::Yielded(value)` as if by `Aggregate` rvalue. That value is then assigned to
+    /// Like `Return` terminators in coroutine bodies, this computes `value` and then a
+    /// `CoroutineState::Yielded(value)` as if by `Aggregate` rvalue. That value is then assigned to
     /// the return place of the function calling this one, and execution continues in the calling
     /// function. When next invoked with the same first argument, execution of this function
     /// continues at the `resume` basic block, with the second argument written to the `resume_arg`
-    /// place. If the generator is dropped before then, the `drop` basic block is invoked.
+    /// place. If the coroutine is dropped before then, the `drop` basic block is invoked.
     ///
-    /// Not permitted in bodies that are not generator bodies, or after generator lowering.
+    /// Not permitted in bodies that are not coroutine bodies, or after coroutine lowering.
     ///
     /// **Needs clarification**: What about the evaluation order of the `resume_arg` and `value`?
     Yield {
@@ -497,21 +587,21 @@ pub enum TerminatorKind {
         resume: BasicBlockId,
         /// The place to store the resume argument in.
         resume_arg: Place,
-        /// Cleanup to be done if the generator is dropped at this suspend point.
+        /// Cleanup to be done if the coroutine is dropped at this suspend point.
         drop: Option<BasicBlockId>,
     },
 
-    /// Indicates the end of dropping a generator.
+    /// Indicates the end of dropping a coroutine.
     ///
-    /// Semantically just a `return` (from the generators drop glue). Only permitted in the same situations
+    /// Semantically just a `return` (from the coroutines drop glue). Only permitted in the same situations
     /// as `yield`.
     ///
-    /// **Needs clarification**: Is that even correct? The generator drop code is always confusing
+    /// **Needs clarification**: Is that even correct? The coroutine drop code is always confusing
     /// to me, because it's not even really in the current body.
     ///
     /// **Needs clarification**: Are there type system constraints on these terminators? Should
     /// there be a "block type" like `cleanup` blocks for them?
-    GeneratorDrop,
+    CoroutineDrop,
 
     /// A block where control flow only ever takes one real path, but borrowck needs to be more
     /// conservative.
@@ -547,6 +637,7 @@ pub enum TerminatorKind {
     },
 }
 
+// Order of variants in this enum matter: they are used to compare borrow kinds.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, PartialOrd, Ord)]
 pub enum BorrowKind {
     /// Data must be immutable and is aliasable.
@@ -573,66 +664,34 @@ pub enum BorrowKind {
     /// We can also report errors with this kind of borrow differently.
     Shallow,
 
-    /// Data must be immutable but not aliasable. This kind of borrow
-    /// cannot currently be expressed by the user and is used only in
-    /// implicit closure bindings. It is needed when the closure is
-    /// borrowing or mutating a mutable referent, e.g.:
-    /// ```
-    /// let mut z = 3;
-    /// let x: &mut isize = &mut z;
-    /// let y = || *x += 5;
-    /// ```
-    /// If we were to try to translate this closure into a more explicit
-    /// form, we'd encounter an error with the code as written:
-    /// ```compile_fail,E0594
-    /// struct Env<'a> { x: &'a &'a mut isize }
-    /// let mut z = 3;
-    /// let x: &mut isize = &mut z;
-    /// let y = (&mut Env { x: &x }, fn_ptr);  // Closure is pair of env and fn
-    /// fn fn_ptr(env: &mut Env) { **env.x += 5; }
-    /// ```
-    /// This is then illegal because you cannot mutate an `&mut` found
-    /// in an aliasable location. To solve, you'd have to translate with
-    /// an `&mut` borrow:
-    /// ```compile_fail,E0596
-    /// struct Env<'a> { x: &'a mut &'a mut isize }
-    /// let mut z = 3;
-    /// let x: &mut isize = &mut z;
-    /// let y = (&mut Env { x: &mut x }, fn_ptr); // changed from &x to &mut x
-    /// fn fn_ptr(env: &mut Env) { **env.x += 5; }
-    /// ```
-    /// Now the assignment to `**env.x` is legal, but creating a
-    /// mutable pointer to `x` is not because `x` is not mutable. We
-    /// could fix this by declaring `x` as `let mut x`. This is ok in
-    /// user code, if awkward, but extra weird for closures, since the
-    /// borrow is hidden.
-    ///
-    /// So we introduce a "unique imm" borrow -- the referent is
-    /// immutable, but not aliasable. This solves the problem. For
-    /// simplicity, we don't give users the way to express this
-    /// borrow, it's just used when translating closures.
-    Unique,
-
     /// Data is mutable and not aliasable.
-    Mut {
-        /// `true` if this borrow arose from method-call auto-ref
-        /// (i.e., `adjustment::Adjust::Borrow`).
-        allow_two_phase_borrow: bool,
-    },
+    Mut { kind: MutBorrowKind },
+}
+
+// Order of variants in this enum matter: they are used to compare borrow kinds.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, PartialOrd, Ord)]
+pub enum MutBorrowKind {
+    /// Data must be immutable but not aliasable. This kind of borrow cannot currently
+    /// be expressed by the user and is used only in implicit closure bindings.
+    ClosureCapture,
+    Default,
+    /// This borrow arose from method-call auto-ref
+    /// (i.e., adjustment::Adjust::Borrow).
+    TwoPhasedBorrow,
 }
 
 impl BorrowKind {
     fn from_hir(m: hir_def::type_ref::Mutability) -> Self {
         match m {
             hir_def::type_ref::Mutability::Shared => BorrowKind::Shared,
-            hir_def::type_ref::Mutability::Mut => BorrowKind::Mut { allow_two_phase_borrow: false },
+            hir_def::type_ref::Mutability::Mut => BorrowKind::Mut { kind: MutBorrowKind::Default },
         }
     }
 
     fn from_chalk(m: Mutability) -> Self {
         match m {
             Mutability::Not => BorrowKind::Shared,
-            Mutability::Mut => BorrowKind::Mut { allow_two_phase_borrow: false },
+            Mutability::Mut => BorrowKind::Mut { kind: MutBorrowKind::Default },
         }
     }
 }
@@ -778,7 +837,9 @@ pub enum CastKind {
     PointerFromExposedAddress,
     /// All sorts of pointer-to-pointer casts. Note that reference-to-raw-ptr casts are
     /// translated into `&raw mut/const *r`, i.e., they are not actually casts.
-    Pointer(PointerCast),
+    PtrToPtr,
+    /// Pointer related casts that are done by coercions.
+    PointerCoercion(PointerCast),
     /// Cast into a dyn* object.
     DynStar,
     IntToInt,
@@ -818,7 +879,8 @@ pub enum Rvalue {
     ///
     /// **Needs clarification**: Are there weird additional semantics here related to the runtime
     /// nature of this operation?
-    //ThreadLocalRef(DefId),
+    // ThreadLocalRef(DefId),
+    ThreadLocalRef(std::convert::Infallible),
 
     /// Creates a pointer with the indicated mutability to the place.
     ///
@@ -827,7 +889,8 @@ pub enum Rvalue {
     ///
     /// Like with references, the semantics of this operation are heavily dependent on the aliasing
     /// model.
-    //AddressOf(Mutability, Place),
+    // AddressOf(Mutability, Place),
+    AddressOf(std::convert::Infallible),
 
     /// Yields the length of the place, as a `usize`.
     ///
@@ -858,6 +921,7 @@ pub enum Rvalue {
     /// * The remaining operations accept signed integers, unsigned integers, or floats with
     ///   matching types and return a value of that type.
     //BinaryOp(BinOp, Box<(Operand, Operand)>),
+    BinaryOp(std::convert::Infallible),
 
     /// Same as `BinaryOp`, but yields `(T, bool)` with a `bool` indicating an error condition.
     ///
@@ -877,6 +941,7 @@ pub enum Rvalue {
 
     /// Computes a value as described by the operation.
     //NullaryOp(NullOp, Ty),
+    NullaryOp(std::convert::Infallible),
 
     /// Exactly like `BinaryOp`, but less operands.
     ///
@@ -903,8 +968,8 @@ pub enum Rvalue {
     /// `dest = Foo { x: ..., y: ... }` from `dest.x = ...; dest.y = ...;` in the case that `Foo`
     /// has a destructor.
     ///
-    /// Disallowed after deaggregation for all aggregate kinds except `Array` and `Generator`. After
-    /// generator lowering, `Generator` aggregate kinds are disallowed too.
+    /// Disallowed after deaggregation for all aggregate kinds except `Array` and `Coroutine`. After
+    /// coroutine lowering, `Coroutine` aggregate kinds are disallowed too.
     Aggregate(AggregateKind, Box<[Operand]>),
 
     /// Transmutes a `*mut u8` into shallow-initialized `Box<T>`.
@@ -931,7 +996,7 @@ pub enum Rvalue {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum StatementKind {
     Assign(Place, Rvalue),
-    //FakeRead(Box<(FakeReadCause, Place)>),
+    FakeRead(Place),
     //SetDiscriminant {
     //    place: Box<Place>,
     //    variant_index: VariantIdx,
@@ -980,6 +1045,7 @@ pub struct BasicBlock {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirBody {
+    pub projection_store: ProjectionStore,
     pub basic_blocks: Arena<BasicBlock>,
     pub locals: Arena<Local>,
     pub start_block: BasicBlockId,
@@ -992,11 +1058,19 @@ pub struct MirBody {
 }
 
 impl MirBody {
-    fn walk_places(&mut self, mut f: impl FnMut(&mut Place)) {
-        fn for_operand(op: &mut Operand, f: &mut impl FnMut(&mut Place)) {
+    pub fn local_to_binding_map(&self) -> ArenaMap<LocalId, BindingId> {
+        self.binding_locals.iter().map(|(it, y)| (*y, it)).collect()
+    }
+
+    fn walk_places(&mut self, mut f: impl FnMut(&mut Place, &mut ProjectionStore)) {
+        fn for_operand(
+            op: &mut Operand,
+            f: &mut impl FnMut(&mut Place, &mut ProjectionStore),
+            store: &mut ProjectionStore,
+        ) {
             match op {
                 Operand::Copy(p) | Operand::Move(p) => {
-                    f(p);
+                    f(p, store);
                 }
                 Operand::Constant(_) | Operand::Static(_) => (),
             }
@@ -1005,30 +1079,36 @@ impl MirBody {
             for statement in &mut block.statements {
                 match &mut statement.kind {
                     StatementKind::Assign(p, r) => {
-                        f(p);
+                        f(p, &mut self.projection_store);
                         match r {
                             Rvalue::ShallowInitBoxWithAlloc(_) => (),
                             Rvalue::ShallowInitBox(o, _)
                             | Rvalue::UnaryOp(_, o)
                             | Rvalue::Cast(_, o, _)
                             | Rvalue::Repeat(o, _)
-                            | Rvalue::Use(o) => for_operand(o, &mut f),
+                            | Rvalue::Use(o) => for_operand(o, &mut f, &mut self.projection_store),
                             Rvalue::CopyForDeref(p)
                             | Rvalue::Discriminant(p)
                             | Rvalue::Len(p)
-                            | Rvalue::Ref(_, p) => f(p),
+                            | Rvalue::Ref(_, p) => f(p, &mut self.projection_store),
                             Rvalue::CheckedBinaryOp(_, o1, o2) => {
-                                for_operand(o1, &mut f);
-                                for_operand(o2, &mut f);
+                                for_operand(o1, &mut f, &mut self.projection_store);
+                                for_operand(o2, &mut f, &mut self.projection_store);
                             }
                             Rvalue::Aggregate(_, ops) => {
                                 for op in ops.iter_mut() {
-                                    for_operand(op, &mut f);
+                                    for_operand(op, &mut f, &mut self.projection_store);
                                 }
                             }
+                            Rvalue::ThreadLocalRef(n)
+                            | Rvalue::AddressOf(n)
+                            | Rvalue::BinaryOp(n)
+                            | Rvalue::NullaryOp(n) => match *n {},
                         }
                     }
-                    StatementKind::Deinit(p) => f(p),
+                    StatementKind::FakeRead(p) | StatementKind::Deinit(p) => {
+                        f(p, &mut self.projection_store)
+                    }
                     StatementKind::StorageLive(_)
                     | StatementKind::StorageDead(_)
                     | StatementKind::Nop => (),
@@ -1036,33 +1116,36 @@ impl MirBody {
             }
             match &mut block.terminator {
                 Some(x) => match &mut x.kind {
-                    TerminatorKind::SwitchInt { discr, .. } => for_operand(discr, &mut f),
+                    TerminatorKind::SwitchInt { discr, .. } => {
+                        for_operand(discr, &mut f, &mut self.projection_store)
+                    }
                     TerminatorKind::FalseEdge { .. }
                     | TerminatorKind::FalseUnwind { .. }
                     | TerminatorKind::Goto { .. }
-                    | TerminatorKind::Resume
-                    | TerminatorKind::GeneratorDrop
+                    | TerminatorKind::UnwindResume
+                    | TerminatorKind::CoroutineDrop
                     | TerminatorKind::Abort
                     | TerminatorKind::Return
                     | TerminatorKind::Unreachable => (),
                     TerminatorKind::Drop { place, .. } => {
-                        f(place);
+                        f(place, &mut self.projection_store);
                     }
                     TerminatorKind::DropAndReplace { place, value, .. } => {
-                        f(place);
-                        for_operand(value, &mut f);
+                        f(place, &mut self.projection_store);
+                        for_operand(value, &mut f, &mut self.projection_store);
                     }
                     TerminatorKind::Call { func, args, destination, .. } => {
-                        for_operand(func, &mut f);
-                        args.iter_mut().for_each(|x| for_operand(x, &mut f));
-                        f(destination);
+                        for_operand(func, &mut f, &mut self.projection_store);
+                        args.iter_mut()
+                            .for_each(|x| for_operand(x, &mut f, &mut self.projection_store));
+                        f(destination, &mut self.projection_store);
                     }
                     TerminatorKind::Assert { cond, .. } => {
-                        for_operand(cond, &mut f);
+                        for_operand(cond, &mut f, &mut self.projection_store);
                     }
                     TerminatorKind::Yield { value, resume_arg, .. } => {
-                        for_operand(value, &mut f);
-                        f(resume_arg);
+                        for_operand(value, &mut f, &mut self.projection_store);
+                        f(resume_arg, &mut self.projection_store);
                     }
                 },
                 None => (),
@@ -1079,7 +1162,9 @@ impl MirBody {
             binding_locals,
             param_locals,
             closures,
+            projection_store,
         } = self;
+        projection_store.shrink_to_fit();
         basic_blocks.shrink_to_fit();
         locals.shrink_to_fit();
         binding_locals.shrink_to_fit();
@@ -1096,7 +1181,29 @@ impl MirBody {
 pub enum MirSpan {
     ExprId(ExprId),
     PatId(PatId),
+    BindingId(BindingId),
+    SelfParam,
     Unknown,
 }
 
+impl MirSpan {
+    pub fn is_ref_span(&self, body: &Body) -> bool {
+        match *self {
+            MirSpan::ExprId(expr) => matches!(body[expr], Expr::Ref { .. }),
+            // FIXME: Figure out if this is correct wrt. match ergonomics.
+            MirSpan::BindingId(binding) => matches!(
+                body.bindings[binding].mode,
+                BindingAnnotation::Ref | BindingAnnotation::RefMut
+            ),
+            MirSpan::PatId(_) | MirSpan::SelfParam | MirSpan::Unknown => false,
+        }
+    }
+}
+
 impl_from!(ExprId, PatId for MirSpan);
+
+impl From<&ExprId> for MirSpan {
+    fn from(value: &ExprId) -> Self {
+        (*value).into()
+    }
+}

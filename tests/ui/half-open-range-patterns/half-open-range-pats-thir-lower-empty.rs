@@ -1,5 +1,5 @@
-#![feature(exclusive_range_pattern)]
-#![allow(illegal_floating_point_literal_pattern)]
+#![feature(f128)]
+#![feature(f16)]
 
 macro_rules! m {
     ($s:expr, $($t:tt)+) => {
@@ -30,9 +30,13 @@ fn main() {
     m!(0, ..i128::MIN);
     //~^ ERROR lower range bound must be less than upper
 
+    m!(0f16, ..f16::NEG_INFINITY);
+    //~^ ERROR lower range bound must be less than upper
     m!(0f32, ..f32::NEG_INFINITY);
     //~^ ERROR lower range bound must be less than upper
     m!(0f64, ..f64::NEG_INFINITY);
+    //~^ ERROR lower range bound must be less than upper
+    m!(0f128, ..f128::NEG_INFINITY);
     //~^ ERROR lower range bound must be less than upper
 
     m!('a', ..'\u{0}');

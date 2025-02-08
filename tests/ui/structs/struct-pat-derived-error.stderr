@@ -2,7 +2,12 @@ error[E0609]: no field `d` on type `&A`
   --> $DIR/struct-pat-derived-error.rs:8:31
    |
 LL |         let A { x, y } = self.d;
-   |                               ^ help: a field with a similar name exists: `b`
+   |                               ^ unknown field
+   |
+help: a field with a similar name exists
+   |
+LL |         let A { x, y } = self.b;
+   |                               ~
 
 error[E0026]: struct `A` does not have fields named `x`, `y`
   --> $DIR/struct-pat-derived-error.rs:8:17
@@ -21,6 +26,10 @@ help: include the missing fields in the pattern
 LL |         let A { x, y, b, c } = self.d;
    |                     ~~~~~~~~
 help: if you don't care about these missing fields, you can explicitly ignore them
+   |
+LL |         let A { x, y, b: _, c: _ } = self.d;
+   |                     ~~~~~~~~~~~~~~
+help: or always ignore missing fields here
    |
 LL |         let A { x, y, .. } = self.d;
    |                     ~~~~~~

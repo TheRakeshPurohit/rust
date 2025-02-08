@@ -1,7 +1,6 @@
-// run-pass
+//@ run-pass
 
-#![feature(generators)]
-#![feature(unboxed_closures, fn_traits)]
+#![feature(coroutines)]
 
 #![allow(non_camel_case_types)]
 #![allow(dead_code)]
@@ -17,6 +16,7 @@
 extern crate core;
 use std::cell::Cell;
 use std::mem::swap;
+use std::ops::Deref;
 
 // Just a grab bag of stuff that you wouldn't want to actually write.
 
@@ -34,7 +34,7 @@ fn what() {
     let i = &Cell::new(false);
     let dont = {||the(i)};
     dont();
-    assert!((i.get()));
+    assert!(i.get());
 }
 
 fn zombiejesus() {
@@ -69,8 +69,8 @@ fn notsure() {
 
 fn canttouchthis() -> usize {
     fn p() -> bool { true }
-    let _a = (assert!((true)) == (assert!(p())));
-    let _c = (assert!((p())) == ());
+    let _a = (assert!(true) == (assert!(p())));
+    let _c = (assert!(p()) == ());
     let _b: bool = (println!("{}", 0) == (return 0));
 }
 
@@ -152,6 +152,7 @@ fn r#match() {
 }
 
 fn i_yield() {
+    #[coroutine]
     static || {
         yield yield yield yield yield yield yield yield yield;
     };
@@ -183,10 +184,10 @@ fn 𝚌𝚘𝚗𝚝𝚒𝚗𝚞𝚎() {
 
 fn function() {
     struct foo;
-    impl FnOnce<()> for foo {
-        type Output = foo;
-        extern "rust-call" fn call_once(self, _args: ()) -> Self::Output {
-            foo
+    impl Deref for foo {
+        type Target = fn() -> Self;
+        fn deref(&self) -> &Self::Target {
+            &((|| foo) as _)
         }
     }
     let foo = foo () ()() ()()() ()()()() ()()()()();
@@ -231,6 +232,45 @@ fn infcx() {
     let _cx: cx::cx::Cx = cx::cx::cx::cx::cx::Cx;
 }
 
+fn return_already() -> impl std::fmt::Debug {
+    loop {
+        return !!!!!!!
+        break !!!!!!1111
+    }
+}
+
+fn fake_macros() -> impl std::fmt::Debug {
+    loop {
+        if! {
+            match! (
+                break! {
+                    return! {
+                        1337
+                    }
+                }
+            )
+
+            {}
+        }
+
+        {}
+    }
+}
+
+fn fish_fight() {
+    trait Rope {
+        fn _____________<U>(_: Self, _: U) where Self: Sized {}
+    }
+
+    struct T;
+
+    impl Rope for T {}
+
+    fn tug_o_war(_: impl Fn(T, T)) {}
+
+    tug_o_war(<T>::_____________::<T>);
+}
+
 pub fn main() {
     strange();
     funny();
@@ -257,4 +297,7 @@ pub fn main() {
     semisemisemisemisemi();
     useful_syntax();
     infcx();
+    return_already();
+    fake_macros();
+    fish_fight();
 }

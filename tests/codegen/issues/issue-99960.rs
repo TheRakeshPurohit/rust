@@ -1,5 +1,4 @@
-// compile-flags: -O
-// min-llvm-version: 16
+//@ compile-flags: -O
 
 #![crate_type = "lib"]
 
@@ -7,9 +6,5 @@
 pub fn test(dividend: i64, divisor: i64) -> Option<i64> {
     // CHECK-LABEL: @test(
     // CHECK-NOT: panic
-    if dividend > i64::min_value() && divisor != 0 {
-        Some(dividend / divisor)
-    } else {
-        None
-    }
+    if dividend > i64::min_value() && divisor != 0 { Some(dividend / divisor) } else { None }
 }

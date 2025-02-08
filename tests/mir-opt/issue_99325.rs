@@ -1,4 +1,7 @@
-#![feature(adt_const_params)]
+// skip-filecheck
+// EMIT_MIR_FOR_EACH_BIT_WIDTH
+
+#![feature(adt_const_params, unsized_const_params)]
 #![allow(incomplete_features)]
 
 pub fn function_with_bytes<const BYTES: &'static [u8; 4]>() -> &'static [u8] {

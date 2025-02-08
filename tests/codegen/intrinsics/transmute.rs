@@ -1,18 +1,15 @@
-// compile-flags: -O -C no-prepopulate-passes
-// only-64bit (so I don't need to worry about usize)
-// min-llvm-version: 15.0 # this test assumes `ptr`s
+//@ compile-flags: -O -C no-prepopulate-passes
+//@ only-64bit (so I don't need to worry about usize)
 
 #![crate_type = "lib"]
 #![feature(core_intrinsics)]
 #![feature(custom_mir)]
-#![feature(inline_const)]
 #![allow(unreachable_code)]
-
-use std::mem::MaybeUninit;
-use std::intrinsics::{transmute, transmute_unchecked};
 
 // Some of these need custom MIR to not get removed by MIR optimizations.
 use std::intrinsics::mir::*;
+use std::intrinsics::{transmute, transmute_unchecked};
+use std::mem::MaybeUninit;
 
 pub enum ZstNever {}
 
@@ -63,7 +60,7 @@ pub unsafe fn check_to_empty_array(x: [u32; 5]) -> [u32; 0] {
     // CHECK-NOT: trap
     // CHECK: call void @llvm.trap
     // CHECK-NOT: trap
-    mir!{
+    mir! {
         {
             RET = CastTransmute(x);
             Return()
@@ -78,7 +75,7 @@ pub unsafe fn check_from_empty_array(x: [u32; 0]) -> [u32; 5] {
     // CHECK-NOT: trap
     // CHECK: call void @llvm.trap
     // CHECK-NOT: trap
-    mir!{
+    mir! {
         {
             RET = CastTransmute(x);
             Return()
@@ -93,7 +90,7 @@ pub unsafe fn check_to_uninhabited(x: u16) {
     // CHECK-NOT: trap
     // CHECK: call void @llvm.trap
     // CHECK-NOT: trap
-    mir!{
+    mir! {
         let temp: BigNever;
         {
             temp = CastTransmute(x);
@@ -107,7 +104,7 @@ pub unsafe fn check_to_uninhabited(x: u16) {
 #[custom_mir(dialect = "runtime", phase = "optimized")]
 pub unsafe fn check_from_uninhabited(x: BigNever) -> u16 {
     // CHECK: ret i16 poison
-    mir!{
+    mir! {
         {
             RET = CastTransmute(x);
             Return()
@@ -122,9 +119,7 @@ pub unsafe fn check_intermediate_passthrough(x: u32) -> i32 {
     // CHECK: %[[TMP:.+]] = add i32 1, %x
     // CHECK: %[[RET:.+]] = add i32 %[[TMP]], 1
     // CHECK: ret i32 %[[RET]]
-    unsafe {
-        transmute::<u32, i32>(1 + x) + 1
-    }
+    unsafe { transmute::<u32, i32>(1 + x) + 1 }
 }
 
 // CHECK-LABEL: @check_nop_pair(
@@ -134,9 +129,7 @@ pub unsafe fn check_nop_pair(x: (u8, i8)) -> (i8, u8) {
     // CHECK: %0 = insertvalue { i8, i8 } poison, i8 %x.0, 0
     // CHECK: %1 = insertvalue { i8, i8 } %0, i8 %x.1, 1
     // CHECK: ret { i8, i8 } %1
-    unsafe {
-        transmute(x)
-    }
+    unsafe { transmute(x) }
 }
 
 // CHECK-LABEL: @check_to_newtype(
@@ -158,7 +151,7 @@ pub unsafe fn check_from_newtype(x: Scalar64) -> u64 {
 // CHECK-LABEL: @check_aggregate_to_bool(
 #[no_mangle]
 pub unsafe fn check_aggregate_to_bool(x: Aggregate8) -> bool {
-    // CHECK: %x = alloca %Aggregate8, align 1
+    // CHECK: %x = alloca [1 x i8], align 1
     // CHECK: %[[BYTE:.+]] = load i8, ptr %x, align 1
     // CHECK: %[[BOOL:.+]] = trunc i8 %[[BYTE]] to i1
     // CHECK: ret i1 %[[BOOL]]
@@ -168,9 +161,9 @@ pub unsafe fn check_aggregate_to_bool(x: Aggregate8) -> bool {
 // CHECK-LABEL: @check_aggregate_from_bool(
 #[no_mangle]
 pub unsafe fn check_aggregate_from_bool(x: bool) -> Aggregate8 {
-    // CHECK: %0 = alloca %Aggregate8, align 1
+    // CHECK: %_0 = alloca [1 x i8], align 1
     // CHECK: %[[BYTE:.+]] = zext i1 %x to i8
-    // CHECK: store i8 %[[BYTE]], ptr %0, align 1
+    // CHECK: store i8 %[[BYTE]], ptr %_0, align 1
     transmute(x)
 }
 
@@ -195,8 +188,8 @@ pub unsafe fn check_byte_from_bool(x: bool) -> u8 {
 // CHECK-LABEL: @check_to_pair(
 #[no_mangle]
 pub unsafe fn check_to_pair(x: u64) -> Option<i32> {
-    // CHECK: %0 = alloca { i32, i32 }, align 4
-    // CHECK: store i64 %x, ptr %0, align 4
+    // CHECK: %_0 = alloca [8 x i8], align 4
+    // CHECK: store i64 %x, ptr %_0, align 4
     transmute(x)
 }
 
@@ -207,11 +200,11 @@ pub unsafe fn check_from_pair(x: Option<i32>) -> u64 {
     // immediates so we can write using the destination alloca's alignment.
     const { assert!(std::mem::align_of::<Option<i32>>() == 4) };
 
-    // CHECK: %0 = alloca i64, align 8
-    // CHECK: store i32 %x.0, ptr %1, align 8
-    // CHECK: store i32 %x.1, ptr %2, align 4
-    // CHECK: %3 = load i64, ptr %0, align 8
-    // CHECK: ret i64 %3
+    // CHECK: %_0 = alloca [8 x i8], align 8
+    // CHECK: store i32 %x.0, ptr %_0, align 8
+    // CHECK: store i32 %x.1, ptr %0, align 4
+    // CHECK: %[[R:.+]] = load i64, ptr %_0, align 8
+    // CHECK: ret i64 %[[R]]
     transmute(x)
 }
 
@@ -219,8 +212,8 @@ pub unsafe fn check_from_pair(x: Option<i32>) -> u64 {
 #[no_mangle]
 pub unsafe fn check_to_float(x: u32) -> f32 {
     // CHECK-NOT: alloca
-    // CHECK: %0 = bitcast i32 %x to float
-    // CHECK: ret float %0
+    // CHECK: %_0 = bitcast i32 %x to float
+    // CHECK: ret float %_0
     transmute(x)
 }
 
@@ -228,16 +221,16 @@ pub unsafe fn check_to_float(x: u32) -> f32 {
 #[no_mangle]
 pub unsafe fn check_from_float(x: f32) -> u32 {
     // CHECK-NOT: alloca
-    // CHECK: %0 = bitcast float %x to i32
-    // CHECK: ret i32 %0
+    // CHECK: %_0 = bitcast float %x to i32
+    // CHECK: ret i32 %_0
     transmute(x)
 }
 
 // CHECK-LABEL: @check_to_bytes(
 #[no_mangle]
 pub unsafe fn check_to_bytes(x: u32) -> [u8; 4] {
-    // CHECK: %0 = alloca [4 x i8], align 1
-    // CHECK: store i32 %x, ptr %0, align 1
+    // CHECK: %_0 = alloca [4 x i8], align 1
+    // CHECK: store i32 %x, ptr %_0, align 1
     transmute(x)
 }
 
@@ -253,17 +246,17 @@ pub unsafe fn check_from_bytes(x: [u8; 4]) -> u32 {
 // CHECK-LABEL: @check_to_aggregate(
 #[no_mangle]
 pub unsafe fn check_to_aggregate(x: u64) -> Aggregate64 {
-    // CHECK: %0 = alloca %Aggregate64, align 4
-    // CHECK: store i64 %x, ptr %0, align 4
-    // CHECK: %1 = load i64, ptr %0, align 4
-    // CHECK: ret i64 %1
+    // CHECK: %_0 = alloca [8 x i8], align 4
+    // CHECK: store i64 %x, ptr %_0, align 4
+    // CHECK: %0 = load i64, ptr %_0, align 4
+    // CHECK: ret i64 %0
     transmute(x)
 }
 
 // CHECK-LABEL: @check_from_aggregate(
 #[no_mangle]
 pub unsafe fn check_from_aggregate(x: Aggregate64) -> u64 {
-    // CHECK: %x = alloca %Aggregate64, align 4
+    // CHECK: %x = alloca [8 x i8], align 4
     // CHECK: %[[VAL:.+]] = load i64, ptr %x, align 4
     // CHECK: ret i64 %[[VAL]]
     transmute(x)
@@ -273,7 +266,7 @@ pub unsafe fn check_from_aggregate(x: Aggregate64) -> u64 {
 #[no_mangle]
 pub unsafe fn check_long_array_less_aligned(x: [u64; 100]) -> [u16; 400] {
     // CHECK-NEXT: start
-    // CHECK-NEXT: call void @llvm.memcpy.p0.p0.i64(ptr align 2 %0, ptr align 8 %x, i64 800, i1 false)
+    // CHECK-NEXT: call void @llvm.memcpy.p0.p0.i64(ptr align 2 %_0, ptr align 8 %x, i64 800, i1 false)
     // CHECK-NEXT: ret void
     transmute(x)
 }
@@ -282,7 +275,7 @@ pub unsafe fn check_long_array_less_aligned(x: [u64; 100]) -> [u16; 400] {
 #[no_mangle]
 pub unsafe fn check_long_array_more_aligned(x: [u8; 100]) -> [u32; 25] {
     // CHECK-NEXT: start
-    // CHECK-NEXT: call void @llvm.memcpy.p0.p0.i64(ptr align 4 %0, ptr align 1 %x, i64 100, i1 false)
+    // CHECK-NEXT: call void @llvm.memcpy.p0.p0.i64(ptr align 4 %_0, ptr align 1 %x, i64 100, i1 false)
     // CHECK-NEXT: ret void
     transmute(x)
 }
@@ -301,8 +294,8 @@ pub unsafe fn check_pair_with_bool(x: (u8, bool)) -> (bool, i8) {
 pub unsafe fn check_float_to_pointer(x: f64) -> *const () {
     // CHECK-NOT: alloca
     // CHECK: %0 = bitcast double %x to i64
-    // CHECK: %1 = inttoptr i64 %0 to ptr
-    // CHECK: ret ptr %1
+    // CHECK: %_0 = getelementptr i8, ptr null, i64 %0
+    // CHECK: ret ptr %_0
     transmute(x)
 }
 
@@ -311,8 +304,8 @@ pub unsafe fn check_float_to_pointer(x: f64) -> *const () {
 pub unsafe fn check_float_from_pointer(x: *const ()) -> f64 {
     // CHECK-NOT: alloca
     // CHECK: %0 = ptrtoint ptr %x to i64
-    // CHECK: %1 = bitcast i64 %0 to double
-    // CHECK: ret double %1
+    // CHECK: %_0 = bitcast i64 %0 to double
+    // CHECK: ret double %_0
     transmute(x)
 }
 
@@ -376,10 +369,10 @@ pub unsafe fn check_issue_110005(x: (usize, bool)) -> Option<Box<[u8]>> {
 // CHECK-LABEL: @check_pair_to_dst_ref(
 #[no_mangle]
 pub unsafe fn check_pair_to_dst_ref<'a>(x: (usize, usize)) -> &'a [u8] {
-    // CHECK: %0 = inttoptr i64 %x.0 to ptr
-    // CHECK: %1 = insertvalue { ptr, i64 } poison, ptr %0, 0
-    // CHECK: %2 = insertvalue { ptr, i64 } %1, i64 %x.1, 1
-    // CHECK: ret { ptr, i64 } %2
+    // CHECK: %_0.0 = getelementptr i8, ptr null, i64 %x.0
+    // CHECK: %0 = insertvalue { ptr, i64 } poison, ptr %_0.0, 0
+    // CHECK: %1 = insertvalue { ptr, i64 } %0, i64 %x.1, 1
+    // CHECK: ret { ptr, i64 } %1
     transmute(x)
 }
 
@@ -391,7 +384,7 @@ pub unsafe fn check_issue_109992(x: ()) -> [(); 1] {
 
     // CHECK: start
     // CHECK-NEXT: ret void
-    mir!{
+    mir! {
         {
             RET = CastTransmute(x);
             Return()
@@ -408,7 +401,7 @@ pub unsafe fn check_unit_to_never(x: ()) {
     // CHECK-NOT: trap
     // CHECK: call void @llvm.trap
     // CHECK-NOT: trap
-    mir!{
+    mir! {
         let temp: ZstNever;
         {
             temp = CastTransmute(x);
@@ -425,7 +418,7 @@ pub unsafe fn check_unit_from_never(x: ZstNever) -> () {
 
     // CHECK: start
     // CHECK-NEXT: ret void
-    mir!{
+    mir! {
         {
             RET = CastTransmute(x);
             Return()
@@ -457,17 +450,17 @@ pub struct HighAlignScalar(u8);
 // CHECK-LABEL: @check_to_overalign(
 #[no_mangle]
 pub unsafe fn check_to_overalign(x: u64) -> HighAlignScalar {
-    // CHECK: %0 = alloca %HighAlignScalar, align 8
-    // CHECK: store i64 %x, ptr %0, align 8
-    // CHECK: %1 = load i64, ptr %0, align 8
-    // CHECK: ret i64 %1
+    // CHECK: %_0 = alloca [8 x i8], align 8
+    // CHECK: store i64 %x, ptr %_0, align 8
+    // CHECK: %0 = load i64, ptr %_0, align 8
+    // CHECK: ret i64 %0
     transmute(x)
 }
 
 // CHECK-LABEL: @check_from_overalign(
 #[no_mangle]
 pub unsafe fn check_from_overalign(x: HighAlignScalar) -> u64 {
-    // CHECK: %x = alloca %HighAlignScalar, align 8
+    // CHECK: %x = alloca [8 x i8], align 8
     // CHECK: %[[VAL:.+]] = load i64, ptr %x, align 8
     // CHECK: ret i64 %[[VAL]]
     transmute(x)

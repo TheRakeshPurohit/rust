@@ -1,6 +1,4 @@
-// check-pass
-
-#![feature(inline_const)]
+//@ check-pass
 
 pub fn todo<T>() -> T {
     const { todo!() }

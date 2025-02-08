@@ -1,11 +1,12 @@
-use crate::traits;
-use crate::traits::project::Normalized;
+use std::fmt;
+
+use rustc_ast_ir::try_visit;
 use rustc_middle::ty::fold::{FallibleTypeFolder, TypeFoldable};
 use rustc_middle::ty::visit::{TypeVisitable, TypeVisitor};
 use rustc_middle::ty::{self, TyCtxt};
 
-use std::fmt;
-use std::ops::ControlFlow;
+use crate::traits;
+use crate::traits::project::Normalized;
 
 // Structural impls for the structs in `traits`.
 
@@ -17,7 +18,7 @@ impl<'tcx, T: fmt::Debug> fmt::Debug for Normalized<'tcx, T> {
 
 impl<'tcx, O: fmt::Debug> fmt::Debug for traits::Obligation<'tcx, O> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if ty::tls::with(|tcx| tcx.sess.verbose()) {
+        if ty::tls::with(|tcx| tcx.sess.verbose_internals()) {
             write!(
                 f,
                 "Obligation(predicate={:?}, cause={:?}, param_env={:?}, depth={})",
@@ -25,30 +26,6 @@ impl<'tcx, O: fmt::Debug> fmt::Debug for traits::Obligation<'tcx, O> {
             )
         } else {
             write!(f, "Obligation(predicate={:?}, depth={})", self.predicate, self.recursion_depth)
-        }
-    }
-}
-
-impl<'tcx> fmt::Debug for traits::FulfillmentError<'tcx> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "FulfillmentError({:?},{:?})", self.obligation, self.code)
-    }
-}
-
-impl<'tcx> fmt::Debug for traits::FulfillmentErrorCode<'tcx> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            super::CodeSelectionError(ref e) => write!(f, "{:?}", e),
-            super::CodeProjectionError(ref e) => write!(f, "{:?}", e),
-            super::CodeSubtypeError(ref a, ref b) => {
-                write!(f, "CodeSubtypeError({:?}, {:?})", a, b)
-            }
-            super::CodeConstEquateError(ref a, ref b) => {
-                write!(f, "CodeConstEquateError({:?}, {:?})", a, b)
-            }
-            super::CodeAmbiguity { overflow: false } => write!(f, "Ambiguity"),
-            super::CodeAmbiguity { overflow: true } => write!(f, "Overflow"),
-            super::CodeCycle(ref cycle) => write!(f, "Cycle({:?})", cycle),
         }
     }
 }
@@ -81,8 +58,8 @@ impl<'tcx, O: TypeFoldable<TyCtxt<'tcx>>> TypeFoldable<TyCtxt<'tcx>>
 impl<'tcx, O: TypeVisitable<TyCtxt<'tcx>>> TypeVisitable<TyCtxt<'tcx>>
     for traits::Obligation<'tcx, O>
 {
-    fn visit_with<V: TypeVisitor<TyCtxt<'tcx>>>(&self, visitor: &mut V) -> ControlFlow<V::BreakTy> {
-        self.predicate.visit_with(visitor)?;
+    fn visit_with<V: TypeVisitor<TyCtxt<'tcx>>>(&self, visitor: &mut V) -> V::Result {
+        try_visit!(self.predicate.visit_with(visitor));
         self.param_env.visit_with(visitor)
     }
 }

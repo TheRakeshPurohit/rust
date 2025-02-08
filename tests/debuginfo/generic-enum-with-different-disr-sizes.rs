@@ -1,61 +1,57 @@
-// ignore-lldb: FIXME(#27089)
-// min-lldb-version: 310
+//@ ignore-lldb: FIXME(#27089)
 
-// Require a gdb that can read DW_TAG_variant_part.
-// min-gdb-version: 8.2
-
-// compile-flags:-g
+//@ compile-flags:-g
 
 // === GDB TESTS ===================================================================================
 // gdb-command:run
 
 // gdb-command:print eight_bytes1
-// gdbr-check:$1 = generic_enum_with_different_disr_sizes::Enum<f64>::Variant1(100)
+// gdb-check:$1 = generic_enum_with_different_disr_sizes::Enum<f64>::Variant1(100)
 
 // gdb-command:print four_bytes1
-// gdbr-check:$2 = generic_enum_with_different_disr_sizes::Enum<i32>::Variant1(101)
+// gdb-check:$2 = generic_enum_with_different_disr_sizes::Enum<i32>::Variant1(101)
 
 // gdb-command:print two_bytes1
-// gdbr-check:$3 = generic_enum_with_different_disr_sizes::Enum<i16>::Variant1(102)
+// gdb-check:$3 = generic_enum_with_different_disr_sizes::Enum<i16>::Variant1(102)
 
 // gdb-command:print one_byte1
-// gdbr-check:$4 = generic_enum_with_different_disr_sizes::Enum<u8>::Variant1(65)
+// gdb-check:$4 = generic_enum_with_different_disr_sizes::Enum<u8>::Variant1(65)
 
 
 // gdb-command:print eight_bytes2
-// gdbr-check:$5 = generic_enum_with_different_disr_sizes::Enum<f64>::Variant2(100)
+// gdb-check:$5 = generic_enum_with_different_disr_sizes::Enum<f64>::Variant2(100)
 
 // gdb-command:print four_bytes2
-// gdbr-check:$6 = generic_enum_with_different_disr_sizes::Enum<i32>::Variant2(101)
+// gdb-check:$6 = generic_enum_with_different_disr_sizes::Enum<i32>::Variant2(101)
 
 // gdb-command:print two_bytes2
-// gdbr-check:$7 = generic_enum_with_different_disr_sizes::Enum<i16>::Variant2(102)
+// gdb-check:$7 = generic_enum_with_different_disr_sizes::Enum<i16>::Variant2(102)
 
 // gdb-command:print one_byte2
-// gdbr-check:$8 = generic_enum_with_different_disr_sizes::Enum<u8>::Variant2(65)
+// gdb-check:$8 = generic_enum_with_different_disr_sizes::Enum<u8>::Variant2(65)
 
 // gdb-command:continue
 
 // === LLDB TESTS ==================================================================================
 // lldb-command:run
 
-// lldb-command:print eight_bytes1
-// lldb-check:[...]$0 = Variant1(100)
-// lldb-command:print four_bytes1
-// lldb-check:[...]$1 = Variant1(101)
-// lldb-command:print two_bytes1
-// lldb-check:[...]$2 = Variant1(102)
-// lldb-command:print one_byte1
-// lldb-check:[...]$3 = Variant1('A')
+// lldb-command:v eight_bytes1
+// lldb-check:[...] Variant1(100)
+// lldb-command:v four_bytes1
+// lldb-check:[...] Variant1(101)
+// lldb-command:v two_bytes1
+// lldb-check:[...] Variant1(102)
+// lldb-command:v one_byte1
+// lldb-check:[...] Variant1('A')
 
-// lldb-command:print eight_bytes2
-// lldb-check:[...]$4 = Variant2(100)
-// lldb-command:print four_bytes2
-// lldb-check:[...]$5 = Variant2(101)
-// lldb-command:print two_bytes2
-// lldb-check:[...]$6 = Variant2(102)
-// lldb-command:print one_byte2
-// lldb-check:[...]$7 = Variant2('A')
+// lldb-command:v eight_bytes2
+// lldb-check:[...] Variant2(100)
+// lldb-command:v four_bytes2
+// lldb-check:[...] Variant2(101)
+// lldb-command:v two_bytes2
+// lldb-check:[...] Variant2(102)
+// lldb-command:v one_byte2
+// lldb-check:[...] Variant2('A')
 
 // lldb-command:continue
 

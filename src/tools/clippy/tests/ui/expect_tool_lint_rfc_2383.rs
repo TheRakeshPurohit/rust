@@ -1,5 +1,3 @@
-// check-pass
-#![feature(lint_reasons)]
 //! This file tests the `#[expect]` attribute implementation for tool lints. The same
 //! file is used to test clippy and rustdoc. Any changes to this file should be synced
 //! to the other test files as well.
@@ -12,6 +10,7 @@
 //! This test can't cover every lint from Clippy, rustdoc and potentially other
 //! tools that will be developed. This therefore only tests a small subset of lints
 #![expect(rustdoc::missing_crate_level_docs)]
+#![allow(clippy::needless_if)]
 
 mod rustc_ok {
     //! See <https://doc.rust-lang.org/rustc/lints/index.html>
@@ -20,12 +19,8 @@ mod rustc_ok {
     pub fn rustc_lints() {
         let x = 42.0;
 
-        #[expect(illegal_floating_point_literal_pattern)]
-        match x {
-            5.0 => {}
-            6.0 => {}
-            _ => {}
-        }
+        #[expect(invalid_nan_comparisons)]
+        let _b = x == f32::NAN;
     }
 }
 
@@ -33,15 +28,14 @@ mod rustc_warn {
     //! See <https://doc.rust-lang.org/rustc/lints/index.html>
 
     #[expect(dead_code)]
+    //~^ ERROR: this lint expectation is unfulfilled
+    //~| NOTE: `-D unfulfilled-lint-expectations` implied by `-D warnings`
     pub fn rustc_lints() {
         let x = 42;
 
-        #[expect(illegal_floating_point_literal_pattern)]
-        match x {
-            5 => {}
-            6 => {}
-            _ => {}
-        }
+        #[expect(invalid_nan_comparisons)]
+        //~^ ERROR: this lint expectation is unfulfilled
+        let _b = x == 5;
     }
 }
 
@@ -111,6 +105,7 @@ mod clippy_warn {
     //! See <https://rust-lang.github.io/rust-clippy/master/index.html>
 
     #[expect(clippy::almost_swapped)]
+    //~^ ERROR: this lint expectation is unfulfilled
     fn foo() {
         let mut a = 0;
         let mut b = 9;
@@ -118,16 +113,19 @@ mod clippy_warn {
     }
 
     #[expect(clippy::bytes_nth)]
+    //~^ ERROR: this lint expectation is unfulfilled
     fn bar() {
         let _ = "Hello".as_bytes().get(3);
     }
 
     #[expect(clippy::if_same_then_else)]
+    //~^ ERROR: this lint expectation is unfulfilled
     fn baz() {
         let _ = if true { 33 } else { 42 };
     }
 
     #[expect(clippy::overly_complex_bool_expr)]
+    //~^ ERROR: this lint expectation is unfulfilled
     fn burger() {
         let a = false;
         let b = true;

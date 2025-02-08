@@ -1,16 +1,4 @@
-// ignore-arm
-// ignore-aarch64
-// ignore-wasm
-// ignore-emscripten
-// ignore-mips
-// ignore-mips64
-// ignore-powerpc
-// ignore-powerpc64
-// ignore-riscv64
-// ignore-s390x
-// ignore-sparc
-// ignore-sparc64
-// ignore-loongarch64
+//@ only-x86_64
 
 #![warn(unused_attributes)]
 
@@ -43,6 +31,7 @@ unsafe fn foo() {}
 #[target_feature(enable = "sse2")]
 //~^ ERROR `#[target_feature(..)]` can only be applied to `unsafe` functions
 //~| NOTE see issue #69098
+//~| NOTE: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
 fn bar() {}
 //~^ NOTE not an `unsafe` function
 
@@ -98,6 +87,8 @@ static A: () = ();
 //~^ ERROR attribute should be applied to a function
 impl Quux for u8 {}
 //~^ NOTE not a function
+//~| NOTE missing `foo` in implementation
+//~| ERROR missing: `foo`
 
 #[target_feature(enable = "sse2")]
 //~^ ERROR attribute should be applied to a function
@@ -105,15 +96,20 @@ impl Foo {}
 //~^ NOTE not a function
 
 trait Quux {
-    fn foo();
+    fn foo(); //~ NOTE `foo` from trait
+    //~^ NOTE: type in trait
 }
 
 impl Quux for Foo {
     #[target_feature(enable = "sse2")]
     //~^ ERROR `#[target_feature(..)]` can only be applied to `unsafe` functions
     //~| NOTE see issue #69098
+    //~| NOTE: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
     fn foo() {}
     //~^ NOTE not an `unsafe` function
+    //~| ERROR: incompatible type for trait
+    //~| NOTE: expected safe fn, found unsafe fn
+    //~| NOTE: expected signature `fn()`
 }
 
 fn main() {

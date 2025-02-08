@@ -1,7 +1,7 @@
 //! This module is responsible for implementing handlers for Language Server
 //! Protocol. This module specifically handles notifications.
 
-use std::ops::Deref;
+use std::ops::{Deref, Not as _};
 
 use itertools::Itertools;
 use lsp_types::{
@@ -9,15 +9,22 @@ use lsp_types::{
     DidChangeWatchedFilesParams, DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DidSaveTextDocumentParams, WorkDoneProgressCancelParams,
 };
+use paths::Utf8PathBuf;
 use triomphe::Arc;
 use vfs::{AbsPathBuf, ChangeKind, VfsPath};
 
 use crate::{
-    config::Config, from_proto, global_state::GlobalState, lsp_ext::RunFlycheckParams,
-    lsp_utils::apply_document_changes, mem_docs::DocumentData, reload, Result,
+    config::{Config, ConfigChange},
+    flycheck::Target,
+    global_state::{FetchWorkspaceRequest, GlobalState},
+    lsp::{from_proto, utils::apply_document_changes},
+    lsp_ext::{self, RunFlycheckParams},
+    mem_docs::DocumentData,
+    reload,
+    target_spec::TargetSpec,
 };
 
-pub(crate) fn handle_cancel(state: &mut GlobalState, params: CancelParams) -> Result<()> {
+pub(crate) fn handle_cancel(state: &mut GlobalState, params: CancelParams) -> anyhow::Result<()> {
     let id: lsp_server::RequestId = match params.id {
         lsp_types::NumberOrString::Number(id) => id.into(),
         lsp_types::NumberOrString::String(id) => id.into(),
@@ -29,10 +36,10 @@ pub(crate) fn handle_cancel(state: &mut GlobalState, params: CancelParams) -> Re
 pub(crate) fn handle_work_done_progress_cancel(
     state: &mut GlobalState,
     params: WorkDoneProgressCancelParams,
-) -> Result<()> {
+) -> anyhow::Result<()> {
     if let lsp_types::NumberOrString::String(s) = &params.token {
         if let Some(id) = s.strip_prefix("rust-analyzer/flycheck/") {
-            if let Ok(id) = u32::from_str_radix(id, 10) {
+            if let Ok(id) = id.parse::<u32>() {
                 if let Some(flycheck) = state.flycheck.get(id as usize) {
                     flycheck.cancel();
                 }
@@ -49,18 +56,32 @@ pub(crate) fn handle_work_done_progress_cancel(
 pub(crate) fn handle_did_open_text_document(
     state: &mut GlobalState,
     params: DidOpenTextDocumentParams,
-) -> Result<()> {
-    let _p = profile::span("handle_did_open_text_document");
+) -> anyhow::Result<()> {
+    let _p = tracing::info_span!("handle_did_open_text_document").entered();
 
     if let Ok(path) = from_proto::vfs_path(&params.text_document.uri) {
         let already_exists = state
             .mem_docs
-            .insert(path.clone(), DocumentData::new(params.text_document.version))
+            .insert(
+                path.clone(),
+                DocumentData::new(
+                    params.text_document.version,
+                    params.text_document.text.clone().into_bytes(),
+                ),
+            )
             .is_err();
         if already_exists {
             tracing::error!("duplicate DidOpenTextDocument: {}", path);
         }
+
         state.vfs.write().0.set_file_contents(path, Some(params.text_document.text.into_bytes()));
+        if state.config.discover_workspace_config().is_some() {
+            tracing::debug!("queuing task");
+            let _ = state
+                .deferred_task_queue
+                .sender
+                .send(crate::main_loop::QueuedTask::CheckIfIndexed(params.text_document.uri));
+        }
     }
     Ok(())
 }
@@ -68,31 +89,28 @@ pub(crate) fn handle_did_open_text_document(
 pub(crate) fn handle_did_change_text_document(
     state: &mut GlobalState,
     params: DidChangeTextDocumentParams,
-) -> Result<()> {
-    let _p = profile::span("handle_did_change_text_document");
+) -> anyhow::Result<()> {
+    let _p = tracing::info_span!("handle_did_change_text_document").entered();
 
     if let Ok(path) = from_proto::vfs_path(&params.text_document.uri) {
-        match state.mem_docs.get_mut(&path) {
-            Some(doc) => {
-                // The version passed in DidChangeTextDocument is the version after all edits are applied
-                // so we should apply it before the vfs is notified.
-                doc.version = params.text_document.version;
-            }
-            None => {
-                tracing::error!("unexpected DidChangeTextDocument: {}", path);
-                return Ok(());
-            }
+        let Some(DocumentData { version, data }) = state.mem_docs.get_mut(&path) else {
+            tracing::error!(?path, "unexpected DidChangeTextDocument");
+            return Ok(());
         };
+        // The version passed in DidChangeTextDocument is the version after all edits are applied
+        // so we should apply it before the vfs is notified.
+        *version = params.text_document.version;
 
-        let vfs = &mut state.vfs.write().0;
-        let file_id = vfs.file_id(&path).unwrap();
-        let text = apply_document_changes(
-            state.config.position_encoding(),
-            || std::str::from_utf8(vfs.file_contents(file_id)).unwrap().into(),
+        let new_contents = apply_document_changes(
+            state.config.negotiated_encoding(),
+            std::str::from_utf8(data).unwrap(),
             params.content_changes,
-        );
-
-        vfs.set_file_contents(path, Some(text.into_bytes()));
+        )
+        .into_bytes();
+        if *data != new_contents {
+            data.clone_from(&new_contents);
+            state.vfs.write().0.set_file_contents(path, Some(new_contents));
+        }
     }
     Ok(())
 }
@@ -100,12 +118,16 @@ pub(crate) fn handle_did_change_text_document(
 pub(crate) fn handle_did_close_text_document(
     state: &mut GlobalState,
     params: DidCloseTextDocumentParams,
-) -> Result<()> {
-    let _p = profile::span("handle_did_close_text_document");
+) -> anyhow::Result<()> {
+    let _p = tracing::info_span!("handle_did_close_text_document").entered();
 
     if let Ok(path) = from_proto::vfs_path(&params.text_document.uri) {
         if state.mem_docs.remove(&path).is_err() {
             tracing::error!("orphan DidCloseTextDocument: {}", path);
+        }
+
+        if let Some(file_id) = state.vfs.read().0.file_id(&path) {
+            state.diagnostics.clear_native_for(file_id);
         }
 
         state.semantic_tokens_cache.lock().remove(&params.text_document.uri);
@@ -120,40 +142,72 @@ pub(crate) fn handle_did_close_text_document(
 pub(crate) fn handle_did_save_text_document(
     state: &mut GlobalState,
     params: DidSaveTextDocumentParams,
-) -> Result<()> {
+) -> anyhow::Result<()> {
     if let Ok(vfs_path) = from_proto::vfs_path(&params.text_document.uri) {
+        let snap = state.snapshot();
+        let file_id = snap.vfs_path_to_file_id(&vfs_path)?;
+        let sr = snap.analysis.source_root_id(file_id)?;
+
+        if state.config.script_rebuild_on_save(Some(sr)) && state.build_deps_changed {
+            state.build_deps_changed = false;
+            state
+                .fetch_build_data_queue
+                .request_op("build_deps_changed - save notification".to_owned(), ());
+        }
+
         // Re-fetch workspaces if a workspace related file has changed
-        if let Some(abs_path) = vfs_path.as_path() {
-            if reload::should_refresh_for_change(abs_path, ChangeKind::Modify) {
-                state
-                    .fetch_workspaces_queue
-                    .request_op(format!("DidSaveTextDocument {}", abs_path.display()), ());
+        if let Some(path) = vfs_path.as_path() {
+            let additional_files = &state
+                .config
+                .discover_workspace_config()
+                .map(|cfg| cfg.files_to_watch.iter().map(String::as_str).collect::<Vec<&str>>())
+                .unwrap_or_default();
+
+            // FIXME: We should move this check into a QueuedTask and do semantic resolution of
+            // the files. There is only so much we can tell syntactically from the path.
+            if reload::should_refresh_for_change(path, ChangeKind::Modify, additional_files) {
+                state.fetch_workspaces_queue.request_op(
+                    format!("workspace vfs file change saved {path}"),
+                    FetchWorkspaceRequest {
+                        path: Some(path.to_owned()),
+                        force_crate_graph_reload: false,
+                    },
+                );
+            } else if state.detached_files.contains(path) {
+                state.fetch_workspaces_queue.request_op(
+                    format!("detached file saved {path}"),
+                    FetchWorkspaceRequest {
+                        path: Some(path.to_owned()),
+                        force_crate_graph_reload: false,
+                    },
+                );
             }
         }
 
-        if !state.config.check_on_save() || run_flycheck(state, vfs_path) {
+        if !state.config.check_on_save(Some(sr)) || run_flycheck(state, vfs_path) {
             return Ok(());
         }
-    } else if state.config.check_on_save() {
+    } else if state.config.check_on_save(None) && state.config.flycheck_workspace(None) {
         // No specific flycheck was triggered, so let's trigger all of them.
         for flycheck in state.flycheck.iter() {
-            flycheck.restart();
+            flycheck.restart_workspace(None);
         }
     }
+
     Ok(())
 }
 
 pub(crate) fn handle_did_change_configuration(
     state: &mut GlobalState,
     _params: DidChangeConfigurationParams,
-) -> Result<()> {
+) -> anyhow::Result<()> {
     // As stated in https://github.com/microsoft/language-server-protocol/issues/676,
     // this notification's parameters should be ignored and the actual config queried separately.
     state.send_request::<lsp_types::request::WorkspaceConfiguration>(
         lsp_types::ConfigurationParams {
             items: vec![lsp_types::ConfigurationItem {
                 scope_uri: None,
-                section: Some("rust-analyzer".to_string()),
+                section: Some("rust-analyzer".to_owned()),
             }],
         },
         |this, resp| {
@@ -166,10 +220,14 @@ pub(crate) fn handle_did_change_configuration(
                 }
                 (None, Some(mut configs)) => {
                     if let Some(json) = configs.get_mut(0) {
-                        // Note that json can be null according to the spec if the client can't
-                        // provide a configuration. This is handled in Config::update below.
-                        let mut config = Config::clone(&*this.config);
-                        this.config_errors = config.update(json.take()).err();
+                        let config = Config::clone(&*this.config);
+                        let mut change = ConfigChange::default();
+                        change.change_client_config(json.take());
+
+                        let (config, e, _) = config.apply_change(change);
+                        this.config_errors = e.is_empty().not().then_some(e);
+
+                        // Client config changes neccesitates .update_config method to be called.
                         this.update_configuration(config);
                     }
                 }
@@ -186,11 +244,12 @@ pub(crate) fn handle_did_change_configuration(
 pub(crate) fn handle_did_change_workspace_folders(
     state: &mut GlobalState,
     params: DidChangeWorkspaceFoldersParams,
-) -> Result<()> {
+) -> anyhow::Result<()> {
     let config = Arc::make_mut(&mut state.config);
 
     for workspace in params.event.removed {
         let Ok(path) = workspace.uri.to_file_path() else { continue };
+        let Ok(path) = Utf8PathBuf::from_path_buf(path) else { continue };
         let Ok(path) = AbsPathBuf::try_from(path) else { continue };
         config.remove_workspace(&path);
     }
@@ -200,12 +259,15 @@ pub(crate) fn handle_did_change_workspace_folders(
         .added
         .into_iter()
         .filter_map(|it| it.uri.to_file_path().ok())
+        .filter_map(|it| Utf8PathBuf::from_path_buf(it).ok())
         .filter_map(|it| AbsPathBuf::try_from(it).ok());
     config.add_workspaces(added);
 
     if !config.has_linked_projects() && config.detached_files().is_empty() {
         config.rediscover_workspaces();
-        state.fetch_workspaces_queue.request_op("client workspaces changed".to_string(), ())
+
+        let req = FetchWorkspaceRequest { path: None, force_crate_graph_reload: false };
+        state.fetch_workspaces_queue.request_op("client workspaces changed".to_owned(), req);
     }
 
     Ok(())
@@ -214,8 +276,8 @@ pub(crate) fn handle_did_change_workspace_folders(
 pub(crate) fn handle_did_change_watched_files(
     state: &mut GlobalState,
     params: DidChangeWatchedFilesParams,
-) -> Result<()> {
-    for change in params.changes {
+) -> anyhow::Result<()> {
+    for change in params.changes.iter().unique_by(|&it| &it.uri) {
         if let Ok(path) = from_proto::abs_path(&change.uri) {
             state.loader.handle.invalidate(path);
         }
@@ -224,25 +286,75 @@ pub(crate) fn handle_did_change_watched_files(
 }
 
 fn run_flycheck(state: &mut GlobalState, vfs_path: VfsPath) -> bool {
-    let _p = profile::span("run_flycheck");
+    let _p = tracing::info_span!("run_flycheck").entered();
 
     let file_id = state.vfs.read().0.file_id(&vfs_path);
     if let Some(file_id) = file_id {
         let world = state.snapshot();
+        let invocation_strategy_once = state.config.flycheck(None).invocation_strategy_once();
+        let may_flycheck_workspace = state.config.flycheck_workspace(None);
         let mut updated = false;
         let task = move || -> std::result::Result<(), ide::Cancelled> {
+            if invocation_strategy_once {
+                let saved_file = vfs_path.as_path().map(|p| p.to_owned());
+                world.flycheck[0].restart_workspace(saved_file.clone());
+            }
+
+            let target = TargetSpec::for_file(&world, file_id)?.and_then(|it| {
+                let tgt_kind = it.target_kind();
+                let (tgt_name, root, package) = match it {
+                    TargetSpec::Cargo(c) => (c.target, c.workspace_root, c.package),
+                    _ => return None,
+                };
+
+                let tgt = match tgt_kind {
+                    project_model::TargetKind::Bin => Target::Bin(tgt_name),
+                    project_model::TargetKind::Example => Target::Example(tgt_name),
+                    project_model::TargetKind::Test => Target::Test(tgt_name),
+                    project_model::TargetKind::Bench => Target::Benchmark(tgt_name),
+                    _ => return Some((None, root, package)),
+                };
+
+                Some((Some(tgt), root, package))
+            });
+            tracing::debug!(?target, "flycheck target");
+            // we have a specific non-library target, attempt to only check that target, nothing
+            // else will be affected
+            if let Some((target, root, package)) = target {
+                // trigger a package check if we have a non-library target as that can't affect
+                // anything else in the workspace OR if we're not allowed to check the workspace as
+                // the user opted into package checks then
+                let package_check_allowed = target.is_some() || !may_flycheck_workspace;
+                if package_check_allowed {
+                    let workspace = world.workspaces.iter().position(|ws| match &ws.kind {
+                        project_model::ProjectWorkspaceKind::Cargo { cargo, .. }
+                        | project_model::ProjectWorkspaceKind::DetachedFile {
+                            cargo: Some((cargo, _, _)),
+                            ..
+                        } => *cargo.workspace_root() == root,
+                        _ => false,
+                    });
+                    if let Some(idx) = workspace {
+                        world.flycheck[idx].restart_for_package(package, target);
+                    }
+                }
+            }
+
+            if !may_flycheck_workspace {
+                return Ok(());
+            }
+
             // Trigger flychecks for all workspaces that depend on the saved file
             // Crates containing or depending on the saved file
-            let crate_ids: Vec<_> = world
+            let crate_ids = world
                 .analysis
                 .crates_for(file_id)?
                 .into_iter()
                 .flat_map(|id| world.analysis.transitive_rev_deps(id))
                 .flatten()
-                .sorted()
                 .unique()
-                .collect();
-
+                .collect::<Vec<_>>();
+            tracing::debug!(?crate_ids, "flycheck crate ids");
             let crate_root_paths: Vec<_> = crate_ids
                 .iter()
                 .filter_map(|&crate_id| {
@@ -256,37 +368,43 @@ fn run_flycheck(state: &mut GlobalState, vfs_path: VfsPath) -> bool {
                 })
                 .collect::<ide::Cancellable<_>>()?;
             let crate_root_paths: Vec<_> = crate_root_paths.iter().map(Deref::deref).collect();
+            tracing::debug!(?crate_root_paths, "flycheck crate roots");
 
             // Find all workspaces that have at least one target containing the saved file
-            let workspace_ids = world.workspaces.iter().enumerate().filter(|(_, ws)| match ws {
-                project_model::ProjectWorkspace::Cargo { cargo, .. } => {
-                    cargo.packages().any(|pkg| {
+            let workspace_ids =
+                world.workspaces.iter().enumerate().filter(|(_, ws)| match &ws.kind {
+                    project_model::ProjectWorkspaceKind::Cargo { cargo, .. }
+                    | project_model::ProjectWorkspaceKind::DetachedFile {
+                        cargo: Some((cargo, _, _)),
+                        ..
+                    } => cargo.packages().any(|pkg| {
                         cargo[pkg]
                             .targets
                             .iter()
                             .any(|&it| crate_root_paths.contains(&cargo[it].root.as_path()))
-                    })
-                }
-                project_model::ProjectWorkspace::Json { project, .. } => {
-                    project.crates().any(|(c, _)| crate_ids.iter().any(|&crate_id| crate_id == c))
-                }
-                project_model::ProjectWorkspace::DetachedFiles { .. } => false,
-            });
+                    }),
+                    project_model::ProjectWorkspaceKind::Json(project) => project
+                        .crates()
+                        .any(|(_, krate)| crate_root_paths.contains(&krate.root_module.as_path())),
+                    project_model::ProjectWorkspaceKind::DetachedFile { .. } => false,
+                });
+
+            let saved_file = vfs_path.as_path().map(|p| p.to_owned());
 
             // Find and trigger corresponding flychecks
-            for flycheck in world.flycheck.iter() {
+            'flychecks: for flycheck in world.flycheck.iter() {
                 for (id, _) in workspace_ids.clone() {
                     if id == flycheck.id() {
                         updated = true;
-                        flycheck.restart();
-                        continue;
+                        flycheck.restart_workspace(saved_file.clone());
+                        continue 'flychecks;
                     }
                 }
             }
             // No specific flycheck was triggered, so let's trigger all of them.
             if !updated {
                 for flycheck in world.flycheck.iter() {
-                    flycheck.restart();
+                    flycheck.restart_workspace(saved_file.clone());
                 }
             }
             Ok(())
@@ -302,14 +420,14 @@ fn run_flycheck(state: &mut GlobalState, vfs_path: VfsPath) -> bool {
     }
 }
 
-pub(crate) fn handle_cancel_flycheck(state: &mut GlobalState, _: ()) -> Result<()> {
-    let _p = profile::span("handle_stop_flycheck");
+pub(crate) fn handle_cancel_flycheck(state: &mut GlobalState, _: ()) -> anyhow::Result<()> {
+    let _p = tracing::info_span!("handle_cancel_flycheck").entered();
     state.flycheck.iter().for_each(|flycheck| flycheck.cancel());
     Ok(())
 }
 
-pub(crate) fn handle_clear_flycheck(state: &mut GlobalState, _: ()) -> Result<()> {
-    let _p = profile::span("handle_clear_flycheck");
+pub(crate) fn handle_clear_flycheck(state: &mut GlobalState, _: ()) -> anyhow::Result<()> {
+    let _p = tracing::info_span!("handle_clear_flycheck").entered();
     state.diagnostics.clear_check_all();
     Ok(())
 }
@@ -317,8 +435,8 @@ pub(crate) fn handle_clear_flycheck(state: &mut GlobalState, _: ()) -> Result<()
 pub(crate) fn handle_run_flycheck(
     state: &mut GlobalState,
     params: RunFlycheckParams,
-) -> Result<()> {
-    let _p = profile::span("handle_run_flycheck");
+) -> anyhow::Result<()> {
+    let _p = tracing::info_span!("handle_run_flycheck").entered();
     if let Some(text_document) = params.text_document {
         if let Ok(vfs_path) = from_proto::vfs_path(&text_document.uri) {
             if run_flycheck(state, vfs_path) {
@@ -327,8 +445,17 @@ pub(crate) fn handle_run_flycheck(
         }
     }
     // No specific flycheck was triggered, so let's trigger all of them.
-    for flycheck in state.flycheck.iter() {
-        flycheck.restart();
+    if state.config.flycheck_workspace(None) {
+        for flycheck in state.flycheck.iter() {
+            flycheck.restart_workspace(None);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn handle_abort_run_test(state: &mut GlobalState, _: ()) -> anyhow::Result<()> {
+    if state.test_run_session.take().is_some() {
+        state.send_notification::<lsp_ext::EndRunTest>(());
     }
     Ok(())
 }

@@ -1,7 +1,4 @@
-// run-pass
-#![feature(rustc_private)]
-
-extern crate libc;
+//@ run-pass
 
 #[cfg(windows)]
 mod imp {

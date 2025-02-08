@@ -5,50 +5,53 @@
 mod matcher;
 mod transcriber;
 
+use intern::Symbol;
 use rustc_hash::FxHashMap;
-use syntax::SmolStr;
+use span::{Edition, Span};
 
-use crate::{parser::MetaVarKind, tt, ExpandError, ExpandResult};
+use crate::{parser::MetaVarKind, ExpandError, ExpandErrorKind, ExpandResult, MatchedArmIndex};
 
 pub(crate) fn expand_rules(
     rules: &[crate::Rule],
-    input: &tt::Subtree,
-    is_2021: bool,
-) -> ExpandResult<tt::Subtree> {
-    let mut match_: Option<(matcher::Match, &crate::Rule)> = None;
-    for rule in rules {
-        let new_match = matcher::match_(&rule.lhs, input, is_2021);
+    input: &tt::TopSubtree<Span>,
+    marker: impl Fn(&mut Span) + Copy,
+    call_site: Span,
+    def_site_edition: Edition,
+) -> ExpandResult<(tt::TopSubtree<Span>, MatchedArmIndex)> {
+    let mut match_: Option<(matcher::Match<'_>, &crate::Rule, usize)> = None;
+    for (idx, rule) in rules.iter().enumerate() {
+        let new_match = matcher::match_(&rule.lhs, input, def_site_edition);
 
         if new_match.err.is_none() {
             // If we find a rule that applies without errors, we're done.
             // Unconditionally returning the transcription here makes the
             // `test_repeat_bad_var` test fail.
             let ExpandResult { value, err: transcribe_err } =
-                transcriber::transcribe(&rule.rhs, &new_match.bindings);
+                transcriber::transcribe(&rule.rhs, &new_match.bindings, marker, call_site);
             if transcribe_err.is_none() {
-                return ExpandResult::ok(value);
+                return ExpandResult::ok((value, Some(idx as u32)));
             }
         }
         // Use the rule if we matched more tokens, or bound variables count
-        if let Some((prev_match, _)) = &match_ {
+        if let Some((prev_match, _, _)) = &match_ {
             if (new_match.unmatched_tts, -(new_match.bound_count as i32))
                 < (prev_match.unmatched_tts, -(prev_match.bound_count as i32))
             {
-                match_ = Some((new_match, rule));
+                match_ = Some((new_match, rule, idx));
             }
         } else {
-            match_ = Some((new_match, rule));
+            match_ = Some((new_match, rule, idx));
         }
     }
-    if let Some((match_, rule)) = match_ {
+    if let Some((match_, rule, idx)) = match_ {
         // if we got here, there was no match without errors
         let ExpandResult { value, err: transcribe_err } =
-            transcriber::transcribe(&rule.rhs, &match_.bindings);
-        ExpandResult { value, err: match_.err.or(transcribe_err) }
+            transcriber::transcribe(&rule.rhs, &match_.bindings, marker, call_site);
+        ExpandResult { value: (value, idx.try_into().ok()), err: match_.err.or(transcribe_err) }
     } else {
         ExpandResult::new(
-            tt::Subtree { delimiter: tt::Delimiter::unspecified(), token_trees: vec![] },
-            ExpandError::NoMatchingRule,
+            (tt::TopSubtree::empty(tt::DelimSpan::from_single(call_site)), None),
+            ExpandError::new(call_site, ExpandErrorKind::NoMatchingRule),
         )
     }
 }
@@ -95,32 +98,59 @@ pub(crate) fn expand_rules(
 /// the `Bindings` we should take. We push to the stack when we enter a
 /// repetition.
 ///
-/// In other words, `Bindings` is a *multi* mapping from `SmolStr` to
+/// In other words, `Bindings` is a *multi* mapping from `Symbol` to
 /// `tt::TokenTree`, where the index to select a particular `TokenTree` among
 /// many is not a plain `usize`, but a `&[usize]`.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct Bindings {
-    inner: FxHashMap<SmolStr, Binding>,
+#[derive(Debug, Default, Clone)]
+struct Bindings<'a> {
+    inner: FxHashMap<Symbol, Binding<'a>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Binding {
-    Fragment(Fragment),
-    Nested(Vec<Binding>),
+#[derive(Debug, Clone)]
+enum Binding<'a> {
+    Fragment(Fragment<'a>),
+    Nested(Vec<Binding<'a>>),
     Empty,
     Missing(MetaVarKind),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Fragment {
+#[derive(Debug, Default, Clone)]
+enum Fragment<'a> {
+    #[default]
+    Empty,
     /// token fragments are just copy-pasted into the output
-    Tokens(tt::TokenTree),
-    /// Expr ast fragments are surrounded with `()` on insertion to preserve
-    /// precedence. Note that this impl is different from the one currently in
-    /// `rustc` -- `rustc` doesn't translate fragments into token trees at all.
+    Tokens(tt::TokenTreesView<'a, Span>),
+    /// Expr ast fragments are surrounded with `()` on transcription to preserve precedence.
+    /// Note that this impl is different from the one currently in `rustc` --
+    /// `rustc` doesn't translate fragments into token trees at all.
     ///
-    /// At one point in time, we tried to to use "fake" delimiters here a-la
+    /// At one point in time, we tried to use "fake" delimiters here à la
     /// proc-macro delimiter=none. As we later discovered, "none" delimiters are
     /// tricky to handle in the parser, and rustc doesn't handle those either.
-    Expr(tt::TokenTree),
+    ///
+    /// The span of the outer delimiters is marked on transcription.
+    Expr(tt::TokenTreesView<'a, Span>),
+    /// There are roughly two types of paths: paths in expression context, where a
+    /// separator `::` between an identifier and its following generic argument list
+    /// is mandatory, and paths in type context, where `::` can be omitted.
+    ///
+    /// Unlike rustc, we need to transform the parsed fragments back into tokens
+    /// during transcription. When the matched path fragment is a type-context path
+    /// and is trasncribed as an expression-context path, verbatim transcription
+    /// would cause a syntax error. We need to fix it up just before transcribing;
+    /// see `transcriber::fix_up_and_push_path_tt()`.
+    Path(tt::TokenTreesView<'a, Span>),
+    TokensOwned(tt::TopSubtree<Span>),
+}
+
+impl Fragment<'_> {
+    fn is_empty(&self) -> bool {
+        match self {
+            Fragment::Empty => true,
+            Fragment::Tokens(it) => it.len() == 0,
+            Fragment::Expr(it) => it.len() == 0,
+            Fragment::Path(it) => it.len() == 0,
+            Fragment::TokensOwned(it) => it.0.is_empty(),
+        }
+    }
 }

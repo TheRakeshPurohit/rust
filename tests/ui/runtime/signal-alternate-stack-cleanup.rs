@@ -1,13 +1,13 @@
-// run-pass
+//@ run-pass
 // Previously memory for alternate signal stack have been unmapped during
 // main thread exit while still being in use by signal handlers. This test
 // triggers this situation by sending signal from atexit handler.
 //
-// ignore-wasm32-bare no libc
-// ignore-windows
-// ignore-sgx no libc
-// ignore-vxworks no SIGWINCH in user space
-// ignore-nto no SA_ONSTACK
+//@ ignore-wasm32 no signals
+//@ ignore-windows
+//@ ignore-sgx no libc
+//@ ignore-vxworks no SIGWINCH in user space
+//@ ignore-nto no SA_ONSTACK
 
 #![feature(rustc_private)]
 extern crate libc;
@@ -29,7 +29,14 @@ fn main() {
         // Install signal handler that runs on alternate signal stack.
         let mut action: sigaction = std::mem::zeroed();
         action.sa_flags = (SA_ONSTACK | SA_SIGINFO) as _;
-        action.sa_sigaction = signal_handler as sighandler_t;
+        #[cfg(not(target_os = "aix"))]
+        {
+            action.sa_sigaction = signal_handler as sighandler_t;
+        }
+        #[cfg(target_os = "aix")]
+        {
+            action.sa_union.__su_sigaction = signal_handler as sighandler_t;
+        }
         sigaction(SIGWINCH, &action, std::ptr::null_mut());
 
         // Send SIGWINCH on exit.

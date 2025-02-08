@@ -1,4 +1,4 @@
-// run-pass
+//@ run-pass
 // We disable tail merging here because it can't preserve debuginfo and thus
 // potentially breaks the backtraces. Also, subtle changes can decide whether
 // tail merging succeeds, so the test might work today but fail tomorrow due to a
@@ -6,12 +6,15 @@
 // Unfortunately, LLVM has no "disable" option for this, so we have to set
 // "enable" to 0 instead.
 
-// compile-flags:-g -Copt-level=0 -Cllvm-args=-enable-tail-merge=0
-// compile-flags:-Cforce-frame-pointers=yes
-// compile-flags:-Cstrip=none
-// ignore-emscripten spawning processes is not supported
-// ignore-sgx no processes
-// ignore-fuchsia Backtrace not symbolized, trace different line alignment
+//@ compile-flags:-g -Copt-level=0 -Cllvm-args=-enable-tail-merge=0
+//@ compile-flags:-Cforce-frame-pointers=yes
+//@ compile-flags:-Cstrip=none
+//@ needs-subprocess
+//@ ignore-fuchsia Backtrace not symbolized, trace different line alignment
+
+// FIXME(#117097): backtrace (possibly unwinding mechanism) seems to be different on at least
+// `i686-mingw` (32-bit windows-gnu)? cc #128911.
+//@ ignore-windows-gnu
 
 use std::env;
 

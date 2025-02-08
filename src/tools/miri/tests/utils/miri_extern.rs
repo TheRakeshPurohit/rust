@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 #[repr(C)]
 /// Layout of the return value of `miri_resolve_frame`,
 /// with fields in the exact same order.
@@ -58,14 +56,14 @@ extern "Rust" {
     ///
     /// This is internal and unstable and should not be used; we give it here
     /// just to be complete.
-    pub fn miri_start_panic(payload: *mut u8) -> !;
+    pub fn miri_start_unwind(payload: *mut u8) -> !;
 
     /// Miri-provided extern function to get the internal unique identifier for the allocation that a pointer
     /// points to. If this pointer is invalid (not pointing to an allocation), interpretation will abort.
     ///
     /// This is only useful as an input to `miri_print_borrow_stacks`, and it is a separate call because
     /// getting a pointer to an allocation at runtime can change the borrow stacks in the allocation.
-    /// This function should be considered unstable. It exists only to support `miri_print_borrow_stacks` and so
+    /// This function should be considered unstable. It exists only to support `miri_print_borrow_state` and so
     /// inherits all of its instability.
     pub fn miri_get_alloc_id(ptr: *const ()) -> u64;
 
@@ -86,7 +84,7 @@ extern "Rust" {
     ///
     /// The format of what this emits is unstable and may change at any time. In particular, users should be
     /// aware that Miri will periodically attempt to garbage collect the contents of all stacks. Callers of
-    /// this function may wish to pass `-Zmiri-tag-gc=0` to disable the GC.
+    /// this function may wish to pass `-Zmiri-provenance-gc=0` to disable the GC.
     ///
     /// This function is extremely unstable. At any time the format of its output may change, its signature may
     /// change, or it may be removed entirely.
@@ -135,8 +133,18 @@ extern "Rust" {
     /// with a null terminator.
     /// Returns 0 if the `out` buffer was large enough, and the required size otherwise.
     pub fn miri_host_to_target_path(
-        path: *const std::ffi::c_char,
-        out: *mut std::ffi::c_char,
+        path: *const core::ffi::c_char,
+        out: *mut core::ffi::c_char,
         out_size: usize,
     ) -> usize;
+
+    /// Run the provenance GC. The GC will run automatically at some cadence,
+    /// but in tests we want to for sure run it at certain points to check
+    /// that it doesn't break anything.
+    pub fn miri_run_provenance_gc();
+
+    /// Miri-provided extern function to promise that a given pointer is properly aligned for
+    /// "symbolic" alignment checks. Will fail if the pointer is not actually aligned or `align` is
+    /// not a power of two. Has no effect when alignment checks are concrete (which is the default).
+    pub fn miri_promise_symbolic_alignment(ptr: *const (), align: usize);
 }

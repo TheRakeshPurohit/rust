@@ -1,10 +1,10 @@
-// run-pass
+//@ run-pass
 #![feature(core_intrinsics)]
 #![feature(const_heap)]
-#![feature(const_mut_refs)]
 use std::intrinsics;
 
 const FOO: &i32 = foo();
+const FOO_RAW: *const i32 = foo();
 
 const fn foo() -> &'static i32 {
     let t = unsafe {
@@ -15,5 +15,6 @@ const fn foo() -> &'static i32 {
     unsafe { &*t }
 }
 fn main() {
-    assert_eq!(*FOO, 20)
+    assert_eq!(*FOO, 20);
+    assert_eq!(unsafe { *FOO_RAW }, 20);
 }

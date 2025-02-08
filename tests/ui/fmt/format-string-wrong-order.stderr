@@ -22,7 +22,7 @@ LL |     format!("{?:?}", bar);
    |
    = note: `?` comes after `:`, try `:?` instead
 
-error: invalid format string: expected `'}'`, found `'?'`
+error: invalid format string: expected `}`, found `?`
   --> $DIR/format-string-wrong-order.rs:9:15
    |
 LL |     format!("{??}", bar);
@@ -32,7 +32,7 @@ LL |     format!("{??}", bar);
    |
    = note: if you intended to print `{`, you can escape it using `{{`
 
-error: invalid format string: expected `'}'`, found `'?'`
+error: invalid format string: expected `}`, found `?`
   --> $DIR/format-string-wrong-order.rs:11:15
    |
 LL |     format!("{?;bar}");
@@ -50,5 +50,23 @@ LL |     format!("{?:#?}", bar);
    |
    = note: `?` comes after `:`, try `:?` instead
 
-error: aborting due to 6 previous errors
+error: invalid format string: expected format parameter to occur after `:`
+  --> $DIR/format-string-wrong-order.rs:15:21
+   |
+LL |     format!("Hello {<5:}!", "x");
+   |                     ^ expected `<` to occur after `:` in format string
+
+error: invalid format string: expected format parameter to occur after `:`
+  --> $DIR/format-string-wrong-order.rs:17:21
+   |
+LL |     format!("Hello {^5:}!", "x");
+   |                     ^ expected `^` to occur after `:` in format string
+
+error: invalid format string: expected format parameter to occur after `:`
+  --> $DIR/format-string-wrong-order.rs:19:21
+   |
+LL |     format!("Hello {>5:}!", "x");
+   |                     ^ expected `>` to occur after `:` in format string
+
+error: aborting due to 9 previous errors
 

@@ -1,8 +1,5 @@
-// run-pass
+//@ run-pass
 #![allow(unused_variables)]
-// pretty-expanded FIXME #23616
-
-use std::default::Default;
 
 struct X { pub x: usize }
 impl Default for X {

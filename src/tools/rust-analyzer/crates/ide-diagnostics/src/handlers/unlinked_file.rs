@@ -3,18 +3,19 @@
 use std::iter;
 
 use hir::{db::DefDatabase, DefMap, InFile, ModuleSource};
+use ide_db::text_edit::TextEdit;
 use ide_db::{
-    base_db::{FileId, FileLoader, SourceDatabase, SourceDatabaseExt},
+    base_db::{FileLoader, SourceDatabase, SourceRootDatabase},
     source_change::SourceChange,
-    RootDatabase,
+    FileId, FileRange, LineIndexDatabase,
 };
+use paths::Utf8Component;
 use syntax::{
     ast::{self, edit::IndentLevel, HasModuleItem, HasName},
     AstNode, TextRange,
 };
-use text_edit::TextEdit;
 
-use crate::{fix, Assist, Diagnostic, DiagnosticsContext, Severity};
+use crate::{fix, Assist, Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 
 // Diagnostic: unlinked-file
 //
@@ -25,34 +26,55 @@ pub(crate) fn unlinked_file(
     acc: &mut Vec<Diagnostic>,
     file_id: FileId,
 ) {
-    // Limit diagnostic to the first few characters in the file. This matches how VS Code
-    // renders it with the full span, but on other editors, and is less invasive.
-    let fixes = fixes(ctx, file_id);
+    let mut range = TextRange::up_to(ctx.sema.db.line_index(file_id).len());
+    let fixes = fixes(ctx, file_id, range);
     // FIXME: This is a hack for the vscode extension to notice whether there is an autofix or not before having to resolve diagnostics.
     // This is to prevent project linking popups from appearing when there is an autofix. https://github.com/rust-lang/rust-analyzer/issues/14523
     let message = if fixes.is_none() {
-        "file not included in crate hierarchy"
+        "This file is not included in any crates, so rust-analyzer can't offer IDE services."
     } else {
-        "file not included in module tree"
+        "This file is not included anywhere in the module tree, so rust-analyzer can't offer IDE services."
     };
 
-    let range = ctx.sema.db.parse(file_id).syntax_node().text_range();
-    let range = FileLoader::file_text(ctx.sema.db, file_id)
-        .char_indices()
-        .take(3)
-        .last()
-        .map(|(i, _)| i)
-        .map(|i| TextRange::up_to(i.try_into().unwrap()))
-        .unwrap_or(range);
+    let message = format!("{message}\n\nIf you're intentionally working on unowned files, you can silence this warning by adding \"unlinked-file\" to rust-analyzer.diagnostics.disabled in your settings.");
+
+    let mut unused = true;
+
+    if fixes.is_none() {
+        // If we don't have a fix, the unlinked-file diagnostic is not
+        // actionable. This generally means that rust-analyzer hasn't
+        // finished startup, or we couldn't find the Cargo.toml.
+        //
+        // Only show this diagnostic on the first three characters of
+        // the file, to avoid overwhelming the user during startup.
+        range = SourceDatabase::file_text(ctx.sema.db, file_id)
+            .char_indices()
+            .take(3)
+            .last()
+            .map(|(i, _)| i)
+            .map(|i| TextRange::up_to(i.try_into().unwrap()))
+            .unwrap_or(range);
+        // Prefer a diagnostic underline over graying out the text,
+        // since we're only highlighting a small region.
+        unused = false;
+    }
 
     acc.push(
-        Diagnostic::new("unlinked-file", message, range)
-            .severity(Severity::WeakWarning)
-            .with_fixes(fixes),
+        Diagnostic::new(
+            DiagnosticCode::Ra("unlinked-file", Severity::WeakWarning),
+            message,
+            FileRange { file_id, range },
+        )
+        .with_unused(unused)
+        .with_fixes(fixes),
     );
 }
 
-fn fixes(ctx: &DiagnosticsContext<'_>, file_id: FileId) -> Option<Vec<Assist>> {
+fn fixes(
+    ctx: &DiagnosticsContext<'_>,
+    file_id: FileId,
+    trigger_range: TextRange,
+) -> Option<Vec<Assist>> {
     // If there's an existing module that could add `mod` or `pub mod` items to include the unlinked file,
     // suggest that as a fix.
 
@@ -76,19 +98,21 @@ fn fixes(ctx: &DiagnosticsContext<'_>, file_id: FileId) -> Option<Vec<Assist>> {
 
         let root_module = &crate_def_map[DefMap::ROOT];
         let Some(root_file_id) = root_module.origin.file_id() else { continue };
-        let Some(crate_root_path) = source_root.path_for_file(&root_file_id) else { continue };
+        let Some(crate_root_path) = source_root.path_for_file(&root_file_id.file_id()) else {
+            continue;
+        };
         let Some(rel) = parent.strip_prefix(&crate_root_path.parent()?) else { continue };
 
         // try resolving the relative difference of the paths as inline modules
         let mut current = root_module;
-        for ele in rel.as_ref().components() {
+        for ele in rel.as_utf8_path().components() {
             let seg = match ele {
-                std::path::Component::Normal(seg) => seg.to_str()?,
-                std::path::Component::RootDir => continue,
+                Utf8Component::Normal(seg) => seg,
+                Utf8Component::RootDir => continue,
                 // shouldn't occur
                 _ => continue 'crates,
             };
-            match current.children.iter().find(|(name, _)| name.to_smol_str() == seg) {
+            match current.children.iter().find(|(name, _)| name.as_str() == seg) {
                 Some((_, &child)) => current = &crate_def_map[child],
                 None => continue 'crates,
             }
@@ -100,7 +124,7 @@ fn fixes(ctx: &DiagnosticsContext<'_>, file_id: FileId) -> Option<Vec<Assist>> {
         let InFile { file_id: parent_file_id, value: source } =
             current.definition_source(ctx.sema.db);
         let parent_file_id = parent_file_id.file_id()?;
-        return make_fixes(ctx.sema.db, parent_file_id, source, &module_name, file_id);
+        return make_fixes(parent_file_id.file_id(), source, &module_name, trigger_range);
     }
 
     // if we aren't adding to a crate root, walk backwards such that we support `#[path = ...]` overrides if possible
@@ -119,25 +143,25 @@ fn fixes(ctx: &DiagnosticsContext<'_>, file_id: FileId) -> Option<Vec<Assist>> {
     stack.pop();
     'crates: for &krate in ctx.sema.db.relevant_crates(parent_id).iter() {
         let crate_def_map = ctx.sema.db.crate_def_map(krate);
-        let Some((_, module)) =
-            crate_def_map.modules()
-            .find(|(_, module)| module.origin.file_id() == Some(parent_id) && !module.origin.is_inline())
-        else { continue };
+        let Some((_, module)) = crate_def_map.modules().find(|(_, module)| {
+            module.origin.file_id().map(Into::into) == Some(parent_id) && !module.origin.is_inline()
+        }) else {
+            continue;
+        };
 
         if stack.is_empty() {
             return make_fixes(
-                ctx.sema.db,
                 parent_id,
                 module.definition_source(ctx.sema.db).value,
                 &module_name,
-                file_id,
+                trigger_range,
             );
         } else {
             // direct parent file is missing,
             // try finding a parent that has an inline tree from here on
             let mut current = module;
             for s in stack.iter().rev() {
-                match module.children.iter().find(|(name, _)| name.to_smol_str() == s) {
+                match module.children.iter().find(|(name, _)| name.as_str() == s) {
                     Some((_, child)) => {
                         current = &crate_def_map[*child];
                     }
@@ -150,7 +174,7 @@ fn fixes(ctx: &DiagnosticsContext<'_>, file_id: FileId) -> Option<Vec<Assist>> {
             let InFile { file_id: parent_file_id, value: source } =
                 current.definition_source(ctx.sema.db);
             let parent_file_id = parent_file_id.file_id()?;
-            return make_fixes(ctx.sema.db, parent_file_id, source, &module_name, file_id);
+            return make_fixes(parent_file_id.file_id(), source, &module_name, trigger_range);
         }
     }
 
@@ -158,11 +182,10 @@ fn fixes(ctx: &DiagnosticsContext<'_>, file_id: FileId) -> Option<Vec<Assist>> {
 }
 
 fn make_fixes(
-    db: &RootDatabase,
     parent_file_id: FileId,
     source: ModuleSource,
     new_mod_name: &str,
-    added_file_id: FileId,
+    trigger_range: TextRange,
 ) -> Option<Vec<Assist>> {
     fn is_outline_mod(item: &ast::Item) -> bool {
         matches!(item, ast::Item::Module(m) if m.item_list().is_none())
@@ -233,7 +256,6 @@ fn make_fixes(
         }
     }
 
-    let trigger_range = db.parse(added_file_id).tree().syntax().text_range();
     Some(vec![
         fix(
             "add_mod_declaration",
@@ -472,6 +494,18 @@ $0
 mod bar {
     mod foo;
 }
+"#,
+        );
+    }
+
+    #[test]
+    fn include_macro_works() {
+        check_diagnostics(
+            r#"
+//- minicore: include
+//- /main.rs
+include!("bar/foo/mod.rs");
+//- /bar/foo/mod.rs
 "#,
         );
     }

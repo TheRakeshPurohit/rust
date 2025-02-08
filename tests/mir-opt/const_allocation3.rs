@@ -1,12 +1,13 @@
-// unit-test: ConstProp
-// ignore-endian-big
+// skip-filecheck
+//@ test-mir-pass: GVN
+//@ ignore-endian-big
 // EMIT_MIR_FOR_EACH_BIT_WIDTH
-// EMIT_MIR const_allocation3.main.ConstProp.after.mir
+// EMIT_MIR const_allocation3.main.GVN.after.mir
 fn main() {
     FOO;
 }
 
-#[repr(packed)]
+#[repr(C, packed)]
 struct Packed {
     a: [u8; 28],
     b: &'static i32,

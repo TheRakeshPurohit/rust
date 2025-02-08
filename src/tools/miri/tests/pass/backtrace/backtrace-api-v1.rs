@@ -32,7 +32,7 @@ fn func_d() -> Box<[*mut ()]> {
 fn main() {
     let mut seen_main = false;
     let frames = func_a();
-    for frame in frames.into_iter() {
+    for frame in frames.iter() {
         let miri_frame = unsafe { miri_resolve_frame(*frame, 1) };
 
         let mut name = vec![0; miri_frame.name_len];
@@ -54,6 +54,8 @@ fn main() {
         eprintln!("{}", out);
         // Print the 'main' frame (and everything before it) to stdout, skipping
         // the printing of internal (and possibly fragile) libstd frames.
+        // Stdout is less normalized so we see more, but it also means we can print less
+        // as platform differences would lead to test suite failures.
         if !seen_main {
             println!("{}", out);
             seen_main = name == "main";

@@ -1,4 +1,4 @@
-// compile-flags: --crate-type lib
+//@ compile-flags: --crate-type lib
 #![deny(missing_debug_implementations)]
 #![allow(unused)]
 
@@ -35,4 +35,4 @@ struct PrivateStruct;
 enum PrivateEnum {}
 
 #[derive(Debug)]
-struct GenericType<T>(T);
+pub struct GenericType<T>(T);

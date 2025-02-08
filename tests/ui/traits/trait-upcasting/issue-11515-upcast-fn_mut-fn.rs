@@ -1,5 +1,4 @@
-// run-pass
-#![feature(trait_upcasting)]
+//@ run-pass
 
 struct Test {
     func: Box<dyn FnMut() + 'static>,

@@ -5,44 +5,36 @@ use chalk_ir::{
     visit::{TypeSuperVisitable, TypeVisitable, TypeVisitor},
     DebruijnIndex,
 };
-use hir_def::{
-    attr::Attrs, data::adt::VariantData, visibility::Visibility, AdtId, EnumVariantId, HasModule,
-    Lookup, ModuleId, VariantId,
-};
+use hir_def::{visibility::Visibility, AdtId, EnumVariantId, ModuleId, VariantId};
 use rustc_hash::FxHashSet;
 
 use crate::{
     consteval::try_const_usize, db::HirDatabase, Binders, Interner, Substitution, Ty, TyKind,
 };
 
+// FIXME: Turn this into a query, it can be quite slow
 /// Checks whether a type is visibly uninhabited from a particular module.
-pub(crate) fn is_ty_uninhabited_from(ty: &Ty, target_mod: ModuleId, db: &dyn HirDatabase) -> bool {
+pub(crate) fn is_ty_uninhabited_from(db: &dyn HirDatabase, ty: &Ty, target_mod: ModuleId) -> bool {
+    let _p = tracing::info_span!("is_ty_uninhabited_from", ?ty).entered();
     let mut uninhabited_from =
         UninhabitedFrom { target_mod, db, max_depth: 500, recursive_ty: FxHashSet::default() };
     let inhabitedness = ty.visit_with(&mut uninhabited_from, DebruijnIndex::INNERMOST);
     inhabitedness == BREAK_VISIBLY_UNINHABITED
 }
 
+// FIXME: Turn this into a query, it can be quite slow
 /// Checks whether a variant is visibly uninhabited from a particular module.
 pub(crate) fn is_enum_variant_uninhabited_from(
+    db: &dyn HirDatabase,
     variant: EnumVariantId,
     subst: &Substitution,
     target_mod: ModuleId,
-    db: &dyn HirDatabase,
 ) -> bool {
-    let enum_data = db.enum_data(variant.parent);
-    let vars_attrs = db.variants_attrs(variant.parent);
-    let is_local = variant.parent.lookup(db.upcast()).container.krate() == target_mod.krate();
+    let _p = tracing::info_span!("is_enum_variant_uninhabited_from").entered();
 
     let mut uninhabited_from =
         UninhabitedFrom { target_mod, db, max_depth: 500, recursive_ty: FxHashSet::default() };
-    let inhabitedness = uninhabited_from.visit_variant(
-        variant.into(),
-        &enum_data.variants[variant.local_id].variant_data,
-        subst,
-        &vars_attrs[variant.local_id],
-        is_local,
-    );
+    let inhabitedness = uninhabited_from.visit_variant(variant.into(), subst);
     inhabitedness == BREAK_VISIBLY_UNINHABITED
 }
 
@@ -86,8 +78,7 @@ impl TypeVisitor<Interner> for UninhabitedFrom<'_> {
                 Some(0) | None => CONTINUE_OPAQUELY_INHABITED,
                 Some(1..) => item_ty.super_visit_with(self, outer_binder),
             },
-
-            TyKind::Ref(..) | _ => CONTINUE_OPAQUELY_INHABITED,
+            _ => CONTINUE_OPAQUELY_INHABITED,
         };
         self.recursive_ty.remove(ty);
         self.max_depth += 1;
@@ -101,35 +92,18 @@ impl TypeVisitor<Interner> for UninhabitedFrom<'_> {
 
 impl UninhabitedFrom<'_> {
     fn visit_adt(&mut self, adt: AdtId, subst: &Substitution) -> ControlFlow<VisiblyUninhabited> {
-        let attrs = self.db.attrs(adt.into());
-        let adt_non_exhaustive = attrs.by_key("non_exhaustive").exists();
-        let is_local = adt.module(self.db.upcast()).krate() == self.target_mod.krate();
-        if adt_non_exhaustive && !is_local {
-            return CONTINUE_OPAQUELY_INHABITED;
-        }
-
         // An ADT is uninhabited iff all its variants uninhabited.
         match adt {
             // rustc: For now, `union`s are never considered uninhabited.
             AdtId::UnionId(_) => CONTINUE_OPAQUELY_INHABITED,
-            AdtId::StructId(s) => {
-                let struct_data = self.db.struct_data(s);
-                self.visit_variant(s.into(), &struct_data.variant_data, subst, &attrs, is_local)
-            }
+            AdtId::StructId(s) => self.visit_variant(s.into(), subst),
             AdtId::EnumId(e) => {
-                let vars_attrs = self.db.variants_attrs(e);
                 let enum_data = self.db.enum_data(e);
 
-                for (local_id, enum_var) in enum_data.variants.iter() {
-                    let variant_inhabitedness = self.visit_variant(
-                        EnumVariantId { parent: e, local_id }.into(),
-                        &enum_var.variant_data,
-                        subst,
-                        &vars_attrs[local_id],
-                        is_local,
-                    );
+                for &(variant, _) in enum_data.variants.iter() {
+                    let variant_inhabitedness = self.visit_variant(variant.into(), subst);
                     match variant_inhabitedness {
-                        Break(VisiblyUninhabited) => continue,
+                        Break(VisiblyUninhabited) => (),
                         Continue(()) => return CONTINUE_OPAQUELY_INHABITED,
                     }
                 }
@@ -141,34 +115,31 @@ impl UninhabitedFrom<'_> {
     fn visit_variant(
         &mut self,
         variant: VariantId,
-        variant_data: &VariantData,
         subst: &Substitution,
-        attrs: &Attrs,
-        is_local: bool,
     ) -> ControlFlow<VisiblyUninhabited> {
-        let non_exhaustive_field_list = attrs.by_key("non_exhaustive").exists();
-        if non_exhaustive_field_list && !is_local {
+        let variant_data = self.db.variant_data(variant);
+        let fields = variant_data.fields();
+        if fields.is_empty() {
             return CONTINUE_OPAQUELY_INHABITED;
         }
 
         let is_enum = matches!(variant, VariantId::EnumVariantId(..));
         let field_tys = self.db.field_types(variant);
-        let field_vis = self.db.field_visibilities(variant);
+        let field_vis = if is_enum { None } else { Some(self.db.field_visibilities(variant)) };
 
-        for (fid, _) in variant_data.fields().iter() {
-            self.visit_field(field_vis[fid], &field_tys[fid], subst, is_enum)?;
+        for (fid, _) in fields.iter() {
+            self.visit_field(field_vis.as_ref().map(|it| it[fid]), &field_tys[fid], subst)?;
         }
         CONTINUE_OPAQUELY_INHABITED
     }
 
     fn visit_field(
         &mut self,
-        vis: Visibility,
+        vis: Option<Visibility>,
         ty: &Binders<Ty>,
         subst: &Substitution,
-        is_enum: bool,
     ) -> ControlFlow<VisiblyUninhabited> {
-        if is_enum || vis.is_visible_from(self.db.upcast(), self.target_mod) {
+        if vis.is_none_or(|it| it.is_visible_from(self.db.upcast(), self.target_mod)) {
             let ty = ty.clone().substitute(Interner, subst);
             ty.visit_with(self, DebruijnIndex::INNERMOST)
         } else {

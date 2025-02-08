@@ -1,7 +1,6 @@
-// run-pass
+//@ run-pass
 // regression test for issue #94923
-// min-llvm-version: 15.0.0
-// compile-flags: -C opt-level=3
+//@ compile-flags: -C opt-level=3
 
 fn f0<T>(mut x: usize) -> usize {
     for _ in 0..1000 {

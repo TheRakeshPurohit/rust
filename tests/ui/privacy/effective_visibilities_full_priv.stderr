@@ -1,4 +1,4 @@
-error: Direct: pub(self), Reexported: pub(self), Reachable: pub(crate), ReachableThroughImplTrait: pub(crate)
+error: not in the table
   --> $DIR/effective_visibilities_full_priv.rs:8:5
    |
 LL |     struct Priv;
@@ -9,6 +9,8 @@ error: not in the table
    |
 LL |     struct Priv;
    |     ^^^^^^^^^^^
+   |
+   = note: duplicate diagnostic emitted due to `-Z deduplicate-diagnostics=no`
 
 error: Direct: pub(crate), Reexported: pub(crate), Reachable: pub(crate), ReachableThroughImplTrait: pub(crate)
   --> $DIR/effective_visibilities_full_priv.rs:13:5

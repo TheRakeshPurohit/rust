@@ -1,11 +1,11 @@
 use clippy_utils::diagnostics::span_lint_and_sugg;
 use clippy_utils::path_res;
-use clippy_utils::source::snippet_opt;
+use clippy_utils::source::SpanRangeExt;
 use clippy_utils::ty::is_type_diagnostic_item;
 use clippy_utils::usage::local_used_after_expr;
 use rustc_errors::Applicability;
-use rustc_hir::def::Res;
 use rustc_hir::Expr;
+use rustc_hir::def::Res;
 use rustc_lint::LateContext;
 use rustc_span::sym;
 
@@ -17,7 +17,9 @@ pub(super) fn check(cx: &LateContext<'_>, expr: &Expr<'_>, recv: &Expr<'_>, name
 
     if is_type_diagnostic_item(cx, outer_ty, sym::Option) && outer_ty == typeck.expr_ty(recv) {
         if name == "as_deref_mut" && recv.is_syntactic_place_expr() {
-            let Res::Local(binding_id) = path_res(cx, recv) else { return };
+            let Res::Local(binding_id) = path_res(cx, recv) else {
+                return;
+            };
 
             if local_used_after_expr(cx, binding_id, recv) {
                 return;
@@ -29,8 +31,8 @@ pub(super) fn check(cx: &LateContext<'_>, expr: &Expr<'_>, recv: &Expr<'_>, name
             NEEDLESS_OPTION_AS_DEREF,
             expr.span,
             "derefed type is same as origin",
-            "try this",
-            snippet_opt(cx, recv.span).unwrap(),
+            "try",
+            recv.span.get_source_text(cx).unwrap().to_owned(),
             Applicability::MachineApplicable,
         );
     }

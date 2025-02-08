@@ -1,16 +1,14 @@
 #![feature(transmutability)]
 
-use std::mem::{Assume, BikeshedIntrinsicFrom};
-pub struct Context;
+use std::mem::{Assume, TransmuteFrom};
 
 #[repr(C)]
 struct W<'a>(&'a ());
 
 fn test<'a>()
 where
-    W<'a>: BikeshedIntrinsicFrom<
+    W<'a>: TransmuteFrom<
             (),
-            Context,
             { Assume { alignment: true, lifetimes: true, safety: true, validity: true } },
         >,
 {

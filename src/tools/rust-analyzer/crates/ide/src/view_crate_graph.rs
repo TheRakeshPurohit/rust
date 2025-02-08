@@ -1,6 +1,6 @@
 use dot::{Id, LabelText};
 use ide_db::{
-    base_db::{CrateGraph, CrateId, Dependency, SourceDatabase, SourceDatabaseExt},
+    base_db::{CrateGraph, CrateId, Dependency, SourceDatabase, SourceRootDatabase},
     FxHashSet, RootDatabase,
 };
 use triomphe::Arc;
@@ -86,7 +86,7 @@ impl<'a> dot::Labeller<'a, CrateId, Edge<'a>> for DotCrateGraph {
     }
 
     fn node_label(&'a self, n: &CrateId) -> LabelText<'a> {
-        let name = self.graph[*n].display_name.as_ref().map_or("(unnamed crate)", |name| &*name);
+        let name = self.graph[*n].display_name.as_ref().map_or("(unnamed crate)", |name| name);
         LabelText::LabelStr(name.into())
     }
 }

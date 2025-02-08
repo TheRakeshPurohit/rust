@@ -1,6 +1,5 @@
-// compile-flags: -Zvirtual-function-elimination -Clto -O -Csymbol-mangling-version=v0
-// ignore-32bit
-// ignore-debug
+//@ compile-flags: -Zvirtual-function-elimination -Clto -O -Csymbol-mangling-version=v0
+//@ ignore-32bit
 
 // CHECK: @vtable.0 = {{.*}}, !type ![[TYPE0:[0-9]+]], !vcall_visibility ![[VCALL_VIS0:[0-9]+]]
 // CHECK: @vtable.1 = {{.*}}, !type ![[TYPE1:[0-9]+]], !vcall_visibility ![[VCALL_VIS0:[0-9]+]]
@@ -82,7 +81,7 @@ fn taking_u(u: &dyn U) -> i32 {
 }
 
 pub fn taking_v(v: &dyn V) -> i32 {
-    // CHECK: @llvm.type.checked.load({{.*}}, i32 24, metadata !"NtCs64ITQYi9761_28virtual_function_elimination1V")
+    // CHECK: @llvm.type.checked.load({{.*}}, i32 24, metadata !"NtC[[CRATE_IDENT:[a-zA-Z0-9]{12}]]_28virtual_function_elimination1V")
     v.public_function()
 }
 
@@ -97,5 +96,5 @@ pub fn main() {
 // CHECK: ![[TYPE0]] = !{i64 0, !"[[MANGLED_TYPE0]]"}
 // CHECK: ![[VCALL_VIS0]] = !{i64 2}
 // CHECK: ![[TYPE1]] = !{i64 0, !"[[MANGLED_TYPE1]]"}
-// CHECK: ![[TYPE2]] = !{i64 0, !"NtCs64ITQYi9761_28virtual_function_elimination1V"}
+// CHECK: ![[TYPE2]] = !{i64 0, !"NtC[[CRATE_IDENT]]_28virtual_function_elimination1V"}
 // CHECK: ![[VCALL_VIS2]] = !{i64 1}

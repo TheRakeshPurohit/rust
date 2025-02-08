@@ -1,4 +1,5 @@
-// edition:2018
+//@ edition:2018
+#![allow(missing_abi)]
 
 // There is an order to respect for keywords before a function:
 // `<visibility>, const, async, unsafe, extern, "<ABI>"`
@@ -12,3 +13,5 @@ extern unsafe fn test() {}
 //~| HELP `unsafe` must come before `extern`
 //~| SUGGESTION unsafe extern
 //~| NOTE keyword order for functions declaration is `pub`, `default`, `const`, `async`, `unsafe`, `extern`
+
+fn main() {}

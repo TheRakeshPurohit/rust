@@ -1,12 +1,12 @@
-// unit-test: SimplifyLocals-before-const-prop
-
+// skip-filecheck
+//@ test-mir-pass: SimplifyLocals-before-const-prop
 
 #![feature(thread_local)]
 
 #[derive(Copy, Clone)]
 enum E {
-     A,
-     B,
+    A,
+    B,
 }
 
 // EMIT_MIR simplify_locals.c.SimplifyLocals-before-const-prop.diff
@@ -25,7 +25,7 @@ fn d1() {
 // EMIT_MIR simplify_locals.d2.SimplifyLocals-before-const-prop.diff
 fn d2() {
     // Unused set discriminant
-    {(10, E::A)}.1 = E::B;
+    { (10, E::A) }.1 = E::B;
 }
 
 // EMIT_MIR simplify_locals.r.SimplifyLocals-before-const-prop.diff
@@ -36,7 +36,8 @@ fn r() {
     let _ = &mut a;
 }
 
-#[thread_local] static mut X: u32 = 0;
+#[thread_local]
+static mut X: u32 = 0;
 
 // EMIT_MIR simplify_locals.t1.SimplifyLocals-before-const-prop.diff
 fn t1() {
@@ -62,8 +63,8 @@ fn t4() -> u32 {
     unsafe { X + 1 }
 }
 
-// EMIT_MIR simplify_locals.expose_addr.SimplifyLocals-before-const-prop.diff
-fn expose_addr(p: *const usize) {
+// EMIT_MIR simplify_locals.expose_provenance.SimplifyLocals-before-const-prop.diff
+fn expose_provenance(p: *const usize) {
     // Used pointer to address cast. Has a side effect of exposing the provenance.
     p as usize;
 }
@@ -77,5 +78,5 @@ fn main() {
     t2();
     t3();
     t4();
-    expose_addr(&0);
+    expose_provenance(&0);
 }

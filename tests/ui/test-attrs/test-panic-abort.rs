@@ -1,19 +1,22 @@
-// no-prefer-dynamic
-// compile-flags: --test -Cpanic=abort -Zpanic_abort_tests
-// run-flags: --test-threads=1
-// run-fail
-// check-run-results
-// exec-env:RUST_BACKTRACE=0
-// normalize-stdout-test "finished in \d+\.\d+s" -> "finished in $$TIME"
+//@ no-prefer-dynamic
+//@ compile-flags: --test -Cpanic=abort -Zpanic_abort_tests
+//@ run-flags: --test-threads=1
+//@ run-fail
+//@ check-run-results
+//@ exec-env:RUST_BACKTRACE=0
+//@ normalize-stdout: "finished in \d+\.\d+s" -> "finished in $$TIME"
 
-// ignore-wasm no panic or subprocess support
-// ignore-emscripten no panic or subprocess support
-// ignore-sgx no subprocess support
+//@ ignore-android #120567
+//@ needs-subprocess
 
 #![cfg(test)]
+#![feature(test)]
+
+extern crate test;
 
 use std::io::Write;
 use std::env;
+use test::Bencher;
 
 #[test]
 fn it_works() {
@@ -47,4 +50,9 @@ fn no_residual_environment() {
             panic!("shouldn't have '{}' in environment", key);
         }
     }
+}
+
+#[bench]
+fn benchmark(b: &mut Bencher) {
+    b.iter(|| assert_eq!(1 + 1, 2));
 }

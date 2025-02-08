@@ -1,7 +1,7 @@
 use super::transitive_relation::TransitiveRelation;
 use crate::ty::is_copy;
 use rustc_data_structures::fx::FxHashMap;
-use rustc_index::bit_set::HybridBitSet;
+use rustc_index::bit_set::DenseBitSet;
 use rustc_lint::LateContext;
 use rustc_middle::mir;
 
@@ -22,7 +22,7 @@ impl<'a, 'tcx> PossibleOriginVisitor<'a, 'tcx> {
         }
     }
 
-    pub fn into_map(self, cx: &LateContext<'tcx>) -> FxHashMap<mir::Local, HybridBitSet<mir::Local>> {
+    pub fn into_map(self, cx: &LateContext<'tcx>) -> FxHashMap<mir::Local, DenseBitSet<mir::Local>> {
         let mut map = FxHashMap::default();
         for row in (1..self.body.local_decls.len()).map(mir::Local::from_usize) {
             if is_copy(cx, self.body.local_decls[row].ty) {
@@ -39,12 +39,12 @@ impl<'a, 'tcx> PossibleOriginVisitor<'a, 'tcx> {
     }
 }
 
-impl<'a, 'tcx> mir::visit::Visitor<'tcx> for PossibleOriginVisitor<'a, 'tcx> {
+impl<'tcx> mir::visit::Visitor<'tcx> for PossibleOriginVisitor<'_, 'tcx> {
     fn visit_assign(&mut self, place: &mir::Place<'tcx>, rvalue: &mir::Rvalue<'_>, _location: mir::Location) {
         let lhs = place.local;
         match rvalue {
             // Only consider `&mut`, which can modify origin place
-            mir::Rvalue::Ref(_, rustc_middle::mir::BorrowKind::Mut { .. }, borrowed) |
+            mir::Rvalue::Ref(_, mir::BorrowKind::Mut { .. }, borrowed) |
             // _2: &mut _;
             // _3 = move _2
             mir::Rvalue::Use(mir::Operand::Move(borrowed))  |

@@ -1,4 +1,4 @@
-// check-pass
+//@ check-pass
 //! An array must have the correct length.
 
 #![crate_type = "lib"]
@@ -6,13 +6,12 @@
 #![allow(dead_code, incomplete_features, non_camel_case_types)]
 
 mod assert {
-    use std::mem::{Assume, BikeshedIntrinsicFrom};
-    pub struct Context;
+    use std::mem::{Assume, TransmuteFrom};
 
     pub fn array_like<T, E, const N: usize>()
     where
-        T: BikeshedIntrinsicFrom<[E; N], Context, { Assume::SAFETY }>,
-        [E; N]: BikeshedIntrinsicFrom<T, Context, { Assume::SAFETY }>
+        T: TransmuteFrom<[E; N], { Assume::SAFETY }>,
+        [E; N]: TransmuteFrom<T, { Assume::SAFETY }>
     {}
 }
 

@@ -1,4 +1,3 @@
-//@run-rustfix
 #![allow(
     unused,
     clippy::unused_unit,
@@ -80,6 +79,14 @@ fn main() {
     };
 
     { unit_fn_block(); };
+
+    unsafe {
+        std::arch::asm!("");
+    }
+
+    {
+        line!();
+    }
 
     unit_fn_block()
 }

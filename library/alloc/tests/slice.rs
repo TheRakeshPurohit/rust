@@ -1,9 +1,7 @@
 use std::cmp::Ordering::{Equal, Greater, Less};
 use std::convert::identity;
-use std::fmt;
-use std::mem;
-use std::panic;
 use std::rc::Rc;
+use std::{fmt, mem, panic};
 
 fn square(n: usize) -> usize {
     n * n
@@ -911,8 +909,7 @@ fn test_split_iterators_size_hint() {
             // become maximally long, so the size_hint upper bounds are tight
             ((|_| true) as fn(&_) -> _, Bounds::Upper),
         ] {
-            use assert_tight_size_hints as a;
-            use format_args as f;
+            use {assert_tight_size_hints as a, format_args as f};
 
             a(v.split(p), b, "split");
             a(v.split_mut(p), b, "split_mut");
@@ -1417,11 +1414,10 @@ fn test_box_slice_clone() {
 
 #[test]
 #[allow(unused_must_use)] // here, we care about the side effects of `.clone()`
-#[cfg_attr(target_os = "emscripten", ignore)]
 #[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
 fn test_box_slice_clone_panics() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Canary {
         count: Arc<AtomicUsize>,
@@ -1614,10 +1610,10 @@ fn subslice_patterns() {
 }
 
 #[test]
-fn test_group_by() {
+fn test_chunk_by() {
     let slice = &[1, 1, 1, 3, 3, 2, 2, 2, 1, 0];
 
-    let mut iter = slice.group_by(|a, b| a == b);
+    let mut iter = slice.chunk_by(|a, b| a == b);
     assert_eq!(iter.next(), Some(&[1, 1, 1][..]));
     assert_eq!(iter.next(), Some(&[3, 3][..]));
     assert_eq!(iter.next(), Some(&[2, 2, 2][..]));
@@ -1625,7 +1621,7 @@ fn test_group_by() {
     assert_eq!(iter.next(), Some(&[0][..]));
     assert_eq!(iter.next(), None);
 
-    let mut iter = slice.group_by(|a, b| a == b);
+    let mut iter = slice.chunk_by(|a, b| a == b);
     assert_eq!(iter.next_back(), Some(&[0][..]));
     assert_eq!(iter.next_back(), Some(&[1][..]));
     assert_eq!(iter.next_back(), Some(&[2, 2, 2][..]));
@@ -1633,7 +1629,7 @@ fn test_group_by() {
     assert_eq!(iter.next_back(), Some(&[1, 1, 1][..]));
     assert_eq!(iter.next_back(), None);
 
-    let mut iter = slice.group_by(|a, b| a == b);
+    let mut iter = slice.chunk_by(|a, b| a == b);
     assert_eq!(iter.next(), Some(&[1, 1, 1][..]));
     assert_eq!(iter.next_back(), Some(&[0][..]));
     assert_eq!(iter.next(), Some(&[3, 3][..]));
@@ -1643,10 +1639,10 @@ fn test_group_by() {
 }
 
 #[test]
-fn test_group_by_mut() {
+fn test_chunk_by_mut() {
     let slice = &mut [1, 1, 1, 3, 3, 2, 2, 2, 1, 0];
 
-    let mut iter = slice.group_by_mut(|a, b| a == b);
+    let mut iter = slice.chunk_by_mut(|a, b| a == b);
     assert_eq!(iter.next(), Some(&mut [1, 1, 1][..]));
     assert_eq!(iter.next(), Some(&mut [3, 3][..]));
     assert_eq!(iter.next(), Some(&mut [2, 2, 2][..]));
@@ -1654,7 +1650,7 @@ fn test_group_by_mut() {
     assert_eq!(iter.next(), Some(&mut [0][..]));
     assert_eq!(iter.next(), None);
 
-    let mut iter = slice.group_by_mut(|a, b| a == b);
+    let mut iter = slice.chunk_by_mut(|a, b| a == b);
     assert_eq!(iter.next_back(), Some(&mut [0][..]));
     assert_eq!(iter.next_back(), Some(&mut [1][..]));
     assert_eq!(iter.next_back(), Some(&mut [2, 2, 2][..]));
@@ -1662,7 +1658,7 @@ fn test_group_by_mut() {
     assert_eq!(iter.next_back(), Some(&mut [1, 1, 1][..]));
     assert_eq!(iter.next_back(), None);
 
-    let mut iter = slice.group_by_mut(|a, b| a == b);
+    let mut iter = slice.chunk_by_mut(|a, b| a == b);
     assert_eq!(iter.next(), Some(&mut [1, 1, 1][..]));
     assert_eq!(iter.next_back(), Some(&mut [0][..]));
     assert_eq!(iter.next(), Some(&mut [3, 3][..]));

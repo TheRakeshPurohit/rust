@@ -49,8 +49,8 @@ pub(crate) fn convert_nested_function_to_closure(
         target,
         |edit| {
             let params = &param_list.syntax().text().to_string();
-            let params = params.strip_prefix("(").unwrap_or(params);
-            let params = params.strip_suffix(")").unwrap_or(params);
+            let params = params.strip_prefix('(').unwrap_or(params);
+            let params = params.strip_suffix(')').unwrap_or(params);
 
             let mut body = body.to_string();
             if !has_semicolon(&function) {
@@ -63,7 +63,7 @@ pub(crate) fn convert_nested_function_to_closure(
 
 /// Returns whether the given function is nested within the body of another function.
 fn is_nested_function(function: &ast::Fn) -> bool {
-    function.syntax().ancestors().skip(1).find_map(ast::Item::cast).map_or(false, |it| {
+    function.syntax().ancestors().skip(1).find_map(ast::Item::cast).is_some_and(|it| {
         matches!(it, ast::Item::Fn(_) | ast::Item::Static(_) | ast::Item::Const(_))
     })
 }

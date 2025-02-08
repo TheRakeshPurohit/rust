@@ -1,5 +1,6 @@
 //@needs-asm-support
 //@aux-build: proc_macros.rs
+//@aux-build: proc_macro_attr.rs
 
 #![warn(clippy::missing_docs_in_private_items)]
 // When denying at the crate level, be sure to not get random warnings from the
@@ -8,6 +9,8 @@
 //! Some garbage docs for the crate here
 #![doc = "More garbage"]
 
+#[macro_use]
+extern crate proc_macro_attr;
 extern crate proc_macros;
 
 use proc_macros::with_span;
@@ -96,10 +99,8 @@ mod internal_impl {
 }
 /// dox
 pub mod public_interface {
-    pub use crate::internal_impl::documented as foo;
     pub use crate::internal_impl::globbed::*;
-    pub use crate::internal_impl::undocumented1 as bar;
-    pub use crate::internal_impl::{documented, undocumented2};
+    pub use crate::internal_impl::{documented as foo, documented, undocumented1 as bar, undocumented2};
 }
 
 fn main() {}
@@ -114,3 +115,20 @@ with_span!(span pub enum FooPm3 { A, B(u32), C { field: u32 }});
 with_span!(span pub fn foo_pm() {});
 with_span!(span pub static FOO_PM: u32 = 0;);
 with_span!(span pub const FOO2_PM: u32 = 0;);
+
+// Don't lint unnamed constants
+const _: () = ();
+
+fn issue13298() {
+    // Rustdoc doesn't generate documentation for items within other items like fns or consts
+    const MSG: &str = "Hello, world!";
+}
+
+// issue #12197
+// Undocumented field originated inside of spanned proc-macro attribute
+/// Some dox for struct.
+#[rewrite_struct]
+pub struct Test {
+    /// Dox
+    a: u8,
+}

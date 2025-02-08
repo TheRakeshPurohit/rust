@@ -1,6 +1,4 @@
-// run-pass
-
-#![feature(inline_const)]
+//@ run-pass
 
 const fn bar() -> i32 {
     const {

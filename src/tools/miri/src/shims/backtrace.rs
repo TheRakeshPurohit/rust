@@ -1,21 +1,22 @@
-use crate::*;
-use rustc_ast::ast::Mutability;
+use rustc_abi::Size;
 use rustc_middle::ty::layout::LayoutOf as _;
-use rustc_middle::ty::{self, Instance};
-use rustc_span::{BytePos, Loc, Symbol};
-use rustc_target::{abi::Size, spec::abi::Abi};
+use rustc_middle::ty::{self, Instance, Ty};
+use rustc_span::{BytePos, Loc, Symbol, hygiene};
+use rustc_target::callconv::{Conv, FnAbi};
 
-impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
-pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
+use crate::*;
+
+impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
+pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     fn handle_miri_backtrace_size(
         &mut self,
-        abi: Abi,
+        abi: &FnAbi<'tcx, Ty<'tcx>>,
         link_name: Symbol,
-        args: &[OpTy<'tcx, Provenance>],
-        dest: &PlaceTy<'tcx, Provenance>,
+        args: &[OpTy<'tcx>],
+        dest: &MPlaceTy<'tcx>,
     ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
-        let [flags] = this.check_shim(abi, Abi::Rust, link_name, args)?;
+        let [flags] = this.check_shim(abi, Conv::Rust, link_name, args)?;
 
         let flags = this.read_scalar(flags)?.to_u64()?;
         if flags != 0 {
@@ -29,29 +30,24 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
     fn handle_miri_get_backtrace(
         &mut self,
-        abi: Abi,
+        abi: &FnAbi<'tcx, Ty<'tcx>>,
         link_name: Symbol,
-        args: &[OpTy<'tcx, Provenance>],
-        dest: &PlaceTy<'tcx, Provenance>,
+        args: &[OpTy<'tcx>],
     ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
-        let tcx = this.tcx;
+        let ptr_ty = this.machine.layouts.mut_raw_ptr.ty;
+        let ptr_layout = this.layout_of(ptr_ty)?;
 
-        let flags = if let Some(flags_op) = args.get(0) {
-            this.read_scalar(flags_op)?.to_u64()?
-        } else {
-            throw_ub_format!("expected at least 1 argument")
-        };
+        let [flags, buf] = this.check_shim(abi, Conv::Rust, link_name, args)?;
+
+        let flags = this.read_scalar(flags)?.to_u64()?;
+        let buf_place = this.deref_pointer_as(buf, ptr_layout)?;
 
         let mut data = Vec::new();
         for frame in this.active_thread_stack().iter().rev() {
-            let mut span = frame.current_span();
-            // Match the behavior of runtime backtrace spans
-            // by using a non-macro span in our backtrace. See `FunctionCx::debug_loc`.
-            if span.from_expansion() && !tcx.sess.opts.unstable_opts.debug_macros {
-                span = rustc_span::hygiene::walk_chain(span, frame.body.span.ctxt())
-            }
-            data.push((frame.instance, span.lo()));
+            // Match behavior of debuginfo (`FunctionCx::adjusted_span_and_dbg_scope`).
+            let span = hygiene::walk_chain_collapsed(frame.current_span(), frame.body().span);
+            data.push((frame.instance(), span.lo()));
         }
 
         let ptrs: Vec<_> = data
@@ -63,70 +59,41 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 // to reconstruct the needed frame information in `handle_miri_resolve_frame`.
                 // Note that we never actually read or write anything from/to this pointer -
                 // all of the data is represented by the pointer value itself.
-                let fn_ptr = this.create_fn_alloc_ptr(FnVal::Instance(instance));
+                let fn_ptr = this.fn_ptr(FnVal::Instance(instance));
                 fn_ptr.wrapping_offset(Size::from_bytes(pos.0), this)
             })
             .collect();
 
-        let len: u64 = ptrs.len().try_into().unwrap();
-
-        let ptr_ty = this.machine.layouts.mut_raw_ptr.ty;
-        let array_layout = this.layout_of(tcx.mk_array(ptr_ty, len)).unwrap();
-
         match flags {
-            // storage for pointers is allocated by miri
-            // deallocating the slice is undefined behavior with a custom global allocator
             0 => {
-                let [_flags] = this.check_shim(abi, Abi::Rust, link_name, args)?;
-
-                let alloc = this.allocate(array_layout, MiriMemoryKind::Rust.into())?;
-
-                // Write pointers into array
-                for (i, ptr) in ptrs.into_iter().enumerate() {
-                    let place = this.mplace_index(&alloc, i as u64)?;
-
-                    this.write_pointer(ptr, &place.into())?;
-                }
-
-                this.write_immediate(
-                    Immediate::new_slice(Scalar::from_maybe_pointer(alloc.ptr, this), len, this),
-                    dest,
-                )?;
+                throw_unsup_format!("miri_get_backtrace: v0 is not supported any more");
             }
-            // storage for pointers is allocated by the caller
-            1 => {
-                let [_flags, buf] = this.check_shim(abi, Abi::Rust, link_name, args)?;
-
-                let buf_place = this.deref_operand(buf)?;
-
-                let ptr_layout = this.layout_of(ptr_ty)?;
-
+            1 =>
                 for (i, ptr) in ptrs.into_iter().enumerate() {
                     let offset = ptr_layout.size.checked_mul(i.try_into().unwrap(), this).unwrap();
 
                     let op_place = buf_place.offset(offset, ptr_layout, this)?;
 
-                    this.write_pointer(ptr, &op_place.into())?;
-                }
-            }
+                    this.write_pointer(ptr, &op_place)?;
+                },
             _ => throw_unsup_format!("unknown `miri_get_backtrace` flags {}", flags),
         };
 
-        Ok(())
+        interp_ok(())
     }
 
     fn resolve_frame_pointer(
         &mut self,
-        ptr: &OpTy<'tcx, Provenance>,
+        ptr: &OpTy<'tcx>,
     ) -> InterpResult<'tcx, (Instance<'tcx>, Loc, String, String)> {
         let this = self.eval_context_mut();
 
         let ptr = this.read_pointer(ptr)?;
         // Take apart the pointer, we need its pieces. The offset encodes the span.
-        let (alloc_id, offset, _prov) = this.ptr_get_alloc_id(ptr)?;
+        let (alloc_id, offset, _prov) = this.ptr_get_alloc_id(ptr, 0)?;
 
         // This has to be an actual global fn ptr, not a dlsym function.
-        let fn_instance = if let Some(GlobalAlloc::Function(instance)) =
+        let fn_instance = if let Some(GlobalAlloc::Function { instance, .. }) =
             this.tcx.try_get_global_alloc(alloc_id)
         {
             instance
@@ -138,20 +105,20 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             this.tcx.sess.source_map().lookup_char_pos(BytePos(offset.bytes().try_into().unwrap()));
 
         let name = fn_instance.to_string();
-        let filename = lo.file.name.prefer_remapped().to_string();
+        let filename = lo.file.name.prefer_remapped_unconditionaly().to_string();
 
-        Ok((fn_instance, lo, name, filename))
+        interp_ok((fn_instance, lo, name, filename))
     }
 
     fn handle_miri_resolve_frame(
         &mut self,
-        abi: Abi,
+        abi: &FnAbi<'tcx, Ty<'tcx>>,
         link_name: Symbol,
-        args: &[OpTy<'tcx, Provenance>],
-        dest: &PlaceTy<'tcx, Provenance>,
+        args: &[OpTy<'tcx>],
+        dest: &MPlaceTy<'tcx>,
     ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
-        let [ptr, flags] = this.check_shim(abi, Abi::Rust, link_name, args)?;
+        let [ptr, flags] = this.check_shim(abi, Conv::Rust, link_name, args)?;
 
         let flags = this.read_scalar(flags)?.to_u64()?;
 
@@ -159,7 +126,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
         // Reconstruct the original function pointer,
         // which we pass to user code.
-        let fn_ptr = this.create_fn_alloc_ptr(FnVal::Instance(fn_instance));
+        let fn_ptr = this.fn_ptr(FnVal::Instance(fn_instance));
 
         let num_fields = dest.layout.fields.count();
 
@@ -177,7 +144,6 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         // `lo.col` is 0-based - add 1 to make it 1-based for the caller.
         let colno: u32 = u32::try_from(lo.col.0.saturating_add(1)).unwrap_or(0);
 
-        let dest = this.force_allocation(dest)?;
         if let ty::Adt(adt, _) = dest.layout.ty.kind() {
             if !adt.repr().c() {
                 throw_ub_format!(
@@ -188,56 +154,43 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
         match flags {
             0 => {
-                // These are "mutable" allocations as we consider them to be owned by the callee.
-                let name_alloc =
-                    this.allocate_str(&name, MiriMemoryKind::Rust.into(), Mutability::Mut)?;
-                let filename_alloc =
-                    this.allocate_str(&filename, MiriMemoryKind::Rust.into(), Mutability::Mut)?;
-
-                this.write_immediate(
-                    name_alloc.to_ref(this),
-                    &this.mplace_field(&dest, 0)?.into(),
-                )?;
-                this.write_immediate(
-                    filename_alloc.to_ref(this),
-                    &this.mplace_field(&dest, 1)?.into(),
-                )?;
+                throw_unsup_format!("miri_resolve_frame: v0 is not supported any more");
             }
             1 => {
                 this.write_scalar(
                     Scalar::from_target_usize(name.len().try_into().unwrap(), this),
-                    &this.mplace_field(&dest, 0)?.into(),
+                    &this.project_field(dest, 0)?,
                 )?;
                 this.write_scalar(
                     Scalar::from_target_usize(filename.len().try_into().unwrap(), this),
-                    &this.mplace_field(&dest, 1)?.into(),
+                    &this.project_field(dest, 1)?,
                 )?;
             }
             _ => throw_unsup_format!("unknown `miri_resolve_frame` flags {}", flags),
         }
 
-        this.write_scalar(Scalar::from_u32(lineno), &this.mplace_field(&dest, 2)?.into())?;
-        this.write_scalar(Scalar::from_u32(colno), &this.mplace_field(&dest, 3)?.into())?;
+        this.write_scalar(Scalar::from_u32(lineno), &this.project_field(dest, 2)?)?;
+        this.write_scalar(Scalar::from_u32(colno), &this.project_field(dest, 3)?)?;
 
         // Support a 4-field struct for now - this is deprecated
         // and slated for removal.
         if num_fields == 5 {
-            this.write_pointer(fn_ptr, &this.mplace_field(&dest, 4)?.into())?;
+            this.write_pointer(fn_ptr, &this.project_field(dest, 4)?)?;
         }
 
-        Ok(())
+        interp_ok(())
     }
 
     fn handle_miri_resolve_frame_names(
         &mut self,
-        abi: Abi,
+        abi: &FnAbi<'tcx, Ty<'tcx>>,
         link_name: Symbol,
-        args: &[OpTy<'tcx, Provenance>],
+        args: &[OpTy<'tcx>],
     ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
 
         let [ptr, flags, name_ptr, filename_ptr] =
-            this.check_shim(abi, Abi::Rust, link_name, args)?;
+            this.check_shim(abi, Conv::Rust, link_name, args)?;
 
         let flags = this.read_scalar(flags)?.to_u64()?;
         if flags != 0 {
@@ -249,6 +202,6 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         this.write_bytes_ptr(this.read_pointer(name_ptr)?, name.bytes())?;
         this.write_bytes_ptr(this.read_pointer(filename_ptr)?, filename.bytes())?;
 
-        Ok(())
+        interp_ok(())
     }
 }

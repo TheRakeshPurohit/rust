@@ -1,6 +1,4 @@
-// run-pass
-
-#![feature(const_fn_floating_point_arithmetic)]
+//@ run-pass
 
 struct Foo<T>(T);
 struct Bar<T> { x: T }

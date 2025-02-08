@@ -1,6 +1,4 @@
-// run-pass
-
-#![feature(raw_ref_op)]
+//@ run-pass
 
 fn main() {
     let mut x = 123;

@@ -1,5 +1,5 @@
-use hir::{AsAssocItem, AssocItemContainer, HasCrate, HasSource};
-use ide_db::{assists::AssistId, base_db::FileRange, defs::Definition, search::SearchScope};
+use hir::{AsAssocItem, AssocItemContainer, FileRange, HasCrate, HasSource};
+use ide_db::{assists::AssistId, defs::Definition, search::SearchScope};
 use syntax::{
     ast::{self, edit::IndentLevel, edit_in_place::Indent, AstNode},
     SyntaxKind,
@@ -54,7 +54,11 @@ pub(crate) fn move_const_to_impl(acc: &mut Assists, ctx: &AssistContext<'_>) -> 
     // NOTE: We can technically provide this assist for default methods in trait definitions, but
     // it's somewhat complex to handle it correctly when the const's name conflicts with
     // supertrait's item. We may want to consider implementing it in the future.
-    let AssocItemContainer::Impl(impl_) = ctx.sema.to_def(&parent_fn)?.as_assoc_item(db)?.container(db) else { return None; };
+    let AssocItemContainer::Impl(impl_) =
+        ctx.sema.to_def(&parent_fn)?.as_assoc_item(db)?.container(db)
+    else {
+        return None;
+    };
     if impl_.trait_(db).is_some() {
         return None;
     }
@@ -78,17 +82,19 @@ pub(crate) fn move_const_to_impl(acc: &mut Assists, ctx: &AssistContext<'_>) -> 
         return None;
     }
 
-    let usages =
-        Definition::Const(def).usages(&ctx.sema).in_scope(SearchScope::file_range(FileRange {
-            file_id: ctx.file_id(),
-            range: parent_fn.syntax().text_range(),
-        }));
-
     acc.add(
         AssistId("move_const_to_impl", crate::AssistKind::RefactorRewrite),
         "Move const to impl block",
         const_.syntax().text_range(),
         |builder| {
+            let usages = Definition::Const(def)
+                .usages(&ctx.sema)
+                .in_scope(&SearchScope::file_range(FileRange {
+                    file_id: ctx.file_id(),
+                    range: parent_fn.syntax().text_range(),
+                }))
+                .all();
+
             let range_to_delete = match const_.syntax().next_sibling_or_token() {
                 Some(s) if matches!(s.kind(), SyntaxKind::WHITESPACE) => {
                     // Remove following whitespaces too.
@@ -98,9 +104,13 @@ pub(crate) fn move_const_to_impl(acc: &mut Assists, ctx: &AssistContext<'_>) -> 
             };
             builder.delete(range_to_delete);
 
-            let const_ref = format!("Self::{}", name.display(ctx.db()));
-            for range in usages.all().file_ranges().map(|it| it.range) {
-                builder.replace(range, const_ref.clone());
+            let usages = usages.iter().flat_map(|(file_id, usages)| {
+                let edition = file_id.edition();
+                usages.iter().map(move |usage| (edition, usage.range))
+            });
+            for (edition, range) in usages {
+                let const_ref = format!("Self::{}", name.display(ctx.db(), edition));
+                builder.replace(range, const_ref);
             }
 
             // Heuristically inserting the extracted const after the consecutive existing consts

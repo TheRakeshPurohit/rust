@@ -1,6 +1,4 @@
-// check-pass
-
-#![feature(raw_ref_op)]
+//@ check-pass
 
 const USES_PTR: () = { let u = (); &raw const u; };
 static ALSO_USES_PTR: () = { let u = (); &raw const u; };

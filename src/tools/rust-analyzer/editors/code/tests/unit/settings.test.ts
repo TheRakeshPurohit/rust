@@ -1,5 +1,5 @@
 import * as assert from "assert";
-import { Context } from ".";
+import type { Context } from ".";
 import { substituteVariablesInEnv } from "../../src/config";
 
 export async function getTests(ctx: Context) {
@@ -13,7 +13,7 @@ export async function getTests(ctx: Context) {
                 USING_MY_VAR: "test test test",
                 MY_VAR: "test",
             };
-            const actualEnv = await substituteVariablesInEnv(envJson);
+            const actualEnv = substituteVariablesInEnv(envJson);
             assert.deepStrictEqual(actualEnv, expectedEnv);
         });
 
@@ -34,11 +34,12 @@ export async function getTests(ctx: Context) {
                 E_IS_ISOLATED: "test",
                 F_USES_E: "test",
             };
-            const actualEnv = await substituteVariablesInEnv(envJson);
+            const actualEnv = substituteVariablesInEnv(envJson);
             assert.deepStrictEqual(actualEnv, expectedEnv);
         });
 
         suite.addTest("Should support external variables", async () => {
+            process.env["TEST_VARIABLE"] = "test";
             const envJson = {
                 USING_EXTERNAL_VAR: "${env:TEST_VARIABLE} test ${env:TEST_VARIABLE}",
             };
@@ -46,16 +47,17 @@ export async function getTests(ctx: Context) {
                 USING_EXTERNAL_VAR: "test test test",
             };
 
-            const actualEnv = await substituteVariablesInEnv(envJson);
+            const actualEnv = substituteVariablesInEnv(envJson);
             assert.deepStrictEqual(actualEnv, expectedEnv);
+            delete process.env["TEST_VARIABLE"];
         });
 
         suite.addTest("should support VSCode variables", async () => {
             const envJson = {
                 USING_VSCODE_VAR: "${workspaceFolderBasename}",
             };
-            const actualEnv = await substituteVariablesInEnv(envJson);
-            assert.deepStrictEqual(actualEnv.USING_VSCODE_VAR, "code");
+            const actualEnv = substituteVariablesInEnv(envJson);
+            assert.deepStrictEqual(actualEnv["USING_VSCODE_VAR"], "code");
         });
     });
 }

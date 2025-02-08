@@ -47,7 +47,7 @@ https://rust-lang.zulipchat.com/#narrow/stream/185405-t-compiler.2Frust-analyzer
   Each triaged issue should have one of these labels.
 * [fun](https://github.com/rust-lang/rust-analyzer/issues?q=is%3Aopen+is%3Aissue+label%3Afun)
   is for cool, but probably hard stuff.
-* [Design](https://github.com/rust-lang/rust-analyzer/issues?q=is%3Aopen+is%3Aissue+label%Design)
+* [C-Architecture](https://github.com/rust-lang/rust-analyzer/issues?q=is%3Aissue%20state%3Aopen%20label%3AC-Architecture)
   is for moderate/large scale architecture discussion.
   Also a kind of fun.
   These issues should generally include a link to a Zulip discussion thread.
@@ -145,7 +145,7 @@ To log all communication between the server and the client, there are two choice
   ```
   env RA_LOG=lsp_server=debug code .
   ```
-* You can log on the client side, by enabling `"rust-analyzer.trace.server": "verbose"` workspace setting.
+* You can log on the client side, by the `rust-analyzer: Toggle LSP Logs` command or enabling `"rust-analyzer.trace.server": "verbose"` workspace setting.
   These logs are shown in a separate tab in the output and could be used with LSP inspector.
   Kudos to [@DJMcNab](https://github.com/DJMcNab) for setting this awesome infra up!
 
@@ -154,19 +154,21 @@ There are also several VS Code commands which might be of interest:
 
 * `rust-analyzer: Status` shows some memory-usage statistics.
 
-* `rust-analyzer: Syntax Tree` shows syntax tree of the current file/selection.
-
 * `rust-analyzer: View Hir` shows the HIR expressions within the function containing the cursor.
 
-  You can hover over syntax nodes in the opened text file to see the appropriate
-  rust code that it refers to and the rust editor will also highlight the proper
-  text range.
+* If `rust-analyzer.showSyntaxTree` is enabled in settings, `Rust Syntax Tree: Focus on Rust Syntax Tree View` shows the syntax tree of the current file.
+
+  You can click on nodes in the rust editor to go to the corresponding syntax node.
+
+  You can click on `Reveal Syntax Element` next to a syntax node to go to the corresponding rust code and highlight the proper text range.
 
   If you trigger Go to Definition in the inspected Rust source file,
-  the syntax tree read-only editor should scroll to and select the
+  the syntax tree view should scroll to and select the
   appropriate syntax node token.
 
-  ![demo](https://user-images.githubusercontent.com/36276403/78225773-6636a480-74d3-11ea-9d9f-1c9d42da03b0.png)
+  You can click on `Copy` next to a syntax node to copy a text representation of the node.
+
+  ![demo](https://github.com/user-attachments/assets/2d20ae87-0abf-495f-bee8-54aa2494a00d)
 
 ## Profiling
 
@@ -178,7 +180,15 @@ RA_PROFILE=foo|bar|baz   // enabled only selected entries
 RA_PROFILE=*@3>10        // dump everything, up to depth 3, if it takes more than 10 ms
 ```
 
-In particular, I have `export RA_PROFILE='*>10'` in my shell profile.
+Some rust-analyzer contributors have `export RA_PROFILE='*>10'` in my shell profile.
+
+For machine-readable JSON output, we have the `RA_PROFILE_JSON` env variable. We support
+filtering only by span name:
+
+```
+RA_PROFILE=* // dump everything
+RA_PROFILE_JSON="vfs_load|parallel_prime_caches|discover_command" // dump selected spans
+```
 
 We also have a "counting" profiler which counts number of instances of popular structs.
 It is enabled by `RA_COUNT=1`.
@@ -229,12 +239,22 @@ Release steps:
      * publishes the VS Code extension to the marketplace
    * call the GitHub API for PR details
    * create a new changelog in `rust-analyzer.github.io`
-3. While the release is in progress, fill in the changelog
-4. Commit & push the changelog
+3. While the release is in progress, fill in the changelog.
+4. Commit & push the changelog.
 5. Run `cargo xtask publish-release-notes <CHANGELOG>` -- this will convert the changelog entry in AsciiDoc to Markdown and update the body of GitHub Releases entry.
-6. Tweet
-7. Inside `rust-analyzer`, run `cargo xtask promote` -- this will create a PR to rust-lang/rust updating rust-analyzer's subtree.
-   Self-approve the PR.
+6. Tweet.
+7. Make a new branch and run `cargo xtask rustc-pull`, open a PR, and merge it.
+   This will pull any changes from `rust-lang/rust` into `rust-analyzer`.
+8. Switch to `master`, pull, then run `cargo xtask rustc-push --rust-path ../rust-rust-analyzer --rust-fork matklad/rust`.
+   Replace `matklad/rust` with your own fork of `rust-lang/rust`.
+   You can use the token to authenticate when you get prompted for a password, since `josh` will push over HTTPS, not SSH.
+   This will push the `rust-analyzer` changes to your fork.
+   You can then open a PR against `rust-lang/rust`.
+
+Note: besides the `rust-rust-analyzer` clone, the Josh cache (stored under `~/.cache/rust-analyzer-josh`) will contain a bare clone of `rust-lang/rust`.
+This currently takes about 3.5 GB.
+
+This [HackMD](https://hackmd.io/7pOuxnkdQDaL1Y1FQr65xg) has details about how `josh` syncs work.
 
 If the GitHub Actions release fails because of a transient problem like a timeout, you can re-run the job from the Actions console.
 If it fails because of something that needs to be fixed, remove the release tag (if needed), fix the problem, then start over.
@@ -249,19 +269,13 @@ Note: we tag releases by dates, releasing a patch release on the same day should
 
 ## Permissions
 
-There are three sets of people with extra permissions:
+There are two sets of people with extra permissions:
 
-* rust-analyzer GitHub organization [**admins**](https://github.com/orgs/rust-analyzer/people?query=role:owner) (which include current t-compiler leads).
-  Admins have full access to the org.
-* [**review**](https://github.com/orgs/rust-analyzer/teams/review) team in the organization.
-  Reviewers have `r+` access to all of organization's repositories and publish rights on crates.io.
-  They also have direct commit access, but all changes should via bors queue.
+* The [rust-lang](https://github.com/rust-lang) team [t-rust-analyzer](https://github.com/rust-lang/team/blob/master/teams/rust-analyzer.toml).
+  This team has write access to the repository and merge queue permissions (note the repo itself is managed by infra admins).
   It's ok to self-approve if you think you know what you are doing!
-  bors should automatically sync the permissions.
   Feel free to request a review or assign any PR to a reviewer with the relevant expertise to bring the work to their attention.
   Don't feel pressured to review assigned PRs though.
-  If you don't feel like reviewing for whatever reason, someone else will pick the review up!
-* [**triage**](https://github.com/orgs/rust-analyzer/teams/triage) team in the organization.
-  This team can label and close issues.
-
-Note that at the time being you need to be a member of the org yourself to view the links.
+  If you don't feel like reviewing for whatever reason, someone else will pick the review up (but please speak up if you don't feel like it)!
+* The [rust-lang](https://github.com/rust-lang) team [t-rust-analyzer-contributors]([https://github.com/orgs/rust-analyzer/teams/triage](https://github.com/rust-lang/team/blob/master/teams/rust-analyzer-contributors.toml)).
+  This team has general triaging permissions allowing to label, close and re-open issues.

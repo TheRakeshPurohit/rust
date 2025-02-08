@@ -48,7 +48,7 @@ error: layout_of(A) = Layout {
                            abi: Align(1 bytes),
                            pref: Align(1 bytes),
                        },
-                       abi: Aggregate {
+                       abi: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -59,11 +59,17 @@ error: layout_of(A) = Layout {
                        variants: Single {
                            index: 0,
                        },
+                       max_repr_align: None,
+                       unadjusted_abi_align: Align(1 bytes),
+                       randomization_seed: $SEED,
                    },
                ],
            },
+           max_repr_align: None,
+           unadjusted_abi_align: Align(1 bytes),
+           randomization_seed: $SEED,
        }
-  --> $DIR/hexagon-enum.rs:16:1
+  --> $DIR/hexagon-enum.rs:17:1
    |
 LL | enum A { Apple }
    | ^^^^^^
@@ -118,7 +124,7 @@ error: layout_of(B) = Layout {
                            abi: Align(1 bytes),
                            pref: Align(1 bytes),
                        },
-                       abi: Aggregate {
+                       abi: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -129,11 +135,17 @@ error: layout_of(B) = Layout {
                        variants: Single {
                            index: 0,
                        },
+                       max_repr_align: None,
+                       unadjusted_abi_align: Align(1 bytes),
+                       randomization_seed: $SEED,
                    },
                ],
            },
+           max_repr_align: None,
+           unadjusted_abi_align: Align(1 bytes),
+           randomization_seed: $SEED,
        }
-  --> $DIR/hexagon-enum.rs:20:1
+  --> $DIR/hexagon-enum.rs:21:1
    |
 LL | enum B { Banana = 255, }
    | ^^^^^^
@@ -188,7 +200,7 @@ error: layout_of(C) = Layout {
                            abi: Align(2 bytes),
                            pref: Align(2 bytes),
                        },
-                       abi: Aggregate {
+                       abi: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -199,11 +211,17 @@ error: layout_of(C) = Layout {
                        variants: Single {
                            index: 0,
                        },
+                       max_repr_align: None,
+                       unadjusted_abi_align: Align(2 bytes),
+                       randomization_seed: $SEED,
                    },
                ],
            },
+           max_repr_align: None,
+           unadjusted_abi_align: Align(2 bytes),
+           randomization_seed: $SEED,
        }
-  --> $DIR/hexagon-enum.rs:24:1
+  --> $DIR/hexagon-enum.rs:25:1
    |
 LL | enum C { Chaenomeles = 256, }
    | ^^^^^^
@@ -258,7 +276,7 @@ error: layout_of(P) = Layout {
                            abi: Align(4 bytes),
                            pref: Align(4 bytes),
                        },
-                       abi: Aggregate {
+                       abi: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -269,11 +287,17 @@ error: layout_of(P) = Layout {
                        variants: Single {
                            index: 0,
                        },
+                       max_repr_align: None,
+                       unadjusted_abi_align: Align(4 bytes),
+                       randomization_seed: $SEED,
                    },
                ],
            },
+           max_repr_align: None,
+           unadjusted_abi_align: Align(4 bytes),
+           randomization_seed: $SEED,
        }
-  --> $DIR/hexagon-enum.rs:28:1
+  --> $DIR/hexagon-enum.rs:29:1
    |
 LL | enum P { Peach = 0x1000_0000isize, }
    | ^^^^^^
@@ -328,7 +352,7 @@ error: layout_of(T) = Layout {
                            abi: Align(4 bytes),
                            pref: Align(4 bytes),
                        },
-                       abi: Aggregate {
+                       abi: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -339,11 +363,17 @@ error: layout_of(T) = Layout {
                        variants: Single {
                            index: 0,
                        },
+                       max_repr_align: None,
+                       unadjusted_abi_align: Align(4 bytes),
+                       randomization_seed: $SEED,
                    },
                ],
            },
+           max_repr_align: None,
+           unadjusted_abi_align: Align(4 bytes),
+           randomization_seed: $SEED,
        }
-  --> $DIR/hexagon-enum.rs:34:1
+  --> $DIR/hexagon-enum.rs:35:1
    |
 LL | enum T { Tangerine = TANGERINE as isize }
    | ^^^^^^

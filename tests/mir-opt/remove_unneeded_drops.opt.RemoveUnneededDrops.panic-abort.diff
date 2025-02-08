@@ -7,13 +7,12 @@
       let _2: ();
       let mut _3: bool;
       scope 1 (inlined std::mem::drop::<bool>) {
-          debug _x => _3;
       }
   
       bb0: {
 -         nop;
           StorageLive(_3);
-          _3 = _1;
+          _3 = copy _1;
 -         drop(_3) -> [return: bb1, unwind unreachable];
 -     }
 - 

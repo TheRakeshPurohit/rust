@@ -1,4 +1,6 @@
 //@compile-flags: -Zmiri-disable-weak-memory-emulation -Zmiri-preemption-rate=0 -Zmiri-disable-stacked-borrows
+// Avoid accidental synchronization via address reuse inside `thread::spawn`.
+//@compile-flags: -Zmiri-address-reuse-cross-thread-rate=0
 
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -36,7 +38,7 @@ pub fn main() {
                 sleep(Duration::from_millis(200));
 
                 // Now `stack_var` gets deallocated.
-            } //~ ERROR: Data race detected between (1) Write on thread `<unnamed>` and (2) Deallocate on thread `<unnamed>`
+            } //~ ERROR: Data race detected between (1) non-atomic write on thread `unnamed-2` and (2) deallocation on thread `unnamed-1`
         });
 
         let j2 = spawn(move || {

@@ -1,5 +1,5 @@
-// run-rustfix
-// edition:2021
+//@ run-rustfix
+//@ edition:2021
 #![allow(dead_code, unused_mut, unused_variables)]
 struct A {}
 struct Msg<'a> {
@@ -11,7 +11,7 @@ impl A {
     }
     async fn f() {
         let mut buf = [0; 512];
-        let m2 = &buf[..]; //~ ERROR `buf` does not live long enough
+        let m2 = &buf[..];
         let m = Self::g(m2).await;
         Self::f2(m).await;
     }

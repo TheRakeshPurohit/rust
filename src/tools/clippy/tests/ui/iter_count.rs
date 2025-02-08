@@ -1,4 +1,3 @@
-//@run-rustfix
 //@aux-build:option_helpers.rs
 
 #![warn(clippy::iter_count)]
@@ -7,7 +6,8 @@
     array_into_iter,
     unused_mut,
     clippy::into_iter_on_ref,
-    clippy::unnecessary_operation
+    clippy::unnecessary_operation,
+    clippy::useless_vec
 )]
 
 extern crate option_helpers;

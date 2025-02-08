@@ -1,3 +1,4 @@
+// skip-filecheck
 // EMIT_MIR address_of.address_of_reborrow.SimplifyCfg-initial.after.mir
 
 fn address_of_reborrow() {
@@ -8,7 +9,7 @@ fn address_of_reborrow() {
     y as *const [i32; 10];
     y as *const dyn Send;
     y as *const [i32];
-    y as *const i32;            // This is a cast, not a coercion
+    y as *const i32; // This is a cast, not a coercion
 
     let p: *const _ = y;
     let p: *const [i32; 10] = y;

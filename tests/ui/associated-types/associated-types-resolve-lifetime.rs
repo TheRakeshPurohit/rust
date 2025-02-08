@@ -1,5 +1,4 @@
-// run-pass
-// pretty-expanded FIXME #23616
+//@ check-pass
 
 trait Get<T> {
     fn get(&self) -> T;

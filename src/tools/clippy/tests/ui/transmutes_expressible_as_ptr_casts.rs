@@ -1,10 +1,9 @@
-//@run-rustfix
 #![warn(clippy::transmutes_expressible_as_ptr_casts)]
 // These two warnings currently cover the cases transmutes_expressible_as_ptr_casts
 // would otherwise be responsible for
 #![warn(clippy::useless_transmute)]
 #![warn(clippy::transmute_ptr_to_ptr)]
-#![allow(unused, clippy::borrow_as_ptr)]
+#![allow(unused, clippy::borrow_as_ptr, clippy::missing_transmute_annotations)]
 
 use std::mem::{size_of, transmute};
 
@@ -82,4 +81,17 @@ fn issue_10449() {
     fn f() {}
 
     let _x: u8 = unsafe { *std::mem::transmute::<fn(), *const u8>(f) };
+}
+
+// Pointers cannot be cast to integers in const contexts
+#[allow(
+    ptr_to_integer_transmute_in_consts,
+    reason = "This is tested in the compiler test suite"
+)]
+const fn issue_12402<P>(ptr: *const P) {
+    // This test exists even though the compiler lints against it
+    // to test that clippy's transmute lints do not trigger on this.
+    unsafe { std::mem::transmute::<*const i32, usize>(&42i32) };
+    unsafe { std::mem::transmute::<fn(*const P), usize>(issue_12402) };
+    let _ = unsafe { std::mem::transmute::<_, usize>(ptr) };
 }

@@ -3,6 +3,7 @@
 #![doc(html_playground_url="https://play.rust-lang.org/")]
 
 #![crate_name = "test_docs"]
+#![allow(internal_features)]
 #![feature(rustdoc_internals)]
 #![feature(doc_cfg)]
 #![feature(associated_type_defaults)]
@@ -19,10 +20,10 @@ Also, stop using `bar` as it's <span class="stab deprecated" title="">deprecated
 Also, stop using `bar` as it's <span class="stab deprecated" title="">deprecated</span>.
 Also, stop using `bar` as it's <span class="stab deprecated" title="">deprecated</span>.
 
-Finally, you can use `quz` only on <span class="stab portability"><code>Unix or x86-64</code>
-</span>.
-Finally, you can use `quz` only on <span class="stab portability"><code>Unix or x86-64</code>
-</span>.
+Finally, you can use `quz` only on <span class="stab portability" data-span="1"><code>Unix or x86-64
+</code></span>.
+Finally, you can use `quz` only on <span class="stab portability" data-span="2"><code>Unix or x86-64
+</code></span>.
 */
 
 use std::convert::AsRef;
@@ -64,6 +65,18 @@ impl Foo {
     pub fn must_use(&self) -> bool {
         true
     }
+
+    /// hello
+    ///
+    /// <div id="doc-warning-1" class="warning">this is a warning</div>
+    ///
+    /// done
+    pub fn warning1() {}
+
+    /// Checking there is no bottom margin if "warning" is the last element.
+    ///
+    /// <div id="doc-warning-2" class="warning">this is a warning</div>
+    pub fn warning2() {}
 }
 
 impl AsRef<str> for Foo {
@@ -71,6 +84,9 @@ impl AsRef<str> for Foo {
         "hello"
     }
 }
+
+/// <div id="doc-warning-0" class="warning">I have warnings!</div>
+pub struct WarningStruct;
 
 /// Just a normal enum.
 ///
@@ -140,12 +156,39 @@ pub enum AnEnum {
     WithVariants { and: usize, sub: usize, variants: usize },
 }
 
-#[doc(keyword = "CookieMonster")]
+#[doc(keyword = "for")]
 /// Some keyword.
 pub mod keyword {}
 
 /// Just some type alias.
 pub type SomeType = u32;
+
+/// Another type alias, this time with methods.
+pub type SomeOtherTypeWithMethodsAndInlining = Foo;
+
+impl SomeOtherTypeWithMethodsAndInlining {
+    pub fn some_other_method_directly(&self) {}
+}
+
+/// Another type alias, this time with methods.
+pub struct UnderlyingFooBarBaz;
+pub type SomeOtherTypeWithMethodsAndInliningAndTraits = UnderlyingFooBarBaz;
+
+impl AsRef<str> for UnderlyingFooBarBaz {
+    fn as_ref(&self) -> &str {
+        "hello"
+    }
+}
+
+impl UnderlyingFooBarBaz {
+    pub fn inherent_fn(&self) {}
+}
+
+impl AsRef<u8> for SomeOtherTypeWithMethodsAndInliningAndTraits {
+    fn as_ref(&self) -> &u8 {
+        b"hello"
+    }
+}
 
 pub mod huge_amount_of_consts {
     include!(concat!(env!("OUT_DIR"), "/huge_amount_of_consts.rs"));
@@ -485,4 +528,188 @@ pub mod search_results {
         () => {};
     }
 
+}
+
+pub mod fields {
+    pub struct Struct {
+        pub a: u8,
+        pub b: u32,
+    }
+    pub union Union {
+        pub a: u8,
+        pub b: u32,
+    }
+    pub enum Enum {
+        A {
+            a: u8,
+            b: u32,
+        },
+        B {
+            a: u8,
+            b: u32,
+        },
+    }
+}
+
+pub mod cfgs {
+    #[doc(cfg(all(
+        any(not(feature = "appservice-api-c"), not(feature = "appservice-api-s")),
+        any(not(feature = "client"), not(feature = "server")),
+    )))]
+    /// Some docs.
+    pub mod cfgs {}
+}
+
+pub struct ZyxwvutMethodDisambiguation;
+
+impl ZyxwvutMethodDisambiguation {
+    pub fn method_impl_disambiguation(&self) -> bool {
+        true
+    }
+}
+
+pub trait ZyxwvutTrait {
+    fn method_impl_disambiguation(&self, x: usize) -> usize;
+}
+
+impl ZyxwvutTrait for ZyxwvutMethodDisambiguation {
+    fn method_impl_disambiguation(&self, x: usize) -> usize {
+        x
+    }
+}
+
+pub mod foreign_impl_order {
+    pub trait Foo<const W: usize> {
+        fn f(&mut self, with: [u8; W]);
+    }
+
+    impl Foo<4> for [u8; 4] {
+        fn f(&mut self, fg: [u8; 4]) {}
+    }
+    impl Foo<2> for [u8; 2] {
+        fn f(&mut self, fg: [u8; 2]) {}
+    }
+    impl Foo<1> for [u8; 1] {
+        fn f(&mut self, fg: [u8; 1]) {}
+    }
+    impl Foo<3> for [u8; 3] {
+        fn f(&mut self, fg: [u8; 3]) {}
+    }
+}
+
+pub mod private {
+    pub struct Tuple(u32, u8);
+    pub struct Struct {
+        a: u8,
+    }
+
+    pub union Union {
+        a: u8,
+        b: u16,
+    }
+
+    pub enum Enum {
+        A,
+        #[doc(hidden)]
+        B,
+    }
+}
+
+pub mod trait_bounds {
+    pub trait OneBound: Sized {}
+    pub trait TwoBounds: Sized + Copy {}
+    pub trait ThreeBounds: Sized + Copy + Eq {}
+}
+
+pub mod short_docs {
+    /// mult_vec_num(x: &[f64], y: f64)
+    pub fn mult_vec_num() {}
+
+    /// subt_vec_num(x: &[f64], y: f64)
+    pub fn subt_vec_num() {}
+}
+
+pub mod long_list {
+    //! bla
+    //!
+    //! * Lorem ipsum dolor sit amet, consectetur adipiscing elit. Pellentesque et libero ut leo
+    //!   interdum laoreet vitae a mi. Aliquam erat volutpat. Suspendisse volutpat non quam non
+    //!   commodo.
+    //!
+    //!   Praesent enim neque, imperdiet sed nisl at, lobortis egestas augue. Sed vitae tristique
+    //!   augue. Phasellus vel pretium lectus.
+    //! * Praesent enim neque, imperdiet sed nisl at, lobortis egestas augue. Sed vitae tristique
+    //!   augue. Phasellus vel pretium lectus.
+    //! * Praesent enim neque, imperdiet sed nisl at, lobortis egestas augue. Sed vitae tristique
+    //!   augue. Phasellus vel pretium lectus.
+    //!
+    //! Another list:
+    //!
+    //! * [`TryFromBytes`](#a) indicates that a type may safely be converted from certain byte
+    //!   sequence (conditional on runtime checks)
+    //! * [`FromZeros`](#a) indicates that a sequence of zero bytes represents a valid instance of
+    //!   a type
+    //! * [`FromBytes`](#a) indicates that a type may safely be converted from an arbitrary byte
+    //!   sequence
+}
+
+pub struct ImplDoc;
+
+/// bla sondfosdnf sdfasd fadsd fdsa f ads fad sf sad f sad fasdfsafsa df dsafasdasd fsa dfadsfasd
+/// fads fadfadd
+///
+/// bla
+impl ImplDoc {
+    pub fn bar() {}
+}
+
+/// bla
+///
+/// bla
+impl ImplDoc {
+    pub fn bar2() {}
+}
+
+// ignore-tidy-linelength
+/// | this::is::a::kinda::very::long::header::number::one | this::is::a::kinda::very::long::header::number::two | this::is::a::kinda::very::long::header::number::three |
+/// |-|-|-|
+/// | bla | bli | blob |
+impl ImplDoc {
+    pub fn bar3() {}
+}
+
+/// # h1
+///
+/// bla
+impl ImplDoc {
+    pub fn bar4() {}
+}
+
+/// * list
+/// * list
+/// * list
+impl ImplDoc {
+    pub fn bar5() {}
+}
+
+pub trait ItemsTrait {
+    /// You want doc, here is doc!
+    ///
+    /// blablala
+    type F;
+
+    /// You want doc, here is doc!
+    ///
+    /// blablala
+    const X: u32;
+
+    /// You want doc, here is doc!
+    ///
+    /// blablala
+    fn foo() {}
+
+    /// You want doc, here is doc!
+    ///
+    /// blablala
+    fn bar();
 }

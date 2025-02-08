@@ -102,7 +102,7 @@ fn test_inner_packed() {
     struct Inner(u32);
 
     #[derive(Clone, Copy)]
-    struct Outer(u8, Inner);
+    struct Outer(#[allow(dead_code)] u8, Inner);
 
     let o = Outer(0, Inner(42));
     let _x = o.1;
@@ -138,7 +138,7 @@ fn test_derive() {
     assert_eq!(x.partial_cmp(&y).unwrap(), x.cmp(&y));
     x.hash(&mut DefaultHasher::new());
     P::default();
-    format!("{:?}", x);
+    let _ = format!("{:?}", x);
 }
 
 fn main() {

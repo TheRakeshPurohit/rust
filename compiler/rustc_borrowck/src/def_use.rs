@@ -1,17 +1,16 @@
-#![deny(rustc::untranslatable_diagnostic)]
-#![deny(rustc::diagnostic_outside_of_impl)]
+use rustc_middle::bug;
 use rustc_middle::mir::visit::{
     MutatingUseContext, NonMutatingUseContext, NonUseContext, PlaceContext,
 };
 
 #[derive(Eq, PartialEq, Clone)]
-pub enum DefUse {
+pub(crate) enum DefUse {
     Def,
     Use,
     Drop,
 }
 
-pub fn categorize(context: PlaceContext) -> Option<DefUse> {
+pub(crate) fn categorize(context: PlaceContext) -> Option<DefUse> {
     match context {
         ///////////////////////////////////////////////////////////////////////////
         // DEFS
@@ -44,20 +43,20 @@ pub fn categorize(context: PlaceContext) -> Option<DefUse> {
         PlaceContext::MutatingUse(MutatingUseContext::Projection) |
 
         // Borrows only consider their local used at the point of the borrow.
-        // This won't affect the results since we use this analysis for generators
+        // This won't affect the results since we use this analysis for coroutines
         // and we only care about the result at suspension points. Borrows cannot
         // cross suspension points so this behavior is unproblematic.
         PlaceContext::MutatingUse(MutatingUseContext::Borrow) |
         PlaceContext::NonMutatingUse(NonMutatingUseContext::SharedBorrow) |
-        PlaceContext::NonMutatingUse(NonMutatingUseContext::ShallowBorrow) |
+        PlaceContext::NonMutatingUse(NonMutatingUseContext::FakeBorrow) |
 
         // `PlaceMention` and `AscribeUserType` both evaluate the place, which must not
         // contain dangling references.
         PlaceContext::NonMutatingUse(NonMutatingUseContext::PlaceMention) |
         PlaceContext::NonUse(NonUseContext::AscribeUserTy(_)) |
 
-        PlaceContext::MutatingUse(MutatingUseContext::AddressOf) |
-        PlaceContext::NonMutatingUse(NonMutatingUseContext::AddressOf) |
+        PlaceContext::MutatingUse(MutatingUseContext::RawBorrow) |
+        PlaceContext::NonMutatingUse(NonMutatingUseContext::RawBorrow) |
         PlaceContext::NonMutatingUse(NonMutatingUseContext::Inspect) |
         PlaceContext::NonMutatingUse(NonMutatingUseContext::Copy) |
         PlaceContext::NonMutatingUse(NonMutatingUseContext::Move) |

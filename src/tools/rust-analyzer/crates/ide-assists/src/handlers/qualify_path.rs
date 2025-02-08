@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::iter;
 
 use hir::AsAssocItem;
@@ -6,6 +7,8 @@ use ide_db::{
     helpers::mod_path_to_ast,
     imports::import_assets::{ImportCandidate, LocatedImport},
 };
+use syntax::ast::HasGenericArgs;
+use syntax::Edition;
 use syntax::{
     ast,
     ast::{make, HasArgList},
@@ -37,20 +40,18 @@ use crate::{
 // ```
 pub(crate) fn qualify_path(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
     let (import_assets, syntax_under_caret) = find_importable_node(ctx)?;
-    let mut proposed_imports =
-        import_assets.search_for_relative_paths(&ctx.sema, ctx.config.prefer_no_std);
+    let cfg = ctx.config.import_path_config();
+
+    let mut proposed_imports: Vec<_> =
+        import_assets.search_for_relative_paths(&ctx.sema, cfg).collect();
     if proposed_imports.is_empty() {
         return None;
     }
 
-    let range = match &syntax_under_caret {
-        NodeOrToken::Node(node) => ctx.sema.original_range(node).range,
-        NodeOrToken::Token(token) => token.text_range(),
-    };
     let candidate = import_assets.import_candidate();
-    let qualify_candidate = match syntax_under_caret {
+    let qualify_candidate = match syntax_under_caret.clone() {
         NodeOrToken::Node(syntax_under_caret) => match candidate {
-            ImportCandidate::Path(candidate) if candidate.qualifier.is_some() => {
+            ImportCandidate::Path(candidate) if !candidate.qualifier.is_empty() => {
                 cov_mark::hit!(qualify_path_qualifier_start);
                 let path = ast::Path::cast(syntax_under_caret)?;
                 let (prev_segment, segment) = (path.qualifier()?.segment()?, path.segment()?);
@@ -79,20 +80,40 @@ pub(crate) fn qualify_path(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option
     };
 
     // we aren't interested in different namespaces
+    proposed_imports.sort_by(|a, b| a.import_path.cmp(&b.import_path));
     proposed_imports.dedup_by(|a, b| a.import_path == b.import_path);
+
+    let range = match &syntax_under_caret {
+        NodeOrToken::Node(node) => ctx.sema.original_range(node).range,
+        NodeOrToken::Token(token) => token.text_range(),
+    };
+    let current_module = ctx
+        .sema
+        .scope(&match syntax_under_caret {
+            NodeOrToken::Node(node) => node.clone(),
+            NodeOrToken::Token(t) => t.parent()?,
+        })
+        .map(|scope| scope.module());
+    let current_edition =
+        current_module.map(|it| it.krate().edition(ctx.db())).unwrap_or(Edition::CURRENT);
+    // prioritize more relevant imports
+    proposed_imports.sort_by_key(|import| {
+        Reverse(super::auto_import::relevance_score(ctx, import, current_module.as_ref()))
+    });
 
     let group_label = group_label(candidate);
     for import in proposed_imports {
         acc.add_group(
             &group_label,
             AssistId("qualify_path", AssistKind::QuickFix),
-            label(ctx.db(), candidate, &import),
+            label(ctx.db(), candidate, &import, current_edition),
             range,
             |builder| {
                 qualify_candidate.qualify(
                     |replace_with: String| builder.replace(range, replace_with),
                     &import.import_path,
                     import.item_to_import,
+                    current_edition,
                 )
             },
         );
@@ -113,8 +134,9 @@ impl QualifyCandidate<'_> {
         mut replacer: impl FnMut(String),
         import: &hir::ModPath,
         item: hir::ItemInNs,
+        edition: Edition,
     ) {
-        let import = mod_path_to_ast(import);
+        let import = mod_path_to_ast(import, edition);
         match self {
             QualifyCandidate::QualifierStart(segment, generics) => {
                 let generics = generics.as_ref().map_or_else(String::new, ToString::to_string);
@@ -186,7 +208,7 @@ fn find_trait_method(
     if let Some(hir::AssocItem::Function(method)) =
         trait_.items(db).into_iter().find(|item: &hir::AssocItem| {
             item.name(db)
-                .map(|name| name.display(db).to_string() == trait_method_name.to_string())
+                .map(|name| name.as_str() == trait_method_name.text().trim_start_matches("r#"))
                 .unwrap_or(false)
         })
     {
@@ -197,11 +219,9 @@ fn find_trait_method(
 }
 
 fn item_as_trait(db: &RootDatabase, item: hir::ItemInNs) -> Option<hir::Trait> {
-    let item_module_def = item.as_module_def()?;
-
-    match item_module_def {
+    match item.into_module_def() {
         hir::ModuleDef::Trait(trait_) => Some(trait_),
-        _ => item_module_def.as_assoc_item(db)?.containing_trait(db),
+        item_module_def => item_module_def.as_assoc_item(db)?.container_trait(db),
     }
 }
 
@@ -216,14 +236,19 @@ fn group_label(candidate: &ImportCandidate) -> GroupLabel {
     GroupLabel(format!("Qualify {name}"))
 }
 
-fn label(db: &RootDatabase, candidate: &ImportCandidate, import: &LocatedImport) -> String {
+fn label(
+    db: &RootDatabase,
+    candidate: &ImportCandidate,
+    import: &LocatedImport,
+    edition: Edition,
+) -> String {
     let import_path = &import.import_path;
 
     match candidate {
-        ImportCandidate::Path(candidate) if candidate.qualifier.is_none() => {
-            format!("Qualify as `{}`", import_path.display(db))
+        ImportCandidate::Path(candidate) if candidate.qualifier.is_empty() => {
+            format!("Qualify as `{}`", import_path.display(db, edition))
         }
-        _ => format!("Qualify with `{}`", import_path.display(db)),
+        _ => format!("Qualify with `{}`", import_path.display(db, edition)),
     }
 }
 

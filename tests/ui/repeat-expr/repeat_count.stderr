@@ -1,16 +1,25 @@
 error[E0435]: attempt to use a non-constant value in a constant
   --> $DIR/repeat_count.rs:5:17
    |
-LL |     let n = 1;
-   |     ----- help: consider using `const` instead of `let`: `const n`
 LL |     let a = [0; n];
    |                 ^ non-constant value
+   |
+help: consider using `const` instead of `let`
+   |
+LL |     const n: /* Type */ = 1;
+   |     ~~~~~  ++++++++++++
 
 error[E0308]: mismatched types
   --> $DIR/repeat_count.rs:7:17
    |
 LL |     let b = [0; ()];
    |                 ^^ expected `usize`, found `()`
+
+error[E0308]: mismatched types
+  --> $DIR/repeat_count.rs:31:17
+   |
+LL |     let g = [0; G { g: () }];
+   |                 ^^^^^^^^^^^ expected `usize`, found `G`
 
 error[E0308]: mismatched types
   --> $DIR/repeat_count.rs:10:17
@@ -29,12 +38,6 @@ error[E0308]: mismatched types
    |
 LL |     let e = [0; "foo"];
    |                 ^^^^^ expected `usize`, found `&str`
-
-error[E0308]: mismatched types
-  --> $DIR/repeat_count.rs:31:17
-   |
-LL |     let g = [0; G { g: () }];
-   |                 ^^^^^^^^^^^ expected `usize`, found `G`
 
 error[E0308]: mismatched types
   --> $DIR/repeat_count.rs:19:17

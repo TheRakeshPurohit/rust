@@ -4,16 +4,15 @@
 //! etc. This is run by default on `./x.py test` and as part of the auto
 //! builders. The tidy checks can be executed with `./x.py test tidy`.
 
-use tidy::*;
-
 use std::collections::VecDeque;
-use std::env;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
-use std::process;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::{self, scope, ScopedJoinHandle};
+use std::thread::{self, ScopedJoinHandle, scope};
+use std::{env, process};
+
+use tidy::*;
 
 fn main() {
     // Running Cargo will read the libstd Cargo.toml
@@ -35,11 +34,17 @@ fn main() {
     let library_path = root_path.join("library");
     let compiler_path = root_path.join("compiler");
     let librustdoc_path = src_path.join("librustdoc");
+    let crashes_path = tests_path.join("crashes");
 
     let args: Vec<String> = env::args().skip(1).collect();
-
-    let verbose = args.iter().any(|s| *s == "--verbose");
-    let bless = args.iter().any(|s| *s == "--bless");
+    let (cfg_args, pos_args) = match args.iter().position(|arg| arg == "--") {
+        Some(pos) => (&args[..pos], &args[pos + 1..]),
+        None => (&args[..], [].as_slice()),
+    };
+    let verbose = cfg_args.iter().any(|s| *s == "--verbose");
+    let bless = cfg_args.iter().any(|s| *s == "--bless");
+    let extra_checks =
+        cfg_args.iter().find(|s| s.starts_with("--extra-checks=")).map(String::as_str);
 
     let bad = std::sync::Arc::new(AtomicBool::new(false));
 
@@ -90,23 +95,31 @@ fn main() {
         check!(target_specific_tests, &tests_path);
 
         // Checks that are done on the cargo workspace.
-        check!(deps, &root_path, &cargo);
+        check!(deps, &root_path, &cargo, bless);
         check!(extdeps, &root_path);
 
         // Checks over tests.
         check!(tests_placement, &root_path);
+        check!(tests_revision_unpaired_stdout_stderr, &tests_path);
         check!(debug_artifacts, &tests_path);
-        check!(ui_tests, &tests_path);
+        check!(ui_tests, &root_path, bless);
+        // FIXME(jieyouxu): remove this check once all run-make tests are ported over to rmake.rs.
+        check!(run_make_tests, &tests_path, &src_path, bless);
         check!(mir_opt_tests, &tests_path, bless);
         check!(rustdoc_gui_tests, &tests_path);
+        check!(rustdoc_css_themes, &librustdoc_path);
+        check!(rustdoc_templates, &librustdoc_path);
+        check!(known_bug, &crashes_path);
+        check!(unknown_revision, &tests_path);
 
         // Checks that only make sense for the compiler.
         check!(error_codes, &root_path, &[&compiler_path, &librustdoc_path], verbose);
         check!(fluent_alphabetical, &compiler_path, bless);
+        check!(fluent_period, &compiler_path);
+        check!(target_policy, &root_path);
 
         // Checks that only make sense for the std libs.
         check!(pal, &library_path);
-        check!(primitive_docs, &library_path);
 
         // Checks that need to be done for both the compiler and std libraries.
         check!(unit_tests, &src_path);
@@ -127,6 +140,7 @@ fn main() {
         check!(edition, &library_path);
 
         check!(alphabetical, &src_path);
+        check!(alphabetical, &tests_path);
         check!(alphabetical, &compiler_path);
         check!(alphabetical, &library_path);
 
@@ -150,6 +164,8 @@ fn main() {
             r
         };
         check!(unstable_book, &src_path, collected);
+
+        check!(ext_tool_checks, &root_path, &output_directory, bless, extra_checks, pos_args);
     });
 
     if bad.load(Ordering::Relaxed) {

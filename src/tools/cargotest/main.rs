@@ -1,7 +1,6 @@
-use std::env;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::{env, fs};
 
 struct Test {
     repo: &'static str,
@@ -140,7 +139,7 @@ fn clone_repo(test: &Test, out_dir: &Path) -> PathBuf {
             let status = Command::new("git")
                 .arg("fetch")
                 .arg(test.repo)
-                .arg("master")
+                .arg(test.sha)
                 .arg(&format!("--depth={}", depth))
                 .current_dir(&out_dir)
                 .status()

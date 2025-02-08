@@ -15,6 +15,7 @@ pub fn streaming_output(
     err: ChildStderr,
     on_stdout_line: &mut dyn FnMut(&str),
     on_stderr_line: &mut dyn FnMut(&str),
+    on_eof: &mut dyn FnMut(),
 ) -> io::Result<(Vec<u8>, Vec<u8>)> {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
@@ -23,7 +24,7 @@ pub fn streaming_output(
         let idx = if eof {
             data.len()
         } else {
-            match data.iter().rposition(|b| *b == b'\n') {
+            match data.iter().rposition(|&b| b == b'\n') {
                 Some(i) => i + 1,
                 None => return,
             }
@@ -44,6 +45,9 @@ pub fn streaming_output(
                     on_stderr_line(line);
                 }
             }
+            if eof {
+                on_eof();
+            }
         }
     })?;
 
@@ -63,6 +67,7 @@ pub fn spawn_with_streaming_output(
         child.stderr.take().unwrap(),
         on_stdout_line,
         on_stderr_line,
+        &mut || (),
     )?;
     let status = child.wait()?;
     Ok(Output { status, stdout, stderr })
@@ -157,7 +162,7 @@ mod imp {
         pipe::NamedPipe,
         Overlapped,
     };
-    use winapi::shared::winerror::ERROR_BROKEN_PIPE;
+    use windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE;
 
     struct Pipe<'a> {
         dst: &'a mut Vec<u8>,
@@ -207,17 +212,13 @@ mod imp {
 
     impl<'a> Pipe<'a> {
         unsafe fn new<P: IntoRawHandle>(p: P, dst: &'a mut Vec<u8>) -> Pipe<'a> {
-            Pipe {
-                dst,
-                pipe: NamedPipe::from_raw_handle(p.into_raw_handle()),
-                overlapped: Overlapped::zero(),
-                done: false,
-            }
+            let pipe = unsafe { NamedPipe::from_raw_handle(p.into_raw_handle()) };
+            Pipe { dst, pipe, overlapped: Overlapped::zero(), done: false }
         }
 
         unsafe fn read(&mut self) -> io::Result<()> {
-            let dst = slice_to_end(self.dst);
-            match self.pipe.read_overlapped(dst, self.overlapped.raw()) {
+            let dst = unsafe { slice_to_end(self.dst) };
+            match unsafe { self.pipe.read_overlapped(dst, self.overlapped.raw()) } {
                 Ok(_) => Ok(()),
                 Err(e) => {
                     if e.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) {
@@ -232,7 +233,7 @@ mod imp {
 
         unsafe fn complete(&mut self, status: &CompletionStatus) {
             let prev = self.dst.len();
-            self.dst.set_len(prev + status.bytes_transferred() as usize);
+            unsafe { self.dst.set_len(prev + status.bytes_transferred() as usize) };
             if status.bytes_transferred() == 0 {
                 self.done = true;
             }
@@ -246,7 +247,9 @@ mod imp {
         if v.capacity() == v.len() {
             v.reserve(1);
         }
-        slice::from_raw_parts_mut(v.as_mut_ptr().add(v.len()), v.capacity() - v.len())
+        let data = unsafe { v.as_mut_ptr().add(v.len()) };
+        let len = v.capacity() - v.len();
+        unsafe { slice::from_raw_parts_mut(data, len) }
     }
 }
 

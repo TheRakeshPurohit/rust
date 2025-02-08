@@ -1,6 +1,4 @@
-// min-lldb-version: 310
-
-// compile-flags:-g
+//@ compile-flags:-g
 
 #![allow(unused_variables)]
 #![feature(omit_gdb_pretty_printer_section)]

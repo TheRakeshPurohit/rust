@@ -1,4 +1,4 @@
-// check-pass
+//@ check-pass
 #![feature(type_alias_impl_trait)]
 
 fn opaque<'a: 'a>() -> impl Sized {}
@@ -11,8 +11,13 @@ fn test_closure() {
     closure(&opaque());
 }
 
-type Opaque<'a> = impl Sized;
-fn define<'a>() -> Opaque<'a> {}
+mod helper {
+    pub type Opaque2 = impl Sized;
+    pub type Opaque<'a> = Opaque2;
+    fn define<'a>() -> Opaque<'a> {}
+}
+
+use helper::*;
 
 fn test_tait(_: &Opaque<'_>) {
     None::<&'static Opaque<'_>>;

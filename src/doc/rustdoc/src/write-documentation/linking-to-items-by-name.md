@@ -89,8 +89,8 @@ fn Foo() {}
 
 These prefixes will be stripped when displayed in the documentation, so `[struct@Foo]` will be
 rendered as `Foo`. The following prefixes are available: `struct`, `enum`, `trait`, `union`,
-`mod`, `module`, `const`, `constant`, `fn`, `function`, `method`, `derive`, `type`, `value`,
-`macro`, `prim` or `primitive`.
+`mod`, `module`, `const`, `constant`, `fn`, `function`, `field`, `variant`, `method`, `derive`,
+`type`, `value`, `macro`, `prim` or `primitive`.
 
 You can also disambiguate for functions by adding `()` after the function name,
 or for macros by adding `!` after the macro name. The macro `!` can be followed by `()`, `{}`,
@@ -151,3 +151,21 @@ will be given, even if the link fails to resolve. For example, any link containi
 characters will be ignored.
 
 [#72243]: https://github.com/rust-lang/rust/issues/72243
+
+## What happens in case an intra-doc link cannot be generated
+
+In some cases (items behind a `cfg` for example), an intra-doc link cannot be generated to item.
+There are different ways to create a link in markdown, and depending on the one you use, it will
+render differently in this case:
+
+```md
+1. [a]
+2. [b][c]
+3. [d](e)
+4. [f]
+
+[f]: g
+```
+
+`1.` and `2.` will be displayed as is in the rendered documentation (ie, `[a]` and `[b][c]`)
+whereas `3.` and `4.` will be replaced by a link targeting `e` for `[d](e)` and `g` for `[f]`.

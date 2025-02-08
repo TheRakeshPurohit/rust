@@ -1,21 +1,17 @@
-use clippy_utils::higher;
+use clippy_utils::diagnostics::span_lint_and_sugg;
+use clippy_utils::source::{reindent_multiline, snippet_indent, snippet_with_applicability, snippet_with_context};
 use clippy_utils::{
-    can_move_expr_to_closure_no_visit,
-    diagnostics::span_lint_and_sugg,
-    is_expr_final_block_expr, is_expr_used_or_unified, match_def_path, paths, peel_hir_expr_while,
-    source::{reindent_multiline, snippet_indent, snippet_with_applicability, snippet_with_context},
-    SpanlessEq,
+    SpanlessEq, can_move_expr_to_closure_no_visit, higher, is_expr_final_block_expr, is_expr_used_or_unified,
+    peel_hir_expr_while,
 };
 use core::fmt::{self, Write};
 use rustc_errors::Applicability;
-use rustc_hir::{
-    hir_id::HirIdSet,
-    intravisit::{walk_expr, Visitor},
-    Block, Expr, ExprKind, Guard, HirId, Let, Pat, Stmt, StmtKind, UnOp,
-};
+use rustc_hir::hir_id::HirIdSet;
+use rustc_hir::intravisit::{Visitor, walk_expr};
+use rustc_hir::{Block, Expr, ExprKind, HirId, Pat, Stmt, StmtKind, UnOp};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
-use rustc_span::{Span, SyntaxContext, DUMMY_SP};
+use rustc_session::declare_lint_pass;
+use rustc_span::{DUMMY_SP, Span, SyntaxContext, sym};
 
 declare_clippy_lint! {
     /// ### What it does
@@ -27,7 +23,7 @@ declare_clippy_lint! {
     ///
     /// ### Known problems
     /// The suggestion may have type inference errors in some cases. e.g.
-    /// ```rust
+    /// ```no_run
     /// let mut map = std::collections::HashMap::new();
     /// let _ = if !map.contains_key(&0) {
     ///     map.insert(0, 0)
@@ -37,7 +33,7 @@ declare_clippy_lint! {
     /// ```
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # use std::collections::HashMap;
     /// # let mut map = HashMap::new();
     /// # let k = 1;
@@ -47,7 +43,7 @@ declare_clippy_lint! {
     /// }
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # use std::collections::HashMap;
     /// # let mut map = HashMap::new();
     /// # let k = 1;
@@ -69,16 +65,21 @@ impl<'tcx> LateLintPass<'tcx> for HashMapPass {
             return;
         }
 
-        let Some(higher::If { cond: cond_expr, then: then_expr, r#else: else_expr }) = higher::If::hir(expr) else {
-            return
+        let Some(higher::If {
+            cond: cond_expr,
+            then: then_expr,
+            r#else: else_expr,
+        }) = higher::If::hir(expr)
+        else {
+            return;
         };
 
         let Some((map_ty, contains_expr)) = try_parse_contains(cx, cond_expr) else {
-            return
+            return;
         };
 
         let Some(then_search) = find_insert_calls(cx, &contains_expr, then_expr) else {
-            return
+            return;
         };
 
         let mut app = Applicability::MachineApplicable;
@@ -185,8 +186,8 @@ impl<'tcx> LateLintPass<'tcx> for HashMapPass {
             cx,
             MAP_ENTRY,
             expr.span,
-            &format!("usage of `contains_key` followed by `insert` on a `{}`", map_ty.name()),
-            "try this",
+            format!("usage of `contains_key` followed by `insert` on a `{}`", map_ty.name()),
+            "try",
             sugg,
             app,
         );
@@ -213,12 +214,31 @@ impl MapType {
     }
 }
 
+/// Details on an expression checking whether a map contains a key.
+///
+/// For instance, with the following:
+/// ```ignore
+/// !!!self.the_map.contains_key("the_key")
+/// ```
+///
+/// - `negated` will be set to `true` (the 3 `!` negate the condition)
+/// - `map` will be the `self.the_map` expression
+/// - `key` will be the `"the_key"` expression
 struct ContainsExpr<'tcx> {
+    /// Whether the check for `contains_key` was negated.
     negated: bool,
+    /// The map on which the check is performed.
     map: &'tcx Expr<'tcx>,
+    /// The key that is checked to be contained.
     key: &'tcx Expr<'tcx>,
+    /// The context of the whole condition expression.
     call_ctxt: SyntaxContext,
 }
+
+/// Inspect the given expression and return details about the `contains_key` check.
+///
+/// If the given expression is not a `contains_key` check against a `BTreeMap` or a `HashMap`,
+/// return `None`.
 fn try_parse_contains<'tcx>(cx: &LateContext<'_>, expr: &'tcx Expr<'_>) -> Option<(MapType, ContainsExpr<'tcx>)> {
     let mut negated = false;
     let expr = peel_hir_expr_while(expr, |e| match e.kind {
@@ -228,6 +248,7 @@ fn try_parse_contains<'tcx>(cx: &LateContext<'_>, expr: &'tcx Expr<'_>) -> Optio
         },
         _ => None,
     });
+
     match expr.kind {
         ExprKind::MethodCall(
             _,
@@ -240,7 +261,7 @@ fn try_parse_contains<'tcx>(cx: &LateContext<'_>, expr: &'tcx Expr<'_>) -> Optio
                 },
             ],
             _,
-        ) if key_span.ctxt() == expr.span.ctxt() => {
+        ) if key_span.eq_ctxt(expr.span) => {
             let id = cx.typeck_results().type_dependent_def_id(expr.hir_id)?;
             let expr = ContainsExpr {
                 negated,
@@ -248,9 +269,9 @@ fn try_parse_contains<'tcx>(cx: &LateContext<'_>, expr: &'tcx Expr<'_>) -> Optio
                 key,
                 call_ctxt: expr.span.ctxt(),
             };
-            if match_def_path(cx, id, &paths::BTREEMAP_CONTAINS_KEY) {
+            if cx.tcx.is_diagnostic_item(sym::btreemap_contains_key, id) {
                 Some((MapType::BTree, expr))
-            } else if match_def_path(cx, id, &paths::HASHMAP_CONTAINS_KEY) {
+            } else if cx.tcx.is_diagnostic_item(sym::hashmap_contains_key, id) {
                 Some((MapType::Hash, expr))
             } else {
                 None
@@ -260,15 +281,32 @@ fn try_parse_contains<'tcx>(cx: &LateContext<'_>, expr: &'tcx Expr<'_>) -> Optio
     }
 }
 
+/// Details on an expression inserting a key into a map.
+///
+/// For instance, on the following:
+/// ```ignore
+/// self.the_map.insert("the_key", 3 + 4);
+/// ```
+///
+/// - `map` will be the `self.the_map` expression
+/// - `key` will be the `"the_key"` expression
+/// - `value` will be the `3 + 4` expression
 struct InsertExpr<'tcx> {
+    /// The map into which the insertion is performed.
     map: &'tcx Expr<'tcx>,
+    /// The key at which to insert.
     key: &'tcx Expr<'tcx>,
+    /// The value to insert.
     value: &'tcx Expr<'tcx>,
 }
+
+/// Inspect the given expression and return details about the `insert` call.
+///
+/// If the given expression is not an `insert` call into a `BTreeMap` or a `HashMap`, return `None`.
 fn try_parse_insert<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) -> Option<InsertExpr<'tcx>> {
     if let ExprKind::MethodCall(_, map, [key, value], _) = expr.kind {
         let id = cx.typeck_results().type_dependent_def_id(expr.hir_id)?;
-        if match_def_path(cx, id, &paths::BTREEMAP_INSERT) || match_def_path(cx, id, &paths::HASHMAP_INSERT) {
+        if cx.tcx.is_diagnostic_item(sym::btreemap_insert, id) || cx.tcx.is_diagnostic_item(sym::hashmap_insert, id) {
             Some(InsertExpr { map, key, value })
         } else {
             None
@@ -297,7 +335,7 @@ struct Insertion<'tcx> {
     value: &'tcx Expr<'tcx>,
 }
 
-/// This visitor needs to do a multiple things:
+/// This visitor needs to do multiple things:
 /// * Find all usages of the map. An insertion can only be made before any other usages of the map.
 /// * Determine if there's an insertion using the same key. There's no need for the entry api
 ///   otherwise.
@@ -320,7 +358,7 @@ struct InsertSearcher<'cx, 'tcx> {
     can_use_entry: bool,
     /// Whether this expression is the final expression in this code path. This may be a statement.
     in_tail_pos: bool,
-    // Is this expression a single insert. A slightly better suggestion can be made in this case.
+    /// Is this expression a single insert. A slightly better suggestion can be made in this case.
     is_single_insert: bool,
     /// If the visitor has seen the map being used.
     is_map_used: bool,
@@ -345,13 +383,26 @@ impl<'tcx> InsertSearcher<'_, 'tcx> {
         res
     }
 
-    /// Visits an expression which is not itself in a tail position, but other sibling expressions
+    /// Visit an expression which is not itself in a tail position, but other sibling expressions
     /// may be. e.g. if conditions
     fn visit_non_tail_expr(&mut self, e: &'tcx Expr<'_>) {
         let in_tail_pos = self.in_tail_pos;
         self.in_tail_pos = false;
         self.visit_expr(e);
         self.in_tail_pos = in_tail_pos;
+    }
+
+    /// Visit the key and value expression of an insert expression.
+    /// There may not be uses of the map in either of those two either.
+    fn visit_insert_expr_arguments(&mut self, e: &InsertExpr<'tcx>) {
+        let in_tail_pos = self.in_tail_pos;
+        let allow_insert_closure = self.allow_insert_closure;
+        let is_single_insert = self.is_single_insert;
+        walk_expr(self, e.key);
+        walk_expr(self, e.value);
+        self.in_tail_pos = in_tail_pos;
+        self.allow_insert_closure = allow_insert_closure;
+        self.is_single_insert = is_single_insert;
     }
 }
 impl<'tcx> Visitor<'tcx> for InsertSearcher<'_, 'tcx> {
@@ -372,13 +423,16 @@ impl<'tcx> Visitor<'tcx> for InsertSearcher<'_, 'tcx> {
                 }
             },
             StmtKind::Expr(e) => self.visit_expr(e),
-            StmtKind::Local(l) => {
+            StmtKind::Let(l) => {
                 self.visit_pat(l.pat);
                 if let Some(e) = l.init {
                     self.allow_insert_closure &= !self.in_tail_pos;
                     self.in_tail_pos = false;
                     self.is_single_insert = false;
                     self.visit_expr(e);
+                }
+                if let Some(els) = &l.els {
+                    self.visit_block(els);
                 }
             },
             StmtKind::Item(_) => {
@@ -424,6 +478,7 @@ impl<'tcx> Visitor<'tcx> for InsertSearcher<'_, 'tcx> {
 
         match try_parse_insert(self.cx, expr) {
             Some(insert_expr) if SpanlessEq::new(self.cx).eq_expr(self.map, insert_expr.map) => {
+                self.visit_insert_expr_arguments(&insert_expr);
                 // Multiple inserts, inserts with a different key, and inserts from a macro can't use the entry api.
                 if self.is_map_used
                     || !SpanlessEq::new(self.cx).eq_expr(self.key, insert_expr.key)
@@ -464,7 +519,7 @@ impl<'tcx> Visitor<'tcx> for InsertSearcher<'_, 'tcx> {
                     let mut is_map_used = self.is_map_used;
                     for arm in arms {
                         self.visit_pat(arm.pat);
-                        if let Some(Guard::If(guard) | Guard::IfLet(&Let { init: guard, .. })) = arm.guard {
+                        if let Some(guard) = arm.guard {
                             self.visit_non_tail_expr(guard);
                         }
                         is_map_used |= self.visit_cond_arm(arm.body);
@@ -623,12 +678,12 @@ fn find_insert_calls<'tcx>(
         map: contains_expr.map,
         key: contains_expr.key,
         ctxt: expr.span.ctxt(),
-        edits: Vec::new(),
-        is_map_used: false,
         allow_insert_closure: true,
         can_use_entry: true,
         in_tail_pos: true,
         is_single_insert: true,
+        is_map_used: false,
+        edits: Vec::new(),
         loops: Vec::new(),
         locals: HirIdSet::default(),
     };

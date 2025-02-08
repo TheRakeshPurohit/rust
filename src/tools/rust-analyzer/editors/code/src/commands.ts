@@ -3,25 +3,35 @@ import * as lc from "vscode-languageclient";
 import * as ra from "./lsp_ext";
 import * as path from "path";
 
-import { Ctx, Cmd, CtxInit, discoverWorkspace } from "./ctx";
-import { applySnippetWorkspaceEdit, applySnippetTextEdits } from "./snippets";
-import { spawnSync } from "child_process";
-import { RunnableQuickPick, selectRunnable, createTask, createArgs } from "./run";
-import { AstInspector } from "./ast_inspector";
+import type { Ctx, Cmd, CtxInit } from "./ctx";
+import {
+    applySnippetWorkspaceEdit,
+    applySnippetTextEdits,
+    type SnippetTextDocumentEdit,
+} from "./snippets";
+import {
+    type RunnableQuickPick,
+    selectRunnable,
+    createTaskFromRunnable,
+    createCargoArgs,
+} from "./run";
 import {
     isRustDocument,
+    isCargoRunnableArgs,
     isCargoTomlDocument,
     sleep,
     isRustEditor,
-    RustEditor,
-    RustDocument,
+    type RustEditor,
+    type RustDocument,
+    unwrapUndefinable,
 } from "./util";
 import { startDebugSession, makeDebugConfig } from "./debug";
-import { LanguageClient } from "vscode-languageclient/node";
-import { LINKED_COMMANDS } from "./client";
-import { DependencyId } from "./dependencies_provider";
+import type { LanguageClient } from "vscode-languageclient/node";
+import { HOVER_REFERENCE_COMMAND } from "./client";
+import type { DependencyId } from "./dependencies_provider";
+import { log } from "./util";
+import type { SyntaxElement } from "./syntax_tree_provider";
 
-export * from "./ast_inspector";
 export * from "./run";
 
 export function analyzerStatus(ctx: CtxInit): Cmd {
@@ -47,7 +57,7 @@ export function analyzerStatus(ctx: CtxInit): Cmd {
     })();
 
     ctx.pushExtCleanup(
-        vscode.workspace.registerTextDocumentContentProvider("rust-analyzer-status", tdcp)
+        vscode.workspace.registerTextDocumentContentProvider("rust-analyzer-status", tdcp),
     );
 
     return async () => {
@@ -79,19 +89,13 @@ export function memoryUsage(ctx: CtxInit): Cmd {
     })();
 
     ctx.pushExtCleanup(
-        vscode.workspace.registerTextDocumentContentProvider("rust-analyzer-memory", tdcp)
+        vscode.workspace.registerTextDocumentContentProvider("rust-analyzer-memory", tdcp),
     );
 
     return async () => {
         tdcp.eventEmitter.fire(tdcp.uri);
         const document = await vscode.workspace.openTextDocument(tdcp.uri);
         return vscode.window.showTextDocument(document, vscode.ViewColumn.Two, true);
-    };
-}
-
-export function shuffleCrateGraph(ctx: CtxInit): Cmd {
-    return async () => {
-        return ctx.client.sendRequest(ra.shuffleCrateGraph);
     };
 }
 
@@ -104,6 +108,12 @@ export function triggerParameterHints(_: CtxInit): Cmd {
         if (parameterHintsEnabled) {
             await vscode.commands.executeCommand("editor.action.triggerParameterHints");
         }
+    };
+}
+
+export function rename(_: CtxInit): Cmd {
+    return async () => {
+        await vscode.commands.executeCommand("editor.action.rename");
     };
 }
 
@@ -125,11 +135,12 @@ export function matchingBrace(ctx: CtxInit): Cmd {
         const response = await client.sendRequest(ra.matchingBrace, {
             textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(editor.document),
             positions: editor.selections.map((s) =>
-                client.code2ProtocolConverter.asPosition(s.active)
+                client.code2ProtocolConverter.asPosition(s.active),
             ),
         });
         editor.selections = editor.selections.map((sel, idx) => {
-            const active = client.protocol2CodeConverter.asPosition(response[idx]);
+            const position = unwrapUndefinable(response[idx]);
+            const active = client.protocol2CodeConverter.asPosition(position);
             const anchor = sel.isEmpty ? active : sel.anchor;
             return new vscode.Selection(anchor, active);
         });
@@ -194,7 +205,7 @@ export function onEnter(ctx: CtxInit): Cmd {
         const lcEdits = await client
             .sendRequest(ra.onEnter, {
                 textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(
-                    editor.document
+                    editor.document,
                 ),
                 position: client.code2ProtocolConverter.asPosition(editor.selection.active),
             })
@@ -231,7 +242,7 @@ export function parentModule(ctx: CtxInit): Cmd {
         if (!locations) return;
 
         if (locations.length === 1) {
-            const loc = locations[0];
+            const loc = unwrapUndefinable(locations[0]);
 
             const uri = client.protocol2CodeConverter.asUri(loc.targetUri);
             const range = client.protocol2CodeConverter.asRange(loc.targetRange);
@@ -247,7 +258,7 @@ export function parentModule(ctx: CtxInit): Cmd {
                 client,
                 uri,
                 position,
-                locations.map((loc) => lc.Location.create(loc.targetUri, loc.targetRange))
+                locations.map((loc) => lc.Location.create(loc.targetUri, loc.targetRange)),
             );
         }
     };
@@ -276,13 +287,13 @@ export function openCargoToml(ctx: CtxInit): Cmd {
 
 export function revealDependency(ctx: CtxInit): Cmd {
     return async (editor: RustEditor) => {
-        if (!ctx.dependencies?.isInitialized()) {
+        if (!ctx.dependenciesProvider?.isInitialized()) {
             return;
         }
         const documentPath = editor.document.uri.fsPath;
-        const dep = ctx.dependencies?.getDependency(documentPath);
+        const dep = ctx.dependenciesProvider?.getDependency(documentPath);
         if (dep) {
-            await ctx.treeView?.reveal(dep, { select: true, expand: true });
+            await ctx.dependencyTreeView?.reveal(dep, { select: true, expand: true });
         } else {
             await revealParentChain(editor.document, ctx);
         }
@@ -328,15 +339,92 @@ async function revealParentChain(document: RustDocument, ctx: CtxInit) {
             // a open file referencing the old version
             return;
         }
-    } while (!ctx.dependencies?.contains(documentPath));
+    } while (!ctx.dependenciesProvider?.contains(documentPath));
     parentChain.reverse();
     for (const idx in parentChain) {
-        await ctx.treeView?.reveal(parentChain[idx], { select: true, expand: true });
+        const treeView = ctx.dependencyTreeView;
+        if (!treeView) {
+            continue;
+        }
+
+        const dependency = unwrapUndefinable(parentChain[idx]);
+        await treeView.reveal(dependency, { select: true, expand: true });
     }
 }
 
 export async function execRevealDependency(e: RustEditor): Promise<void> {
     await vscode.commands.executeCommand("rust-analyzer.revealDependency", e);
+}
+
+export function syntaxTreeReveal(): Cmd {
+    return async (element: SyntaxElement) => {
+        const activeEditor = vscode.window.activeTextEditor;
+
+        if (activeEditor !== undefined) {
+            const start = activeEditor.document.positionAt(element.start);
+            const end = activeEditor.document.positionAt(element.end);
+
+            const newSelection = new vscode.Selection(start, end);
+
+            activeEditor.selection = newSelection;
+            activeEditor.revealRange(newSelection);
+        }
+    };
+}
+
+function elementToString(
+    activeDocument: vscode.TextDocument,
+    element: SyntaxElement,
+    depth: number = 0,
+): string {
+    let result = "  ".repeat(depth);
+    const start = element.istart ?? element.start;
+    const end = element.iend ?? element.end;
+
+    result += `${element.kind}@${start}..${end}`;
+
+    if (element.type === "Token") {
+        const startPosition = activeDocument.positionAt(element.start);
+        const endPosition = activeDocument.positionAt(element.end);
+        const text = activeDocument.getText(new vscode.Range(startPosition, endPosition));
+        // JSON.stringify quotes and escapes the string for us.
+        result += ` ${JSON.stringify(text)}\n`;
+    } else {
+        result += "\n";
+        for (const child of element.children) {
+            result += elementToString(activeDocument, child, depth + 1);
+        }
+    }
+
+    return result;
+}
+
+export function syntaxTreeCopy(): Cmd {
+    return async (element: SyntaxElement) => {
+        const activeDocument = vscode.window.activeTextEditor?.document;
+        if (!activeDocument) {
+            return;
+        }
+
+        const result = elementToString(activeDocument, element);
+        await vscode.env.clipboard.writeText(result);
+    };
+}
+
+export function syntaxTreeHideWhitespace(ctx: CtxInit): Cmd {
+    return async () => {
+        if (ctx.syntaxTreeProvider !== undefined) {
+            await ctx.syntaxTreeProvider.toggleWhitespace();
+        }
+    };
+}
+
+export function syntaxTreeShowWhitespace(ctx: CtxInit): Cmd {
+    return async () => {
+        if (ctx.syntaxTreeProvider !== undefined) {
+            await ctx.syntaxTreeProvider.toggleWhitespace();
+        }
+    };
 }
 
 export function ssr(ctx: CtxInit): Cmd {
@@ -349,7 +437,7 @@ export function ssr(ctx: CtxInit): Cmd {
         const position = editor.selection.active;
         const selections = editor.selections;
         const textDocument = client.code2ProtocolConverter.asTextDocumentIdentifier(
-            editor.document
+            editor.document,
         );
 
         const options: vscode.InputBoxOptions = {
@@ -365,7 +453,7 @@ export function ssr(ctx: CtxInit): Cmd {
                         selections,
                     });
                 } catch (e) {
-                    return e.toString();
+                    return String(e);
                 }
                 return null;
             },
@@ -389,9 +477,9 @@ export function ssr(ctx: CtxInit): Cmd {
                 });
 
                 await vscode.workspace.applyEdit(
-                    await client.protocol2CodeConverter.asWorkspaceEdit(edit, token)
+                    await client.protocol2CodeConverter.asWorkspaceEdit(edit, token),
                 );
-            }
+            },
         );
     };
 }
@@ -402,93 +490,9 @@ export function serverVersion(ctx: CtxInit): Cmd {
             void vscode.window.showWarningMessage(`rust-analyzer server is not running`);
             return;
         }
-        const { stdout } = spawnSync(ctx.serverPath, ["--version"], { encoding: "utf8" });
-        const versionString = stdout.slice(`rust-analyzer `.length).trim();
-
-        void vscode.window.showInformationMessage(`rust-analyzer version: ${versionString}`);
-    };
-}
-
-// Opens the virtual file that will show the syntax tree
-//
-// The contents of the file come from the `TextDocumentContentProvider`
-export function syntaxTree(ctx: CtxInit): Cmd {
-    const tdcp = new (class implements vscode.TextDocumentContentProvider {
-        readonly uri = vscode.Uri.parse("rust-analyzer-syntax-tree://syntaxtree/tree.rast");
-        readonly eventEmitter = new vscode.EventEmitter<vscode.Uri>();
-        constructor() {
-            vscode.workspace.onDidChangeTextDocument(
-                this.onDidChangeTextDocument,
-                this,
-                ctx.subscriptions
-            );
-            vscode.window.onDidChangeActiveTextEditor(
-                this.onDidChangeActiveTextEditor,
-                this,
-                ctx.subscriptions
-            );
-        }
-
-        private onDidChangeTextDocument(event: vscode.TextDocumentChangeEvent) {
-            if (isRustDocument(event.document)) {
-                // We need to order this after language server updates, but there's no API for that.
-                // Hence, good old sleep().
-                void sleep(10).then(() => this.eventEmitter.fire(this.uri));
-            }
-        }
-        private onDidChangeActiveTextEditor(editor: vscode.TextEditor | undefined) {
-            if (editor && isRustEditor(editor)) {
-                this.eventEmitter.fire(this.uri);
-            }
-        }
-
-        async provideTextDocumentContent(
-            uri: vscode.Uri,
-            ct: vscode.CancellationToken
-        ): Promise<string> {
-            const rustEditor = ctx.activeRustEditor;
-            if (!rustEditor) return "";
-            const client = ctx.client;
-
-            // When the range based query is enabled we take the range of the selection
-            const range =
-                uri.query === "range=true" && !rustEditor.selection.isEmpty
-                    ? client.code2ProtocolConverter.asRange(rustEditor.selection)
-                    : null;
-
-            const params = { textDocument: { uri: rustEditor.document.uri.toString() }, range };
-            return client.sendRequest(ra.syntaxTree, params, ct);
-        }
-
-        get onDidChange(): vscode.Event<vscode.Uri> {
-            return this.eventEmitter.event;
-        }
-    })();
-
-    ctx.pushExtCleanup(new AstInspector(ctx));
-    ctx.pushExtCleanup(
-        vscode.workspace.registerTextDocumentContentProvider("rust-analyzer-syntax-tree", tdcp)
-    );
-    ctx.pushExtCleanup(
-        vscode.languages.setLanguageConfiguration("ra_syntax_tree", {
-            brackets: [["[", ")"]],
-        })
-    );
-
-    return async () => {
-        const editor = vscode.window.activeTextEditor;
-        const rangeEnabled = !!editor && !editor.selection.isEmpty;
-
-        const uri = rangeEnabled ? vscode.Uri.parse(`${tdcp.uri.toString()}?range=true`) : tdcp.uri;
-
-        const document = await vscode.workspace.openTextDocument(uri);
-
-        tdcp.eventEmitter.fire(uri);
-
-        void (await vscode.window.showTextDocument(document, {
-            viewColumn: vscode.ViewColumn.Two,
-            preserveFocus: true,
-        }));
+        void vscode.window.showInformationMessage(
+            `rust-analyzer version: ${ctx.serverVersion} [${ctx.serverPath}]`,
+        );
     };
 }
 
@@ -505,7 +509,7 @@ function viewFileUsingTextDocumentContentProvider(
     requestType: lc.RequestType<lc.TextDocumentPositionParams, string, void>,
     uri: string,
     scheme: string,
-    shouldUpdate: boolean
+    shouldUpdate: boolean,
 ): Cmd {
     const tdcp = new (class implements vscode.TextDocumentContentProvider {
         readonly uri = vscode.Uri.parse(uri);
@@ -514,12 +518,12 @@ function viewFileUsingTextDocumentContentProvider(
             vscode.workspace.onDidChangeTextDocument(
                 this.onDidChangeTextDocument,
                 this,
-                ctx.subscriptions
+                ctx.subscriptions,
             );
             vscode.window.onDidChangeActiveTextEditor(
                 this.onDidChangeActiveTextEditor,
                 this,
-                ctx.subscriptions
+                ctx.subscriptions,
             );
         }
 
@@ -538,7 +542,7 @@ function viewFileUsingTextDocumentContentProvider(
 
         async provideTextDocumentContent(
             _uri: vscode.Uri,
-            ct: vscode.CancellationToken
+            ct: vscode.CancellationToken,
         ): Promise<string> {
             const rustEditor = ctx.activeRustEditor;
             if (!rustEditor) return "";
@@ -546,7 +550,7 @@ function viewFileUsingTextDocumentContentProvider(
             const client = ctx.client;
             const params = {
                 textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(
-                    rustEditor.document
+                    rustEditor.document,
                 ),
                 position: client.code2ProtocolConverter.asPosition(rustEditor.selection.active),
             };
@@ -594,7 +598,7 @@ export function interpretFunction(ctx: CtxInit): Cmd {
         ra.interpretFunction,
         uri,
         `rust-analyzer-interpret-function`,
-        false
+        false,
     );
 }
 
@@ -606,12 +610,12 @@ export function viewFileText(ctx: CtxInit): Cmd {
             vscode.workspace.onDidChangeTextDocument(
                 this.onDidChangeTextDocument,
                 this,
-                ctx.subscriptions
+                ctx.subscriptions,
             );
             vscode.window.onDidChangeActiveTextEditor(
                 this.onDidChangeActiveTextEditor,
                 this,
-                ctx.subscriptions
+                ctx.subscriptions,
             );
         }
 
@@ -630,14 +634,14 @@ export function viewFileText(ctx: CtxInit): Cmd {
 
         async provideTextDocumentContent(
             _uri: vscode.Uri,
-            ct: vscode.CancellationToken
+            ct: vscode.CancellationToken,
         ): Promise<string> {
             const rustEditor = ctx.activeRustEditor;
             if (!rustEditor) return "";
             const client = ctx.client;
 
             const params = client.code2ProtocolConverter.asTextDocumentIdentifier(
-                rustEditor.document
+                rustEditor.document,
             );
             return client.sendRequest(ra.viewFileText, params, ct);
         }
@@ -648,7 +652,7 @@ export function viewFileText(ctx: CtxInit): Cmd {
     })();
 
     ctx.pushExtCleanup(
-        vscode.workspace.registerTextDocumentContentProvider("rust-analyzer-file-text", tdcp)
+        vscode.workspace.registerTextDocumentContentProvider("rust-analyzer-file-text", tdcp),
     );
 
     return async () => {
@@ -669,12 +673,12 @@ export function viewItemTree(ctx: CtxInit): Cmd {
             vscode.workspace.onDidChangeTextDocument(
                 this.onDidChangeTextDocument,
                 this,
-                ctx.subscriptions
+                ctx.subscriptions,
             );
             vscode.window.onDidChangeActiveTextEditor(
                 this.onDidChangeActiveTextEditor,
                 this,
-                ctx.subscriptions
+                ctx.subscriptions,
             );
         }
 
@@ -693,7 +697,7 @@ export function viewItemTree(ctx: CtxInit): Cmd {
 
         async provideTextDocumentContent(
             _uri: vscode.Uri,
-            ct: vscode.CancellationToken
+            ct: vscode.CancellationToken,
         ): Promise<string> {
             const rustEditor = ctx.activeRustEditor;
             if (!rustEditor) return "";
@@ -701,7 +705,7 @@ export function viewItemTree(ctx: CtxInit): Cmd {
 
             const params = {
                 textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(
-                    rustEditor.document
+                    rustEditor.document,
                 ),
             };
             return client.sendRequest(ra.viewItemTree, params, ct);
@@ -713,7 +717,7 @@ export function viewItemTree(ctx: CtxInit): Cmd {
     })();
 
     ctx.pushExtCleanup(
-        vscode.workspace.registerTextDocumentContentProvider("rust-analyzer-item-tree", tdcp)
+        vscode.workspace.registerTextDocumentContentProvider("rust-analyzer-item-tree", tdcp),
     );
 
     return async () => {
@@ -738,7 +742,7 @@ function crateGraph(ctx: CtxInit, full: boolean): Cmd {
                 enableScripts: true,
                 retainContextWhenHidden: true,
                 localResourceRoots: [nodeModulesPath],
-            }
+            },
         );
         const params = {
             full: full,
@@ -827,7 +831,7 @@ export function expandMacro(ctx: CtxInit): Cmd {
 
             const expanded = await client.sendRequest(ra.expandMacro, {
                 textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(
-                    editor.document
+                    editor.document,
                 ),
                 position,
             });
@@ -843,7 +847,7 @@ export function expandMacro(ctx: CtxInit): Cmd {
     })();
 
     ctx.pushExtCleanup(
-        vscode.workspace.registerTextDocumentContentProvider("rust-analyzer-expand-macro", tdcp)
+        vscode.workspace.registerTextDocumentContentProvider("rust-analyzer-expand-macro", tdcp),
     );
 
     return async () => {
@@ -861,46 +865,18 @@ export function rebuildProcMacros(ctx: CtxInit): Cmd {
     return async () => ctx.client.sendRequest(ra.rebuildProcMacros);
 }
 
-export function addProject(ctx: CtxInit): Cmd {
-    return async () => {
-        const discoverProjectCommand = ctx.config.discoverProjectCommand;
-        if (!discoverProjectCommand) {
-            return;
-        }
-
-        const workspaces: JsonProject[] = await Promise.all(
-            vscode.workspace.textDocuments
-                .filter(isRustDocument)
-                .map(async (file): Promise<JsonProject> => {
-                    return discoverWorkspace([file], discoverProjectCommand, {
-                        cwd: path.dirname(file.uri.fsPath),
-                    });
-                })
-        );
-
-        ctx.addToDiscoveredWorkspaces(workspaces);
-
-        // this is a workaround to avoid needing writing the `rust-project.json` into
-        // a workspace-level VS Code-specific settings folder. We'd like to keep the
-        // `rust-project.json` entirely in-memory.
-        await ctx.client?.sendNotification(lc.DidChangeConfigurationNotification.type, {
-            settings: "",
-        });
-    };
-}
-
 async function showReferencesImpl(
     client: LanguageClient | undefined,
     uri: string,
     position: lc.Position,
-    locations: lc.Location[]
+    locations: lc.Location[],
 ) {
     if (client) {
         await vscode.commands.executeCommand(
             "editor.action.showReferences",
             vscode.Uri.parse(uri),
             client.protocol2CodeConverter.asPosition(position),
-            locations.map(client.protocol2CodeConverter.asLocation)
+            locations.map(client.protocol2CodeConverter.asLocation),
         );
     }
 }
@@ -917,7 +893,7 @@ export function applyActionGroup(_ctx: CtxInit): Cmd {
         if (!selectedAction) return;
         await vscode.commands.executeCommand(
             "rust-analyzer.resolveCodeAction",
-            selectedAction.arguments
+            selectedAction.arguments,
         );
     };
 }
@@ -945,10 +921,51 @@ export function openDocs(ctx: CtxInit): Cmd {
         const position = editor.selection.active;
         const textDocument = { uri: editor.document.uri.toString() };
 
-        const doclink = await client.sendRequest(ra.openDocs, { position, textDocument });
+        const docLinks = await client.sendRequest(ra.openDocs, { position, textDocument });
+        log.debug(docLinks);
 
-        if (doclink != null) {
-            await vscode.commands.executeCommand("vscode.open", vscode.Uri.parse(doclink));
+        let fileType = vscode.FileType.Unknown;
+        if (docLinks.local !== undefined) {
+            try {
+                fileType = (await vscode.workspace.fs.stat(vscode.Uri.parse(docLinks.local))).type;
+            } catch (e) {
+                log.debug("stat() threw error. Falling back to web version", e);
+            }
+        }
+
+        let docLink = fileType & vscode.FileType.File ? docLinks.local : docLinks.web;
+        if (docLink) {
+            // instruct vscode to handle the vscode-remote link directly
+            if (docLink.startsWith("vscode-remote://")) {
+                docLink = docLink.replace("vscode-remote://", "vscode://vscode-remote/");
+            }
+            const docUri = vscode.Uri.parse(docLink);
+            await vscode.env.openExternal(docUri);
+        }
+    };
+}
+
+export function openExternalDocs(ctx: CtxInit): Cmd {
+    return async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            return;
+        }
+        const client = ctx.client;
+
+        const position = editor.selection.active;
+        const textDocument = { uri: editor.document.uri.toString() };
+
+        const docLinks = await client.sendRequest(ra.openDocs, { position, textDocument });
+
+        let docLink = docLinks.web;
+        if (docLink) {
+            // instruct vscode to handle the vscode-remote link directly
+            if (docLink.startsWith("vscode-remote://")) {
+                docLink = docLink.replace("vscode-remote://", "vscode://vscode-remote/");
+            }
+            const docUri = vscode.Uri.parse(docLink);
+            await vscode.env.openExternal(docUri);
         }
     };
 }
@@ -984,7 +1001,6 @@ export function resolveCodeAction(ctx: CtxInit): Cmd {
             return;
         }
         const itemEdit = item.edit;
-        const edit = await client.protocol2CodeConverter.asWorkspaceEdit(itemEdit);
         // filter out all text edits and recreate the WorkspaceEdit without them so we can apply
         // snippet edits on our own
         const lcFileSystemEdit = {
@@ -992,19 +1008,74 @@ export function resolveCodeAction(ctx: CtxInit): Cmd {
             documentChanges: itemEdit.documentChanges?.filter((change) => "kind" in change),
         };
         const fileSystemEdit = await client.protocol2CodeConverter.asWorkspaceEdit(
-            lcFileSystemEdit
+            lcFileSystemEdit,
         );
         await vscode.workspace.applyEdit(fileSystemEdit);
-        await applySnippetWorkspaceEdit(edit);
+
+        // replace all text edits so that we can convert snippet text edits into `vscode.SnippetTextEdit`s
+        // FIXME: this is a workaround until vscode-languageclient supports doing the SnippeTextEdit conversion itself
+        // also need to carry the snippetTextDocumentEdits separately, since we can't retrieve them again using WorkspaceEdit.entries
+        const [workspaceTextEdit, snippetTextDocumentEdits] = asWorkspaceSnippetEdit(ctx, itemEdit);
+        await applySnippetWorkspaceEdit(workspaceTextEdit, snippetTextDocumentEdits);
         if (item.command != null) {
             await vscode.commands.executeCommand(item.command.command, item.command.arguments);
         }
     };
 }
 
+function asWorkspaceSnippetEdit(
+    ctx: CtxInit,
+    item: lc.WorkspaceEdit,
+): [vscode.WorkspaceEdit, SnippetTextDocumentEdit[]] {
+    const client = ctx.client;
+
+    // partially borrowed from https://github.com/microsoft/vscode-languageserver-node/blob/295aaa393fda8ecce110c38880a00466b9320e63/client/src/common/protocolConverter.ts#L1060-L1101
+    const result = new vscode.WorkspaceEdit();
+
+    if (item.documentChanges) {
+        const snippetTextDocumentEdits: SnippetTextDocumentEdit[] = [];
+
+        for (const change of item.documentChanges) {
+            if (lc.TextDocumentEdit.is(change)) {
+                const uri = client.protocol2CodeConverter.asUri(change.textDocument.uri);
+                const snippetTextEdits: (vscode.TextEdit | vscode.SnippetTextEdit)[] = [];
+
+                for (const edit of change.edits) {
+                    if (
+                        "insertTextFormat" in edit &&
+                        edit.insertTextFormat === lc.InsertTextFormat.Snippet
+                    ) {
+                        // is a snippet text edit
+                        snippetTextEdits.push(
+                            new vscode.SnippetTextEdit(
+                                client.protocol2CodeConverter.asRange(edit.range),
+                                new vscode.SnippetString(edit.newText),
+                            ),
+                        );
+                    } else {
+                        // always as a text document edit
+                        snippetTextEdits.push(
+                            vscode.TextEdit.replace(
+                                client.protocol2CodeConverter.asRange(edit.range),
+                                edit.newText,
+                            ),
+                        );
+                    }
+                }
+
+                snippetTextDocumentEdits.push([uri, snippetTextEdits]);
+            }
+        }
+        return [result, snippetTextDocumentEdits];
+    } else {
+        // we don't handle WorkspaceEdit.changes since it's not relevant for code actions
+        return [result, []];
+    }
+}
+
 export function applySnippetWorkspaceEditCommand(_ctx: CtxInit): Cmd {
     return async (edit: vscode.WorkspaceEdit) => {
-        await applySnippetWorkspaceEdit(edit);
+        await applySnippetWorkspaceEdit(edit, edit.entries());
     };
 }
 
@@ -1017,7 +1088,7 @@ export function run(ctx: CtxInit): Cmd {
 
         item.detail = "rerun";
         prevRunnable = item;
-        const task = await createTask(item.runnable, ctx.config);
+        const task = await createTaskFromRunnable(item.runnable, ctx.config);
         return await vscode.tasks.executeTask(task);
     };
 }
@@ -1045,14 +1116,23 @@ export function peekTests(ctx: CtxInit): Cmd {
                 const locations: lc.Location[] = tests.map((it) =>
                     lc.Location.create(
                         it.runnable.location!.targetUri,
-                        it.runnable.location!.targetSelectionRange
-                    )
+                        it.runnable.location!.targetSelectionRange,
+                    ),
                 );
 
                 await showReferencesImpl(client, uri, position, locations);
-            }
+            },
         );
     };
+}
+
+function isUpdatingTest(runnable: ra.Runnable): boolean {
+    if (!isCargoRunnableArgs(runnable.args)) {
+        return false;
+    }
+
+    const env = runnable.args.environment;
+    return env ? ["UPDATE_EXPECT", "INSTA_UPDATE", "SNAPSHOTS"].some((key) => key in env) : false;
 }
 
 export function runSingle(ctx: CtxInit): Cmd {
@@ -1060,7 +1140,24 @@ export function runSingle(ctx: CtxInit): Cmd {
         const editor = ctx.activeRustEditor;
         if (!editor) return;
 
-        const task = await createTask(runnable, ctx.config);
+        if (isUpdatingTest(runnable) && ctx.config.askBeforeUpdateTest) {
+            const selection = await vscode.window.showInformationMessage(
+                "rust-analyzer",
+                { detail: "Do you want to update tests?", modal: true },
+                "Update Now",
+                "Update (and Don't ask again)",
+            );
+
+            if (selection !== "Update Now" && selection !== "Update (and Don't ask again)") {
+                return;
+            }
+
+            if (selection === "Update (and Don't ask again)") {
+                await ctx.config.setAskBeforeUpdateTest(false);
+            }
+        }
+
+        const task = await createTaskFromRunnable(runnable, ctx.config);
         task.group = vscode.TaskGroup.Build;
         task.presentationOptions = {
             reveal: vscode.TaskRevealKind.Always,
@@ -1076,8 +1173,8 @@ export function copyRunCommandLine(ctx: CtxInit) {
     let prevRunnable: RunnableQuickPick | undefined;
     return async () => {
         const item = await selectRunnable(ctx, prevRunnable);
-        if (!item) return;
-        const args = createArgs(item.runnable);
+        if (!item || !isCargoRunnableArgs(item.runnable.args)) return;
+        const args = createCargoArgs(item.runnable.args);
         const commandLine = ["cargo", ...args].join(" ");
         await vscode.env.clipboard.writeText(commandLine);
         await vscode.window.showInformationMessage("Cargo invocation copied to the clipboard.");
@@ -1112,12 +1209,320 @@ export function newDebugConfig(ctx: CtxInit): Cmd {
     };
 }
 
-export function linkToCommand(_: Ctx): Cmd {
-    return async (commandId: string) => {
-        const link = LINKED_COMMANDS.get(commandId);
+export function hoverRefCommandProxy(_: Ctx): Cmd {
+    return async (index: number) => {
+        const link = HOVER_REFERENCE_COMMAND[index];
         if (link) {
             const { command, arguments: args = [] } = link;
             await vscode.commands.executeCommand(command, ...args);
         }
+    };
+}
+
+export function viewMemoryLayout(ctx: CtxInit): Cmd {
+    return async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) return;
+        const client = ctx.client;
+
+        const position = editor.selection.active;
+        const expanded = await client.sendRequest(ra.viewRecursiveMemoryLayout, {
+            textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(editor.document),
+            position,
+        });
+
+        const document = vscode.window.createWebviewPanel(
+            "memory_layout",
+            "[Memory Layout]",
+            vscode.ViewColumn.Two,
+            { enableScripts: true },
+        );
+
+        document.webview.html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            overflow: hidden;
+            min-height: 100%;
+            height: 100vh;
+            padding: 32px;
+            position: relative;
+            display: block;
+
+            background-color: var(--vscode-editor-background);
+            font-family: var(--vscode-editor-font-family);
+            font-size: var(--vscode-editor-font-size);
+            color: var(--vscode-editor-foreground);
+        }
+
+        .container {
+            position: relative;
+        }
+
+        .trans {
+            transition: all 0.2s ease-in-out;
+        }
+
+        .grid {
+            height: 100%;
+            position: relative;
+            color: var(--vscode-commandCenter-activeBorder);
+            pointer-events: none;
+        }
+
+        .grid-line {
+            position: absolute;
+            width: 100%;
+            height: 1px;
+            background-color: var(--vscode-commandCenter-activeBorder);
+        }
+
+        #tooltip {
+            position: fixed;
+            display: none;
+            z-index: 1;
+            pointer-events: none;
+            padding: 4px 8px;
+            z-index: 2;
+
+            color: var(--vscode-editorHoverWidget-foreground);
+            background-color: var(--vscode-editorHoverWidget-background);
+            border: 1px solid var(--vscode-editorHoverWidget-border);
+        }
+
+        #tooltip b {
+            color: var(--vscode-editorInlayHint-typeForeground);
+        }
+
+        #tooltip ul {
+            margin-left: 0;
+            padding-left: 20px;
+        }
+
+        table {
+            position: absolute;
+            transform: rotateZ(90deg) rotateX(180deg);
+            transform-origin: top left;
+            border-collapse: collapse;
+            table-layout: fixed;
+            left: 48px;
+            top: 0;
+            max-height: calc(100vw - 64px - 48px);
+            z-index: 1;
+        }
+
+        td {
+            border: 1px solid var(--vscode-focusBorder);
+            writing-mode: vertical-rl;
+            text-orientation: sideways-right;
+
+            height: 80px;
+        }
+
+        td p {
+            height: calc(100% - 16px);
+            width: calc(100% - 8px);
+            margin: 8px 4px;
+            display: inline-block;
+            transform: rotateY(180deg);
+            pointer-events: none;
+            overflow: hidden;
+        }
+
+        td p * {
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+            display: inline-block;
+            height: 100%;
+        }
+
+        td p b {
+            color: var(--vscode-editorInlayHint-typeForeground);
+        }
+
+        td:hover {
+            background-color: var(--vscode-editor-hoverHighlightBackground);
+        }
+
+        td:empty {
+            visibility: hidden;
+            border: 0;
+        }
+    </style>
+</head>
+<body>
+    <div id="tooltip"></div>
+</body>
+<script>(function() {
+
+const data = ${JSON.stringify(expanded)}
+
+if (!(data && data.nodes.length)) {
+    document.body.innerText = "Not Available"
+    return
+}
+
+data.nodes.map(n => {
+    n.typename = n.typename.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', ' & quot; ').replaceAll("'", '&#039;')
+    return n
+})
+
+let height = window.innerHeight - 64
+
+addEventListener("resize", e => {
+    const new_height = window.innerHeight - 64
+    height = new_height
+    container.classList.remove("trans")
+    table.classList.remove("trans")
+    locate()
+    setTimeout(() => { // give delay to redraw, annoying but needed
+        container.classList.add("trans")
+        table.classList.add("trans")
+    }, 0)
+})
+
+const container = document.createElement("div")
+container.classList.add("container")
+container.classList.add("trans")
+document.body.appendChild(container)
+
+const tooltip = document.getElementById("tooltip")
+
+let y = 0
+let zoom = 1.0
+
+const table = document.createElement("table")
+table.classList.add("trans")
+container.appendChild(table)
+const rows = []
+
+function node_t(idx, depth, offset) {
+    if (!rows[depth]) {
+        rows[depth] = { el: document.createElement("tr"), offset: 0 }
+    }
+
+    if (rows[depth].offset < offset) {
+        const pad = document.createElement("td")
+        pad.colSpan = offset - rows[depth].offset
+        rows[depth].el.appendChild(pad)
+        rows[depth].offset += offset - rows[depth].offset
+    }
+
+    const td = document.createElement("td")
+    td.innerHTML = '<p><span>' + data.nodes[idx].itemName + ':</span> <b>' + data.nodes[idx].typename + '</b></p>'
+
+    td.colSpan = data.nodes[idx].size
+
+    td.addEventListener("mouseover", e => {
+        const node = data.nodes[idx]
+        tooltip.innerHTML = node.itemName + ": <b>" + node.typename + "</b><br/>"
+            + "<ul>"
+            + "<li>size = " + node.size + "</li>"
+            + "<li>align = " + node.alignment + "</li>"
+            + "<li>field offset = " + node.offset + "</li>"
+            + "</ul>"
+            + "<i>double click to focus</i>"
+
+        tooltip.style.display = "block"
+    })
+    td.addEventListener("mouseleave", _ => tooltip.style.display = "none")
+    const total_offset = rows[depth].offset
+    td.addEventListener("dblclick", e => {
+        const node = data.nodes[idx]
+        zoom = data.nodes[0].size / node.size
+        y = -(total_offset) / data.nodes[0].size * zoom
+        x = 0
+        locate()
+    })
+
+    rows[depth].el.appendChild(td)
+    rows[depth].offset += data.nodes[idx].size
+
+
+    if (data.nodes[idx].childrenStart != -1) {
+        for (let i = 0; i < data.nodes[idx].childrenLen; i++) {
+            if (data.nodes[data.nodes[idx].childrenStart + i].size) {
+                node_t(data.nodes[idx].childrenStart + i, depth + 1, offset + data.nodes[data.nodes[idx].childrenStart + i].offset)
+            }
+        }
+    }
+}
+
+node_t(0, 0, 0)
+
+for (const row of rows) table.appendChild(row.el)
+
+const grid = document.createElement("div")
+grid.classList.add("grid")
+container.appendChild(grid)
+
+for (let i = 0; i < data.nodes[0].size / 8 + 1; i++) {
+    const el = document.createElement("div")
+    el.classList.add("grid-line")
+    el.style.top = (i / (data.nodes[0].size / 8) * 100) + "%"
+    el.innerText = i * 8
+    grid.appendChild(el)
+}
+
+addEventListener("mousemove", e => {
+    tooltip.style.top = e.clientY + 10 + "px"
+    tooltip.style.left = e.clientX + 10 + "px"
+})
+
+function locate() {
+    container.style.top = height * y + "px"
+    container.style.height = (height * zoom) + "px"
+
+    table.style.width = container.style.height
+}
+
+locate()
+
+})()
+</script>
+</html>`;
+
+        ctx.pushExtCleanup(document);
+    };
+}
+
+export function toggleCheckOnSave(ctx: Ctx): Cmd {
+    return async () => {
+        await ctx.config.toggleCheckOnSave();
+        ctx.refreshServerStatus();
+    };
+}
+
+export function toggleLSPLogs(ctx: Ctx): Cmd {
+    return async () => {
+        const config = vscode.workspace.getConfiguration("rust-analyzer");
+        const targetValue =
+            config.get<string | undefined>("trace.server") === "verbose" ? undefined : "verbose";
+
+        await config.update("trace.server", targetValue, vscode.ConfigurationTarget.Workspace);
+        if (targetValue && ctx.client && ctx.client.traceOutputChannel) {
+            ctx.client.traceOutputChannel.show();
+        }
+    };
+}
+
+export function openWalkthrough(_: Ctx): Cmd {
+    return async () => {
+        await vscode.commands.executeCommand(
+            "workbench.action.openWalkthrough",
+            "rust-lang.rust-analyzer#landing",
+            false,
+        );
     };
 }

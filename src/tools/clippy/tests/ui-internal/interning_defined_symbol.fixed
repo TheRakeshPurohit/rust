@@ -1,4 +1,3 @@
-//@run-rustfix
 #![deny(clippy::internal)]
 #![allow(clippy::missing_clippy_version_attribute, clippy::let_unit_value)]
 #![feature(rustc_private)]
@@ -24,7 +23,7 @@ fn main() {
     let _ = rustc_span::sym::proc_dash_macro;
 
     // interning a keyword
-    let _ = rustc_span::symbol::kw::SelfLower;
+    let _ = rustc_span::kw::SelfLower;
 
     // Interning a symbol that is not defined
     let _ = Symbol::intern("xyz123");

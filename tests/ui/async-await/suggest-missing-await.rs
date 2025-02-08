@@ -1,4 +1,4 @@
-// edition:2018
+//@ edition:2018
 
 fn take_u32(_x: u32) {}
 
@@ -69,6 +69,13 @@ async fn suggest_await_in_generic_pattern() {
         Err(_) => {}
         //~^ ERROR mismatched types [E0308]
     }
+}
+
+// Issue #126903
+async fn do_async() {}
+fn dont_suggest_awaiting_closure_patterns() {
+    Some(do_async()).map(|()| {});
+    //~^ ERROR mismatched types [E0308]
 }
 
 fn main() {}

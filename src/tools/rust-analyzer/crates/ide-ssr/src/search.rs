@@ -5,11 +5,11 @@ use crate::{
     resolving::{ResolvedPath, ResolvedPattern, ResolvedRule},
     Match, MatchFinder,
 };
+use hir::FileRange;
 use ide_db::{
-    base_db::{FileId, FileRange},
     defs::Definition,
     search::{SearchScope, UsageSearchResult},
-    FxHashSet,
+    EditionedFileId, FileId, FxHashSet,
 };
 use syntax::{ast, AstNode, SyntaxKind, SyntaxNode};
 
@@ -22,7 +22,7 @@ pub(crate) struct UsageCache {
     usages: Vec<(Definition, UsageSearchResult)>,
 }
 
-impl<'db> MatchFinder<'db> {
+impl MatchFinder<'_> {
     /// Adds all matches for `rule` to `matches_out`. Matches may overlap in ways that make
     /// replacement impossible, so further processing is required in order to properly nest matches
     /// and remove overlapping matches. This is done in the `nesting` module.
@@ -56,7 +56,7 @@ impl<'db> MatchFinder<'db> {
         matches_out: &mut Vec<Match>,
     ) {
         if let Some(resolved_path) = pick_path_for_usages(pattern) {
-            let definition: Definition = resolved_path.resolution.clone().into();
+            let definition: Definition = resolved_path.resolution.into();
             for file_range in self.find_usages(usage_cache, definition).file_ranges() {
                 for node_to_match in self.find_nodes_to_match(resolved_path, file_range) {
                     if !is_search_permitted_ancestors(&node_to_match) {
@@ -121,7 +121,7 @@ impl<'db> MatchFinder<'db> {
         // cache miss. This is a limitation of NLL and is fixed with Polonius. For now we do two
         // lookups in the case of a cache hit.
         if usage_cache.find(&definition).is_none() {
-            let usages = definition.usages(&self.sema).in_scope(self.search_scope()).all();
+            let usages = definition.usages(&self.sema).in_scope(&self.search_scope()).all();
             usage_cache.usages.push((definition, usages));
             return &usage_cache.usages.last().unwrap().1;
         }
@@ -136,14 +136,18 @@ impl<'db> MatchFinder<'db> {
         // seems to get put into a single source root.
         let mut files = Vec::new();
         self.search_files_do(|file_id| {
-            files.push(file_id);
+            files.push(
+                self.sema
+                    .attach_first_edition(file_id)
+                    .unwrap_or_else(|| EditionedFileId::current_edition(file_id)),
+            );
         });
         SearchScope::files(&files)
     }
 
     fn slow_scan(&self, rule: &ResolvedRule, matches_out: &mut Vec<Match>) {
         self.search_files_do(|file_id| {
-            let file = self.sema.parse(file_id);
+            let file = self.sema.parse_guess_edition(file_id);
             let code = file.syntax();
             self.slow_scan_node(code, rule, &None, matches_out);
         })
@@ -152,7 +156,7 @@ impl<'db> MatchFinder<'db> {
     fn search_files_do(&self, mut callback: impl FnMut(FileId)) {
         if self.restrict_ranges.is_empty() {
             // Unrestricted search.
-            use ide_db::base_db::SourceDatabaseExt;
+            use ide_db::base_db::SourceRootDatabase;
             use ide_db::symbol_index::SymbolsDatabase;
             for &root in self.sema.db.local_roots().iter() {
                 let sr = self.sema.db.source_root(root);
@@ -185,17 +189,14 @@ impl<'db> MatchFinder<'db> {
         // If we've got a macro call, we already tried matching it pre-expansion, which is the only
         // way to match the whole macro, now try expanding it and matching the expansion.
         if let Some(macro_call) = ast::MacroCall::cast(code.clone()) {
-            if let Some(expanded) = self.sema.expand(&macro_call) {
+            if let Some(expanded) = self.sema.expand_macro_call(&macro_call) {
                 if let Some(tt) = macro_call.token_tree() {
                     // When matching within a macro expansion, we only want to allow matches of
                     // nodes that originated entirely from within the token tree of the macro call.
                     // i.e. we don't want to match something that came from the macro itself.
-                    self.slow_scan_node(
-                        &expanded,
-                        rule,
-                        &Some(self.sema.original_range(tt.syntax())),
-                        matches_out,
-                    );
+                    if let Some(range) = self.sema.original_range_opt(tt.syntax()) {
+                        self.slow_scan_node(&expanded, rule, &Some(range), matches_out);
+                    }
                 }
             }
         }
@@ -227,7 +228,7 @@ impl<'db> MatchFinder<'db> {
             // There is no range restriction.
             return true;
         }
-        let node_range = self.sema.original_range(code);
+        let Some(node_range) = self.sema.original_range_opt(code) else { return false };
         for range in &self.restrict_ranges {
             if range.file_id == node_range.file_id && range.range.contains_range(node_range.range) {
                 return true;

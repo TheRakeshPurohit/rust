@@ -1,12 +1,13 @@
 use clippy_utils::diagnostics::span_lint_and_sugg;
-use clippy_utils::get_parent_node;
 use clippy_utils::source::snippet_with_context;
 use clippy_utils::ty::is_copy;
 use rustc_errors::Applicability;
-use rustc_hir::{BindingAnnotation, ByRef, Expr, ExprKind, MatchSource, Node, PatKind, QPath};
+use rustc_hir::{BindingMode, ByRef, Expr, ExprKind, MatchSource, Node, PatKind, QPath};
 use rustc_lint::LateContext;
-use rustc_middle::ty::{self, adjustment::Adjust, print::with_forced_trimmed_paths};
-use rustc_span::symbol::{sym, Symbol};
+use rustc_middle::ty::adjustment::Adjust;
+use rustc_middle::ty::print::with_forced_trimmed_paths;
+use rustc_middle::ty::{self};
+use rustc_span::symbol::{Symbol, sym};
 
 use super::CLONE_ON_COPY;
 
@@ -29,7 +30,7 @@ pub(super) fn check(
         .type_dependent_def_id(expr.hir_id)
         .and_then(|id| cx.tcx.trait_of_item(id))
         .zip(cx.tcx.lang_items().clone_trait())
-        .map_or(true, |(x, y)| x != y)
+        .is_none_or(|(x, y)| x != y)
     {
         return;
     }
@@ -46,8 +47,8 @@ pub(super) fn check(
     }
 
     if is_copy(cx, ty) {
-        let parent_is_suffix_expr = match get_parent_node(cx.tcx, expr.hir_id) {
-            Some(Node::Expr(parent)) => match parent.kind {
+        let parent_is_suffix_expr = match cx.tcx.parent_hir_node(expr.hir_id) {
+            Node::Expr(parent) => match parent.kind {
                 // &*x is a nop, &x.clone() is not
                 ExprKind::AddrOf(..) => return,
                 // (*x).func() is useless, x.clone().func() can work in case func borrows self
@@ -57,18 +58,18 @@ pub(super) fn check(
                     return;
                 },
                 // ? is a Call, makes sure not to rec *x?, but rather (*x)?
-                ExprKind::Call(hir_callee, _) => matches!(
+                ExprKind::Call(hir_callee, [_]) => matches!(
                     hir_callee.kind,
-                    ExprKind::Path(QPath::LangItem(rustc_hir::LangItem::TryTraitBranch, _, _))
+                    ExprKind::Path(QPath::LangItem(rustc_hir::LangItem::TryTraitBranch, ..))
                 ),
                 ExprKind::MethodCall(_, self_arg, ..) if expr.hir_id == self_arg.hir_id => true,
-                ExprKind::Match(_, _, MatchSource::TryDesugar | MatchSource::AwaitDesugar)
+                ExprKind::Match(_, _, MatchSource::TryDesugar(_) | MatchSource::AwaitDesugar)
                 | ExprKind::Field(..)
                 | ExprKind::Index(..) => true,
                 _ => false,
             },
             // local binding capturing a reference
-            Some(Node::Local(l)) if matches!(l.pat.kind, PatKind::Binding(BindingAnnotation(ByRef::Yes, _), ..)) => {
+            Node::LetStmt(l) if matches!(l.pat.kind, PatKind::Binding(BindingMode(ByRef::Yes(_), _), ..)) => {
                 return;
             },
             _ => false,
@@ -93,7 +94,7 @@ pub(super) fn check(
             cx,
             CLONE_ON_COPY,
             expr.span,
-            &with_forced_trimmed_paths!(format!(
+            with_forced_trimmed_paths!(format!(
                 "using `clone` on type `{ty}` which implements the `Copy` trait"
             )),
             help,

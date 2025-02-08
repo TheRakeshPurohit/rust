@@ -1,12 +1,12 @@
-// assembly-output: emit-asm
-// compile-flags: --crate-type=lib
-// only-x86_64
-// ignore-sgx
+//@ assembly-output: emit-asm
+//@ compile-flags: --crate-type=lib
+//@ only-x86_64
+//@ ignore-sgx
 
 #![feature(portable_simd)]
 
-use std::simd::Simd;
 use std::arch::asm;
+use std::simd::Simd;
 
 #[target_feature(enable = "avx")]
 #[no_mangle]

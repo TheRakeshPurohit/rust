@@ -1,13 +1,10 @@
 // Strip out raw byte dumps to make comparison platform-independent:
-// normalize-stderr-test "(the raw bytes of the constant) \(size: [0-9]*, align: [0-9]*\)" -> "$1 (size: $$SIZE, align: $$ALIGN)"
-// normalize-stderr-test "([0-9a-f][0-9a-f] |╾─*a(lloc)?[0-9]+(\+[a-z0-9]+)?─*╼ )+ *│.*" -> "HEX_DUMP"
-// normalize-stderr-test "alloc\d+" -> "allocN"
-// error-pattern: could not evaluate static initializer
+//@ normalize-stderr: "(the raw bytes of the constant) \(size: [0-9]*, align: [0-9]*\)" -> "$1 (size: $$SIZE, align: $$ALIGN)"
+//@ normalize-stderr: "([0-9a-f][0-9a-f] |╾─*A(LLOC)?[0-9]+(\+[a-z0-9]+)?(<imm>)?─*╼ )+ *│.*" -> "HEX_DUMP"
+
 #![feature(
     slice_from_ptr_range,
     const_slice_from_ptr_range,
-    pointer_byte_offsets,
-    const_pointer_byte_offsets
 )]
 use std::{
     mem::{size_of, MaybeUninit},
@@ -15,12 +12,15 @@ use std::{
     slice::{from_ptr_range, from_raw_parts},
 };
 
-// Null is never valid for reads
+// Null is never valid for references
 pub static S0: &[u32] = unsafe { from_raw_parts(ptr::null(), 0) };
+//~^ ERROR: it is undefined behavior to use this value
 pub static S1: &[()] = unsafe { from_raw_parts(ptr::null(), 0) };
+//~^ ERROR: it is undefined behavior to use this value
 
 // Out of bounds
 pub static S2: &[u32] = unsafe { from_raw_parts(&D0, 2) };
+//~^ ERROR: it is undefined behavior to use this value
 
 // Reading uninitialized  data
 pub static S4: &[u8] = unsafe { from_raw_parts((&D1) as *const _ as _, 1) }; //~ ERROR: it is undefined behavior to use this value
@@ -39,16 +39,18 @@ pub static S7: &[u16] = unsafe {
 
 // Unaligned read
 pub static S8: &[u64] = unsafe {
+    //~^ ERROR: it is undefined behavior to use this value
     let ptr = (&D4 as *const [u32; 2] as *const u32).byte_add(1).cast::<u64>();
 
     from_raw_parts(ptr, 1)
 };
 
 pub static R0: &[u32] = unsafe { from_ptr_range(ptr::null()..ptr::null()) };
-pub static R1: &[()] = unsafe { from_ptr_range(ptr::null()..ptr::null()) };
+//~^ ERROR it is undefined behavior to use this value
+pub static R1: &[()] = unsafe { from_ptr_range(ptr::null()..ptr::null()) }; // errors inside libcore
 pub static R2: &[u32] = unsafe {
     let ptr = &D0 as *const u32;
-    from_ptr_range(ptr..ptr.add(2))
+    from_ptr_range(ptr..ptr.add(2)) // errors inside libcore
 };
 pub static R4: &[u8] = unsafe {
     //~^ ERROR: it is undefined behavior to use this value
@@ -66,8 +68,9 @@ pub static R6: &[bool] = unsafe {
     from_ptr_range(ptr..ptr.add(4))
 };
 pub static R7: &[u16] = unsafe {
+    //~^ ERROR: it is undefined behavior to use this value
     let ptr = (&D2 as *const Struct as *const u16).byte_add(1);
-    from_ptr_range(ptr..ptr.add(4)) //~ inside `R7`
+    from_ptr_range(ptr..ptr.add(4))
 };
 pub static R8: &[u64] = unsafe {
     let ptr = (&D4 as *const [u32; 2] as *const u32).byte_add(1).cast::<u64>();

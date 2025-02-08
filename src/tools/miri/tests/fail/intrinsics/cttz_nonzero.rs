@@ -1,9 +1,8 @@
 #![feature(intrinsics)]
 
 mod rusti {
-    extern "rust-intrinsic" {
-        pub fn cttz_nonzero<T>(x: T) -> T;
-    }
+    #[rustc_intrinsic]
+    pub unsafe fn cttz_nonzero<T>(_x: T) -> u32;
 }
 
 pub fn main() {

@@ -7,14 +7,18 @@
 //! Hopefully, one day a reliable file watching/walking crate appears on
 //! crates.io, and we can reduce this to trivial glue code.
 
-#![warn(rust_2018_idioms, unused_lifetimes, semicolon_in_expressions_from_macros)]
+use std::{
+    fs,
+    path::{Component, Path},
+    sync::atomic::AtomicUsize,
+};
 
-use std::fs;
-
-use crossbeam_channel::{never, select, unbounded, Receiver, Sender};
-use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
-use paths::{AbsPath, AbsPathBuf};
-use vfs::loader;
+use crossbeam_channel::{select, unbounded, Receiver, Sender};
+use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use paths::{AbsPath, AbsPathBuf, Utf8PathBuf};
+use rayon::iter::{IndexedParallelIterator as _, IntoParallelIterator as _, ParallelIterator};
+use rustc_hash::FxHashSet;
+use vfs::loader::{self, LoadingProgress};
 use walkdir::WalkDir;
 
 #[derive(Debug)]
@@ -58,7 +62,8 @@ type NotifyEvent = notify::Result<notify::Event>;
 
 struct NotifyActor {
     sender: loader::Sender,
-    watched_entries: Vec<loader::Entry>,
+    watched_file_entries: FxHashSet<AbsPathBuf>,
+    watched_dir_entries: Vec<loader::Directories>,
     // Drop order is significant.
     watcher: Option<(RecommendedWatcher, Receiver<NotifyEvent>)>,
 }
@@ -71,14 +76,22 @@ enum Event {
 
 impl NotifyActor {
     fn new(sender: loader::Sender) -> NotifyActor {
-        NotifyActor { sender, watched_entries: Vec::new(), watcher: None }
+        NotifyActor {
+            sender,
+            watched_dir_entries: Vec::new(),
+            watched_file_entries: FxHashSet::default(),
+            watcher: None,
+        }
     }
 
     fn next_event(&self, receiver: &Receiver<Message>) -> Option<Event> {
-        let watcher_receiver = self.watcher.as_ref().map(|(_, receiver)| receiver);
+        let Some((_, watcher_receiver)) = &self.watcher else {
+            return receiver.recv().ok().map(Event::Message);
+        };
+
         select! {
             recv(receiver) -> it => it.ok().map(Event::Message),
-            recv(watcher_receiver.unwrap_or(&never())) -> it => Some(Event::NotifyEvent(it.unwrap())),
+            recv(watcher_receiver) -> it => Some(Event::NotifyEvent(it.unwrap())),
         }
     }
 
@@ -93,7 +106,10 @@ impl NotifyActor {
                             let (watcher_sender, watcher_receiver) = unbounded();
                             let watcher = log_notify_error(RecommendedWatcher::new(
                                 move |event| {
-                                    watcher_sender.send(event).unwrap();
+                                    // we don't care about the error. If sending fails that usually
+                                    // means we were dropped, so unwrapping will just add to the
+                                    // panic noise.
+                                    _ = watcher_sender.send(event);
                                 },
                                 Config::default(),
                             ));
@@ -103,80 +119,146 @@ impl NotifyActor {
                         let config_version = config.version;
 
                         let n_total = config.load.len();
-                        self.send(loader::Message::Progress { n_total, n_done: 0, config_version });
+                        self.watched_dir_entries.clear();
+                        self.watched_file_entries.clear();
 
-                        self.watched_entries.clear();
+                        self.send(loader::Message::Progress {
+                            n_total,
+                            n_done: LoadingProgress::Started,
+                            config_version,
+                            dir: None,
+                        });
 
-                        for (i, entry) in config.load.into_iter().enumerate() {
-                            let watch = config.watch.contains(&i);
-                            if watch {
-                                self.watched_entries.push(entry.clone());
+                        let (entry_tx, entry_rx) = unbounded();
+                        let (watch_tx, watch_rx) = unbounded();
+                        let processed = AtomicUsize::new(0);
+
+                        config.load.into_par_iter().enumerate().for_each(|(i, entry)| {
+                            let do_watch = config.watch.contains(&i);
+                            if do_watch {
+                                _ = entry_tx.send(entry.clone());
                             }
-                            let files = self.load_entry(entry, watch);
+                            let files = Self::load_entry(
+                                |f| _ = watch_tx.send(f.to_owned()),
+                                entry,
+                                do_watch,
+                                |file| {
+                                    self.send(loader::Message::Progress {
+                                        n_total,
+                                        n_done: LoadingProgress::Progress(
+                                            processed.load(std::sync::atomic::Ordering::Relaxed),
+                                        ),
+                                        dir: Some(file),
+                                        config_version,
+                                    });
+                                },
+                            );
                             self.send(loader::Message::Loaded { files });
                             self.send(loader::Message::Progress {
                                 n_total,
-                                n_done: i + 1,
+                                n_done: LoadingProgress::Progress(
+                                    processed.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1,
+                                ),
                                 config_version,
+                                dir: None,
                             });
+                        });
+
+                        drop(watch_tx);
+                        for path in watch_rx {
+                            self.watch(&path);
                         }
+
+                        drop(entry_tx);
+                        for entry in entry_rx {
+                            match entry {
+                                loader::Entry::Files(files) => {
+                                    self.watched_file_entries.extend(files)
+                                }
+                                loader::Entry::Directories(dir) => {
+                                    self.watched_dir_entries.push(dir)
+                                }
+                            }
+                        }
+
+                        self.send(loader::Message::Progress {
+                            n_total,
+                            n_done: LoadingProgress::Finished,
+                            config_version,
+                            dir: None,
+                        });
                     }
                     Message::Invalidate(path) => {
                         let contents = read(path.as_path());
                         let files = vec![(path, contents)];
-                        self.send(loader::Message::Loaded { files });
+                        self.send(loader::Message::Changed { files });
                     }
                 },
                 Event::NotifyEvent(event) => {
                     if let Some(event) = log_notify_error(event) {
-                        let files = event
-                            .paths
-                            .into_iter()
-                            .map(|path| AbsPathBuf::try_from(path).unwrap())
-                            .filter_map(|path| {
-                                let meta = fs::metadata(&path).ok()?;
-                                if meta.file_type().is_dir()
-                                    && self
-                                        .watched_entries
-                                        .iter()
-                                        .any(|entry| entry.contains_dir(&path))
-                                {
-                                    self.watch(path);
-                                    return None;
-                                }
+                        if let EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) =
+                            event.kind
+                        {
+                            let files = event
+                                .paths
+                                .into_iter()
+                                .filter_map(|path| {
+                                    Some(
+                                        AbsPathBuf::try_from(
+                                            Utf8PathBuf::from_path_buf(path).ok()?,
+                                        )
+                                        .expect("path is absolute"),
+                                    )
+                                })
+                                .filter_map(|path| -> Option<(AbsPathBuf, Option<Vec<u8>>)> {
+                                    let meta = fs::metadata(&path).ok()?;
+                                    if meta.file_type().is_dir()
+                                        && self
+                                            .watched_dir_entries
+                                            .iter()
+                                            .any(|dir| dir.contains_dir(&path))
+                                    {
+                                        self.watch(path.as_ref());
+                                        return None;
+                                    }
 
-                                if !meta.file_type().is_file() {
-                                    return None;
-                                }
-                                if !self
-                                    .watched_entries
-                                    .iter()
-                                    .any(|entry| entry.contains_file(&path))
-                                {
-                                    return None;
-                                }
+                                    if !meta.file_type().is_file() {
+                                        return None;
+                                    }
 
-                                let contents = read(&path);
-                                Some((path, contents))
-                            })
-                            .collect();
-                        self.send(loader::Message::Loaded { files });
+                                    if !(self.watched_file_entries.contains(&path)
+                                        || self
+                                            .watched_dir_entries
+                                            .iter()
+                                            .any(|dir| dir.contains_file(&path)))
+                                    {
+                                        return None;
+                                    }
+
+                                    let contents = read(&path);
+                                    Some((path, contents))
+                                })
+                                .collect();
+                            self.send(loader::Message::Changed { files });
+                        }
                     }
                 }
             }
         }
     }
+
     fn load_entry(
-        &mut self,
+        mut watch: impl FnMut(&Path),
         entry: loader::Entry,
-        watch: bool,
+        do_watch: bool,
+        send_message: impl Fn(AbsPathBuf),
     ) -> Vec<(AbsPathBuf, Option<Vec<u8>>)> {
         match entry {
             loader::Entry::Files(files) => files
                 .into_iter()
                 .map(|file| {
-                    if watch {
-                        self.watch(file.clone());
+                    if do_watch {
+                        watch(file.as_ref());
                     }
                     let contents = read(file.as_path());
                     (file, contents)
@@ -186,22 +268,35 @@ impl NotifyActor {
                 let mut res = Vec::new();
 
                 for root in &dirs.include {
+                    send_message(root.clone());
                     let walkdir =
                         WalkDir::new(root).follow_links(true).into_iter().filter_entry(|entry| {
                             if !entry.file_type().is_dir() {
                                 return true;
                             }
-                            let path = AbsPath::assert(entry.path());
+                            let path = entry.path();
+
+                            if path_might_be_cyclic(path) {
+                                return false;
+                            }
+
                             root == path
                                 || dirs.exclude.iter().chain(&dirs.include).all(|it| it != path)
                         });
 
                     let files = walkdir.filter_map(|it| it.ok()).filter_map(|entry| {
+                        let depth = entry.depth();
                         let is_dir = entry.file_type().is_dir();
                         let is_file = entry.file_type().is_file();
-                        let abs_path = AbsPathBuf::assert(entry.into_path());
-                        if is_dir && watch {
-                            self.watch(abs_path.clone());
+                        let abs_path = AbsPathBuf::try_from(
+                            Utf8PathBuf::from_path_buf(entry.into_path()).ok()?,
+                        )
+                        .ok()?;
+                        if depth < 2 && is_dir {
+                            send_message(abs_path.clone());
+                        }
+                        if is_dir && do_watch {
+                            watch(abs_path.as_ref());
                         }
                         if !is_file {
                             return None;
@@ -223,13 +318,15 @@ impl NotifyActor {
         }
     }
 
-    fn watch(&mut self, path: AbsPathBuf) {
+    fn watch(&mut self, path: &Path) {
         if let Some((watcher, _)) = &mut self.watcher {
-            log_notify_error(watcher.watch(path.as_ref(), RecursiveMode::NonRecursive));
+            log_notify_error(watcher.watch(path, RecursiveMode::NonRecursive));
         }
     }
-    fn send(&mut self, msg: loader::Message) {
-        (self.sender)(msg);
+
+    #[track_caller]
+    fn send(&self, msg: loader::Message) {
+        self.sender.send(msg).unwrap();
     }
 }
 
@@ -239,4 +336,22 @@ fn read(path: &AbsPath) -> Option<Vec<u8>> {
 
 fn log_notify_error<T>(res: notify::Result<T>) -> Option<T> {
     res.map_err(|err| tracing::warn!("notify error: {}", err)).ok()
+}
+
+/// Is `path` a symlink to a parent directory?
+///
+/// Including this path is guaranteed to cause an infinite loop. This
+/// heuristic is not sufficient to catch all symlink cycles (it's
+/// possible to construct cycle using two or more symlinks), but it
+/// catches common cases.
+fn path_might_be_cyclic(path: &Path) -> bool {
+    let Ok(destination) = std::fs::read_link(path) else {
+        return false;
+    };
+
+    // If the symlink is of the form "../..", it's a parent symlink.
+    let is_relative_parent =
+        destination.components().all(|c| matches!(c, Component::CurDir | Component::ParentDir));
+
+    is_relative_parent || path.starts_with(destination)
 }

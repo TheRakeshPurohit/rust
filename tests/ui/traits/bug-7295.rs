@@ -1,5 +1,4 @@
-// run-pass
-// pretty-expanded FIXME #23616
+//@ run-pass
 
 pub trait Foo<T> {
     fn func1<U>(&self, t: U, w: T);

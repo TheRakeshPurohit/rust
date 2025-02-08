@@ -1,13 +1,14 @@
-use crate::infer::canonical::{Canonical, CanonicalQueryResponse};
-use crate::traits::ObligationCtxt;
-use rustc_hir::def_id::{DefId, CRATE_DEF_ID};
+use rustc_hir::def_id::{CRATE_DEF_ID, DefId};
 use rustc_infer::traits::Obligation;
 use rustc_middle::traits::query::NoSolution;
-use rustc_middle::traits::{ObligationCause, ObligationCauseCode};
-use rustc_middle::ty::{self, ParamEnvAnd, Ty, TyCtxt, UserSelfTy, UserSubsts, UserType};
-
 pub use rustc_middle::traits::query::type_op::AscribeUserType;
-use rustc_span::{Span, DUMMY_SP};
+use rustc_middle::traits::{ObligationCause, ObligationCauseCode};
+use rustc_middle::ty::{self, ParamEnvAnd, Ty, TyCtxt, UserArgs, UserSelfTy, UserTypeKind};
+use rustc_span::{DUMMY_SP, Span};
+use tracing::{debug, instrument};
+
+use crate::infer::canonical::{CanonicalQueryInput, CanonicalQueryResponse};
+use crate::traits::ObligationCtxt;
 
 impl<'tcx> super::QueryTypeOp<'tcx> for AscribeUserType<'tcx> {
     type QueryResponse = ();
@@ -21,16 +22,17 @@ impl<'tcx> super::QueryTypeOp<'tcx> for AscribeUserType<'tcx> {
 
     fn perform_query(
         tcx: TyCtxt<'tcx>,
-        canonicalized: Canonical<'tcx, ParamEnvAnd<'tcx, Self>>,
+        canonicalized: CanonicalQueryInput<'tcx, ParamEnvAnd<'tcx, Self>>,
     ) -> Result<CanonicalQueryResponse<'tcx, ()>, NoSolution> {
         tcx.type_op_ascribe_user_type(canonicalized)
     }
 
-    fn perform_locally_in_new_solver(
+    fn perform_locally_with_next_solver(
         ocx: &ObligationCtxt<'_, 'tcx>,
         key: ParamEnvAnd<'tcx, Self>,
+        span: Span,
     ) -> Result<Self::QueryResponse, NoSolution> {
-        type_op_ascribe_user_type_with_span(ocx, key, None)
+        type_op_ascribe_user_type_with_span(ocx, key, span)
     }
 }
 
@@ -40,17 +42,22 @@ impl<'tcx> super::QueryTypeOp<'tcx> for AscribeUserType<'tcx> {
 pub fn type_op_ascribe_user_type_with_span<'tcx>(
     ocx: &ObligationCtxt<'_, 'tcx>,
     key: ParamEnvAnd<'tcx, AscribeUserType<'tcx>>,
-    span: Option<Span>,
+    span: Span,
 ) -> Result<(), NoSolution> {
     let (param_env, AscribeUserType { mir_ty, user_ty }) = key.into_parts();
     debug!("type_op_ascribe_user_type: mir_ty={:?} user_ty={:?}", mir_ty, user_ty);
-    let span = span.unwrap_or(DUMMY_SP);
-    match user_ty {
-        UserType::Ty(user_ty) => relate_mir_and_user_ty(ocx, param_env, span, mir_ty, user_ty)?,
-        UserType::TypeOf(def_id, user_substs) => {
-            relate_mir_and_user_substs(ocx, param_env, span, mir_ty, def_id, user_substs)?
+    match user_ty.kind {
+        UserTypeKind::Ty(user_ty) => relate_mir_and_user_ty(ocx, param_env, span, mir_ty, user_ty)?,
+        UserTypeKind::TypeOf(def_id, user_args) => {
+            relate_mir_and_user_args(ocx, param_env, span, mir_ty, def_id, user_args)?
         }
     };
+
+    // Enforce any bounds that come from impl trait in bindings.
+    ocx.register_obligations(user_ty.bounds.iter().map(|clause| {
+        Obligation::new(ocx.infcx.tcx, ObligationCause::dummy_with_span(span), param_env, clause)
+    }));
+
     Ok(())
 }
 
@@ -63,30 +70,33 @@ fn relate_mir_and_user_ty<'tcx>(
     user_ty: Ty<'tcx>,
 ) -> Result<(), NoSolution> {
     let cause = ObligationCause::dummy_with_span(span);
+    ocx.register_obligation(Obligation::new(
+        ocx.infcx.tcx,
+        cause.clone(),
+        param_env,
+        ty::ClauseKind::WellFormed(user_ty.into()),
+    ));
+
     let user_ty = ocx.normalize(&cause, param_env, user_ty);
     ocx.eq(&cause, param_env, mir_ty, user_ty)?;
 
-    // FIXME(#104764): We should check well-formedness before normalization.
-    let predicate = ty::Binder::dummy(ty::PredicateKind::WellFormed(user_ty.into()));
-    ocx.register_obligation(Obligation::new(ocx.infcx.tcx, cause, param_env, predicate));
     Ok(())
 }
 
 #[instrument(level = "debug", skip(ocx, param_env, span))]
-fn relate_mir_and_user_substs<'tcx>(
+fn relate_mir_and_user_args<'tcx>(
     ocx: &ObligationCtxt<'_, 'tcx>,
     param_env: ty::ParamEnv<'tcx>,
     span: Span,
     mir_ty: Ty<'tcx>,
     def_id: DefId,
-    user_substs: UserSubsts<'tcx>,
+    user_args: UserArgs<'tcx>,
 ) -> Result<(), NoSolution> {
-    let param_env = param_env.without_const();
-    let UserSubsts { user_self_ty, substs } = user_substs;
+    let UserArgs { user_self_ty, args } = user_args;
     let tcx = ocx.infcx.tcx;
     let cause = ObligationCause::dummy_with_span(span);
 
-    let ty = tcx.type_of(def_id).subst(tcx, substs);
+    let ty = tcx.type_of(def_id).instantiate(tcx, args);
     let ty = ocx.normalize(&cause, param_env, ty);
     debug!("relate_type_and_user_type: ty of def-id is {:?}", ty);
 
@@ -97,7 +107,7 @@ fn relate_mir_and_user_substs<'tcx>(
     // Also, normalize the `instantiated_predicates`
     // because otherwise we wind up with duplicate "type
     // outlives" error messages.
-    let instantiated_predicates = tcx.predicates_of(def_id).instantiate(tcx, substs);
+    let instantiated_predicates = tcx.predicates_of(def_id).instantiate(tcx, args);
 
     debug!(?instantiated_predicates);
     for (instantiated_predicate, predicate_span) in instantiated_predicates {
@@ -113,28 +123,38 @@ fn relate_mir_and_user_substs<'tcx>(
         ocx.register_obligation(Obligation::new(tcx, cause, param_env, instantiated_predicate));
     }
 
+    // Now prove the well-formedness of `def_id` with `args`.
+    // Note for some items, proving the WF of `ty` is not sufficient because the
+    // well-formedness of an item may depend on the WF of gneneric args not present in the
+    // item's type. Currently this is true for associated consts, e.g.:
+    // ```rust
+    // impl<T> MyTy<T> {
+    //     const CONST: () = { /* arbitrary code that depends on T being WF */ };
+    // }
+    // ```
+    for arg in args {
+        ocx.register_obligation(Obligation::new(
+            tcx,
+            cause.clone(),
+            param_env,
+            ty::ClauseKind::WellFormed(arg),
+        ));
+    }
+
     if let Some(UserSelfTy { impl_def_id, self_ty }) = user_self_ty {
+        ocx.register_obligation(Obligation::new(
+            tcx,
+            cause.clone(),
+            param_env,
+            ty::ClauseKind::WellFormed(self_ty.into()),
+        ));
+
         let self_ty = ocx.normalize(&cause, param_env, self_ty);
-        let impl_self_ty = tcx.type_of(impl_def_id).subst(tcx, substs);
+        let impl_self_ty = tcx.type_of(impl_def_id).instantiate(tcx, args);
         let impl_self_ty = ocx.normalize(&cause, param_env, impl_self_ty);
 
         ocx.eq(&cause, param_env, self_ty, impl_self_ty)?;
-        let predicate = ty::Binder::dummy(ty::PredicateKind::WellFormed(impl_self_ty.into()));
-        ocx.register_obligation(Obligation::new(tcx, cause.clone(), param_env, predicate));
     }
 
-    // In addition to proving the predicates, we have to
-    // prove that `ty` is well-formed -- this is because
-    // the WF of `ty` is predicated on the substs being
-    // well-formed, and we haven't proven *that*. We don't
-    // want to prove the WF of types from  `substs` directly because they
-    // haven't been normalized.
-    //
-    // FIXME(nmatsakis): Well, perhaps we should normalize
-    // them?  This would only be relevant if some input
-    // type were ill-formed but did not appear in `ty`,
-    // which...could happen with normalization...
-    let predicate = ty::Binder::dummy(ty::PredicateKind::WellFormed(ty.into()));
-    ocx.register_obligation(Obligation::new(tcx, cause, param_env, predicate));
     Ok(())
 }

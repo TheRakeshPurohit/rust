@@ -1,6 +1,6 @@
-// run-fail
-// error-pattern:so long
-// ignore-emscripten no processes
+//@ run-fail
+//@ error-pattern:so long
+//@ needs-subprocess
 
 #![allow(unreachable_code)]
 

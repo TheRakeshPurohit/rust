@@ -1,5 +1,3 @@
-//@run-rustfix
-
 #![allow(unused, clippy::map_identity)]
 #![warn(clippy::lines_filter_map_ok)]
 
@@ -12,7 +10,13 @@ fn main() -> io::Result<()> {
     // Lint
     let f = std::fs::File::open("/")?;
     BufReader::new(f).lines().map_while(Result::ok).for_each(|_| ());
+    // Lint
+    let f = std::fs::File::open("/")?;
+    BufReader::new(f).lines().map_while(Result::ok).for_each(|_| ());
+
     let s = "foo\nbar\nbaz\n";
+    // Lint
+    io::stdin().lines().map_while(Result::ok).for_each(|_| ());
     // Lint
     io::stdin().lines().map_while(Result::ok).for_each(|_| ());
     // Lint

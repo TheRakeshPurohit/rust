@@ -1,5 +1,5 @@
-// run-pass
-// ignore-emscripten no threads support
+//@ run-pass
+//@ needs-threads
 
 use std::sync::mpsc::channel;
 use std::thread;
@@ -9,7 +9,10 @@ pub fn main() {
 
     tx.send("hello, world").unwrap();
 
-    thread::spawn(move|| {
+    thread::spawn(move || {
         println!("{}", rx.recv().unwrap());
-    }).join().ok().unwrap();
+    })
+    .join()
+    .ok()
+    .unwrap();
 }

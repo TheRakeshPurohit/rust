@@ -1,15 +1,15 @@
-// compile-flags: -O -C no-prepopulate-passes
+//@ compile-flags: -O -C no-prepopulate-passes
 
 // Tests that the compiler can apply `noalias` and other &mut attributes to `drop_in_place`.
 // Note that non-Unpin types should not get `noalias`, matching &mut behavior.
 
-#![crate_type="lib"]
+#![crate_type = "lib"]
 
 use std::marker::PhantomPinned;
 
-// CHECK: define internal void @{{.*}}core{{.*}}ptr{{.*}}drop_in_place{{.*}}StructUnpin{{.*}}({{.*\*|ptr}} noalias noundef align 4 dereferenceable(12) %{{.+}})
+// CHECK: define internal void @{{.*}}core{{.*}}ptr{{.*}}drop_in_place{{.*}}StructUnpin{{.*}}(ptr noalias noundef align 4 dereferenceable(12) %{{.+}})
 
-// CHECK: define internal void @{{.*}}core{{.*}}ptr{{.*}}drop_in_place{{.*}}StructNotUnpin{{.*}}({{.*\*|ptr}} noundef nonnull align 4 %{{.+}})
+// CHECK: define internal void @{{.*}}core{{.*}}ptr{{.*}}drop_in_place{{.*}}StructNotUnpin{{.*}}(ptr noundef nonnull align 4 %{{.+}})
 
 pub struct StructUnpin {
     a: i32,

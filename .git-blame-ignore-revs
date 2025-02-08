@@ -16,3 +16,16 @@ cf2dff2b1e3fa55fa5415d524200070d0d7aacfe
 b39a1d6f1a30ba29f25d7141038b9a5bf0126e36
 # reorder fluent message files
 f97fddab91fbf290ea5b691fe355d6f915220b6e
+# format let-else
+cc907f80b95c6ec530c5ee1b05b044a468f07eca
+# format let-chains
+b2d2184edea578109a48ec3d8decbee5948e8f35
+# test directives migration
+6e48b96692d63a79a14563f27fe5185f122434f8
+ec2cc761bc7067712ecc7734502f703fe3b024c8
+# format use declarations
+84ac80f1921afc243d71fd0caaa4f2838c294102
+# bless mir-opt tests to add `copy`
+99cb0c6bc399fb94a0ddde7e9b38e9c00d523bad
+# reformat with rustfmt edition 2024
+c682aa162b0d41e21cc6748f4fecfe01efb69d1f

@@ -1,18 +1,25 @@
 use std::{
     cell::{Cell, RefCell},
-    fs,
-    path::{Path, PathBuf},
+    env, fs,
     sync::Once,
     time::Duration,
 };
 
 use crossbeam_channel::{after, select, Receiver};
+use itertools::Itertools;
 use lsp_server::{Connection, Message, Notification, Request};
 use lsp_types::{notification::Exit, request::Shutdown, TextDocumentIdentifier, Url};
-use rust_analyzer::{config::Config, lsp_ext, main_loop};
+use parking_lot::{Mutex, MutexGuard};
+use paths::{Utf8Path, Utf8PathBuf};
+use rust_analyzer::{
+    cli::flags,
+    config::{Config, ConfigChange, ConfigErrors},
+    lsp, main_loop,
+};
 use serde::Serialize;
 use serde_json::{json, to_string_pretty, Value};
 use test_utils::FixtureWithProjectMeta;
+use tracing_subscriber::fmt::TestWriter;
 use vfs::AbsPathBuf;
 
 use crate::testdir::TestDir;
@@ -20,11 +27,12 @@ use crate::testdir::TestDir;
 pub(crate) struct Project<'a> {
     fixture: &'a str,
     tmp_dir: Option<TestDir>,
-    roots: Vec<PathBuf>,
+    roots: Vec<Utf8PathBuf>,
     config: serde_json::Value,
+    root_dir_contains_symlink: bool,
 }
 
-impl<'a> Project<'a> {
+impl Project<'_> {
     pub(crate) fn with_fixture(fixture: &str) -> Project<'_> {
         Project {
             fixture,
@@ -44,20 +52,26 @@ impl<'a> Project<'a> {
                     "enable": false,
                 }
             }),
+            root_dir_contains_symlink: false,
         }
     }
 
-    pub(crate) fn tmp_dir(mut self, tmp_dir: TestDir) -> Project<'a> {
+    pub(crate) fn tmp_dir(mut self, tmp_dir: TestDir) -> Self {
         self.tmp_dir = Some(tmp_dir);
         self
     }
 
-    pub(crate) fn root(mut self, path: &str) -> Project<'a> {
+    pub(crate) fn root(mut self, path: &str) -> Self {
         self.roots.push(path.into());
         self
     }
 
-    pub(crate) fn with_config(mut self, config: serde_json::Value) -> Project<'a> {
+    pub(crate) fn with_root_dir_contains_symlink(mut self) -> Self {
+        self.root_dir_contains_symlink = true;
+        self
+    }
+
+    pub(crate) fn with_config(mut self, config: serde_json::Value) -> Self {
         fn merge(dst: &mut serde_json::Value, src: serde_json::Value) {
             match (dst, src) {
                 (Value::Object(dst), Value::Object(src)) => {
@@ -72,26 +86,117 @@ impl<'a> Project<'a> {
         self
     }
 
-    pub(crate) fn server(self) -> Server {
-        let tmp_dir = self.tmp_dir.unwrap_or_else(TestDir::new);
-        static INIT: Once = Once::new();
-        INIT.call_once(|| {
-            tracing_subscriber::fmt()
-                .with_test_writer()
-                .with_env_filter(tracing_subscriber::EnvFilter::from_env("RA_LOG"))
-                .init();
-            profile::init_from(crate::PROFILE);
+    pub(crate) fn run_lsif(self) -> String {
+        let tmp_dir = self.tmp_dir.unwrap_or_else(|| {
+            if self.root_dir_contains_symlink {
+                TestDir::new_symlink()
+            } else {
+                TestDir::new()
+            }
         });
 
-        let FixtureWithProjectMeta { fixture, mini_core, proc_macro_names, toolchain } =
-            FixtureWithProjectMeta::parse(self.fixture);
+        let FixtureWithProjectMeta {
+            fixture,
+            mini_core,
+            proc_macro_names,
+            toolchain,
+            target_data_layout: _,
+        } = FixtureWithProjectMeta::parse(self.fixture);
         assert!(proc_macro_names.is_empty());
         assert!(mini_core.is_none());
         assert!(toolchain.is_none());
+
         for entry in fixture {
             let path = tmp_dir.path().join(&entry.path['/'.len_utf8()..]);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path.as_path(), entry.text.as_bytes()).unwrap();
+        }
+
+        let tmp_dir_path = AbsPathBuf::assert(tmp_dir.path().to_path_buf());
+        let mut buf = Vec::new();
+        flags::Lsif::run(
+            flags::Lsif {
+                path: tmp_dir_path.join(self.roots.iter().exactly_one().unwrap()).into(),
+                exclude_vendored_libraries: false,
+            },
+            &mut buf,
+            None,
+        )
+        .unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    pub(crate) fn server(self) -> Server {
+        Project::server_with_lock(self, false)
+    }
+
+    /// `prelock` : Forcefully acquire a lock that will maintain the path to the config dir throughout the whole test.
+    ///
+    /// When testing we set the user config dir by setting an envvar `__TEST_RA_USER_CONFIG_DIR`.
+    /// This value must be maintained until the end of a test case. When tests run in parallel
+    /// this value may change thus making the tests flaky. As such, we use a `MutexGuard` that locks
+    /// the process until `Server` is dropped. To optimize parallelization we use a lock only when it is
+    /// needed, that is when a test uses config directory to do stuff. Our naive approach is to use a lock
+    /// if there is a path to config dir in the test fixture. However, in certain cases we create a
+    /// file in the config dir after server is run, something where our naive approach comes short.
+    /// Using a `prelock` allows us to force a lock when we know we need it.
+    pub(crate) fn server_with_lock(self, config_lock: bool) -> Server {
+        static CONFIG_DIR_LOCK: Mutex<()> = Mutex::new(());
+
+        let config_dir_guard = if config_lock {
+            Some({
+                let guard = CONFIG_DIR_LOCK.lock();
+                let test_dir = TestDir::new();
+                let value = test_dir.path().to_owned();
+                env::set_var("__TEST_RA_USER_CONFIG_DIR", &value);
+                (guard, test_dir)
+            })
+        } else {
+            None
+        };
+
+        let tmp_dir = self.tmp_dir.unwrap_or_else(|| {
+            if self.root_dir_contains_symlink {
+                TestDir::new_symlink()
+            } else {
+                TestDir::new()
+            }
+        });
+
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let _ = rust_analyzer::tracing::Config {
+                writer: TestWriter::default(),
+                // Deliberately enable all `error` logs if the user has not set RA_LOG, as there is usually
+                // useful information in there for debugging.
+                filter: std::env::var("RA_LOG").ok().unwrap_or_else(|| "error".to_owned()),
+                chalk_filter: std::env::var("CHALK_DEBUG").ok(),
+                profile_filter: std::env::var("RA_PROFILE").ok(),
+                json_profile_filter: std::env::var("RA_PROFILE_JSON").ok(),
+            };
+        });
+
+        let FixtureWithProjectMeta {
+            fixture,
+            mini_core,
+            proc_macro_names,
+            toolchain,
+            target_data_layout: _,
+        } = FixtureWithProjectMeta::parse(self.fixture);
+        assert!(proc_macro_names.is_empty());
+        assert!(mini_core.is_none());
+        assert!(toolchain.is_none());
+
+        for entry in fixture {
+            if let Some(pth) = entry.path.strip_prefix("/$$CONFIG_DIR$$") {
+                let path = Config::user_config_dir_path().unwrap().join(&pth['/'.len_utf8()..]);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path.as_path(), entry.text.as_bytes()).unwrap();
+            } else {
+                let path = tmp_dir.path().join(&entry.path['/'.len_utf8()..]);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path.as_path(), entry.text.as_bytes()).unwrap();
+            }
         }
 
         let tmp_dir_path = AbsPathBuf::assert(tmp_dir.path().to_path_buf());
@@ -102,7 +207,7 @@ impl<'a> Project<'a> {
         }
 
         let mut config = Config::new(
-            tmp_dir_path,
+            tmp_dir_path.clone(),
             lsp_types::ClientCapabilities {
                 workspace: Some(lsp_types::WorkspaceClientCapabilities {
                     did_change_watched_files: Some(
@@ -111,6 +216,14 @@ impl<'a> Project<'a> {
                             relative_pattern_support: None,
                         },
                     ),
+                    workspace_edit: Some(lsp_types::WorkspaceEditClientCapabilities {
+                        resource_operations: Some(vec![
+                            lsp_types::ResourceOperationKind::Create,
+                            lsp_types::ResourceOperationKind::Delete,
+                            lsp_types::ResourceOperationKind::Rename,
+                        ]),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }),
                 text_document: Some(lsp_types::TextDocumentClientCapabilities {
@@ -128,6 +241,18 @@ impl<'a> Project<'a> {
                         content_format: Some(vec![lsp_types::MarkupKind::Markdown]),
                         ..Default::default()
                     }),
+                    inlay_hint: Some(lsp_types::InlayHintClientCapabilities {
+                        resolve_support: Some(lsp_types::InlayHintResolveClientCapabilities {
+                            properties: vec![
+                                "textEdits".to_owned(),
+                                "tooltip".to_owned(),
+                                "label.tooltip".to_owned(),
+                                "label.location".to_owned(),
+                                "label.command".to_owned(),
+                            ],
+                        }),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }),
                 window: Some(lsp_types::WindowClientCapabilities {
@@ -140,11 +265,19 @@ impl<'a> Project<'a> {
                 ..Default::default()
             },
             roots,
+            None,
         );
-        config.update(self.config).expect("invalid config");
+        let mut change = ConfigChange::default();
+
+        change.change_client_config(self.config);
+
+        let error_sink: ConfigErrors;
+        (config, error_sink, _) = config.apply_change(change);
+        assert!(error_sink.is_empty(), "{error_sink:?}");
+
         config.rediscover_workspaces();
 
-        Server::new(tmp_dir, config)
+        Server::new(config_dir_guard, tmp_dir.keep(), config)
     }
 }
 
@@ -159,18 +292,30 @@ pub(crate) struct Server {
     client: Connection,
     /// XXX: remove the tempdir last
     dir: TestDir,
+    _config_dir_guard: Option<(MutexGuard<'static, ()>, TestDir)>,
 }
 
 impl Server {
-    fn new(dir: TestDir, config: Config) -> Server {
+    fn new(
+        config_dir_guard: Option<(MutexGuard<'static, ()>, TestDir)>,
+        dir: TestDir,
+        config: Config,
+    ) -> Server {
         let (connection, client) = Connection::memory();
 
         let _thread = stdx::thread::Builder::new(stdx::thread::ThreadIntent::Worker)
-            .name("test server".to_string())
+            .name("test server".to_owned())
             .spawn(move || main_loop(config, connection).unwrap())
             .expect("failed to spawn a thread");
 
-        Server { req_id: Cell::new(1), dir, messages: Default::default(), client, _thread }
+        Server {
+            req_id: Cell::new(1),
+            dir,
+            messages: Default::default(),
+            client,
+            _thread,
+            _config_dir_guard: config_dir_guard,
+        }
     }
 
     pub(crate) fn doc_id(&self, rel_path: &str) -> TextDocumentIdentifier {
@@ -183,7 +328,7 @@ impl Server {
         N: lsp_types::notification::Notification,
         N::Params: Serialize,
     {
-        let r = Notification::new(N::METHOD.to_string(), params);
+        let r = Notification::new(N::METHOD.to_owned(), params);
         self.send_notification(r)
     }
 
@@ -205,6 +350,7 @@ impl Server {
         }
     }
 
+    #[track_caller]
     pub(crate) fn send_request<R>(&self, params: R::Params) -> Value
     where
         R: lsp_types::request::Request,
@@ -213,9 +359,10 @@ impl Server {
         let id = self.req_id.get();
         self.req_id.set(id.wrapping_add(1));
 
-        let r = Request::new(id.into(), R::METHOD.to_string(), params);
+        let r = Request::new(id.into(), R::METHOD.to_owned(), params);
         self.send_request_(r)
     }
+    #[track_caller]
     fn send_request_(&self, r: Request) -> Value {
         let id = r.id.clone();
         self.client.sender.send(r.clone().into()).unwrap();
@@ -250,9 +397,9 @@ impl Server {
             Message::Notification(n) if n.method == "experimental/serverStatus" => {
                 let status = n
                     .clone()
-                    .extract::<lsp_ext::ServerStatusParams>("experimental/serverStatus")
+                    .extract::<lsp::ext::ServerStatusParams>("experimental/serverStatus")
                     .unwrap();
-                if status.health != lsp_ext::Health::Ok {
+                if status.health != lsp::ext::Health::Ok {
                     panic!("server errored/warned while loading workspace: {:?}", status.message);
                 }
                 status.quiescent
@@ -283,9 +430,8 @@ impl Server {
     }
     fn recv(&self) -> Result<Option<Message>, Timeout> {
         let msg = recv_timeout(&self.client.receiver)?;
-        let msg = msg.map(|msg| {
+        let msg = msg.inspect(|msg| {
             self.messages.borrow_mut().push(msg.clone());
-            msg
         });
         Ok(msg)
     }
@@ -293,8 +439,18 @@ impl Server {
         self.client.sender.send(Message::Notification(not)).unwrap();
     }
 
-    pub(crate) fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Utf8Path {
         self.dir.path()
+    }
+
+    pub(crate) fn write_file_and_save(&self, path: &str, text: String) {
+        fs::write(self.dir.path().join(path), &text).unwrap();
+        self.notification::<lsp_types::notification::DidSaveTextDocument>(
+            lsp_types::DidSaveTextDocumentParams {
+                text_document: self.doc_id(path),
+                text: Some(text),
+            },
+        )
     }
 }
 

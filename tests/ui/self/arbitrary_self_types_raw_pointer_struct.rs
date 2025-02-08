@@ -1,5 +1,5 @@
-// run-pass
-#![feature(arbitrary_self_types)]
+//@ run-pass
+#![feature(arbitrary_self_types_pointers)]
 
 use std::rc::Rc;
 

@@ -6,7 +6,7 @@ fn takes_fn(f: impl Fn()) {
     }
 }
 
-fn takes_fn_mut(m: impl FnMut()) {
+fn takes_fn_mut(m: impl FnMut()) { //~ HELP if `impl FnMut()` implemented `Clone`
     if maybe() {
         takes_fnonce(m);
         //~^ HELP consider mutably borrowing

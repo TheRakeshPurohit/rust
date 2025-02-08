@@ -1,14 +1,14 @@
 use clippy_utils::diagnostics::span_lint_hir_and_then;
 use clippy_utils::source::snippet;
 use hir::def::{DefKind, Res};
-use if_chain::if_chain;
-use rustc_ast::ast;
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::Applicability;
-use rustc_hir as hir;
+use rustc_hir::{self as hir, AmbigArg};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
-use rustc_session::{declare_tool_lint, impl_lint_pass};
-use rustc_span::{edition::Edition, sym, Span};
+use rustc_session::impl_lint_pass;
+use rustc_span::edition::Edition;
+use rustc_span::{Span, sym};
+use std::collections::BTreeMap;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -29,12 +29,6 @@ declare_clippy_lint! {
     "#[macro_use] is no longer needed"
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct PathAndSpan {
-    path: String,
-    span: Span,
-}
-
 /// `MacroRefData` includes the name of the macro.
 #[derive(Debug, Clone)]
 pub struct MacroRefData {
@@ -48,7 +42,6 @@ impl MacroRefData {
 }
 
 #[derive(Default)]
-#[expect(clippy::module_name_repetitions)]
 pub struct MacroUseImports {
     /// the actual import path used and the span of the attribute above it. The value is
     /// the location, where the lint should be emitted.
@@ -86,35 +79,31 @@ impl MacroUseImports {
     }
 }
 
-impl<'tcx> LateLintPass<'tcx> for MacroUseImports {
+impl LateLintPass<'_> for MacroUseImports {
     fn check_item(&mut self, cx: &LateContext<'_>, item: &hir::Item<'_>) {
-        if_chain! {
-            if cx.sess().opts.edition >= Edition::Edition2018;
-            if let hir::ItemKind::Use(path, _kind) = &item.kind;
-            let hir_id = item.hir_id();
-            let attrs = cx.tcx.hir().attrs(hir_id);
-            if let Some(mac_attr) = attrs.iter().find(|attr| attr.has_name(sym::macro_use));
-            if let Some(id) = path.res.iter().find_map(|res| match res {
+        if cx.sess().opts.edition >= Edition::Edition2018
+            && let hir::ItemKind::Use(path, _kind) = &item.kind
+            && let hir_id = item.hir_id()
+            && let attrs = cx.tcx.hir().attrs(hir_id)
+            && let Some(mac_attr) = attrs.iter().find(|attr| attr.has_name(sym::macro_use))
+            && let Some(id) = path.res.iter().find_map(|res| match res {
                 Res::Def(DefKind::Mod, id) => Some(id),
                 _ => None,
-            });
-            if !id.is_local();
-            then {
-                for kid in cx.tcx.module_children(id).iter() {
-                    if let Res::Def(DefKind::Macro(_mac_type), mac_id) = kid.res {
-                        let span = mac_attr.span;
-                        let def_path = cx.tcx.def_path_str(mac_id);
-                        self.imports.push((def_path, span, hir_id));
-                    }
-                }
-            } else {
-                if item.span.from_expansion() {
-                    self.push_unique_macro_pat_ty(cx, item.span);
+            })
+            && !id.is_local()
+        {
+            for kid in cx.tcx.module_children(id) {
+                if let Res::Def(DefKind::Macro(_mac_type), mac_id) = kid.res {
+                    let span = mac_attr.span;
+                    let def_path = cx.tcx.def_path_str(mac_id);
+                    self.imports.push((def_path, span, hir_id));
                 }
             }
+        } else if item.span.from_expansion() {
+            self.push_unique_macro_pat_ty(cx, item.span);
         }
     }
-    fn check_attribute(&mut self, cx: &LateContext<'_>, attr: &ast::Attribute) {
+    fn check_attribute(&mut self, cx: &LateContext<'_>, attr: &hir::Attribute) {
         if attr.span.from_expansion() {
             self.push_unique_macro(cx, attr.span);
         }
@@ -134,13 +123,13 @@ impl<'tcx> LateLintPass<'tcx> for MacroUseImports {
             self.push_unique_macro_pat_ty(cx, pat.span);
         }
     }
-    fn check_ty(&mut self, cx: &LateContext<'_>, ty: &hir::Ty<'_>) {
+    fn check_ty(&mut self, cx: &LateContext<'_>, ty: &hir::Ty<'_, AmbigArg>) {
         if ty.span.from_expansion() {
             self.push_unique_macro_pat_ty(cx, ty.span);
         }
     }
     fn check_crate_post(&mut self, cx: &LateContext<'_>) {
-        let mut used = FxHashMap::default();
+        let mut used = BTreeMap::new();
         let mut check_dup = vec![];
         for (import, span, hir_id) in &self.imports {
             let found_idx = self.mac_refs.iter().position(|mac| import.ends_with(&mac.name));
@@ -189,20 +178,16 @@ impl<'tcx> LateLintPass<'tcx> for MacroUseImports {
             }
         }
 
-        let mut suggestions = vec![];
-        for ((root, span, hir_id), path) in used {
-            if path.len() == 1 {
-                suggestions.push((span, format!("{root}::{}", path[0]), hir_id));
-            } else {
-                suggestions.push((span, format!("{root}::{{{}}}", path.join(", ")), hir_id));
-            }
-        }
-
         // If mac_refs is not empty we have encountered an import we could not handle
         // such as `std::prelude::v1::foo` or some other macro that expands to an import.
         if self.mac_refs.is_empty() {
-            for (span, import, hir_id) in suggestions {
-                let help = format!("use {import};");
+            for ((root, span, hir_id), path) in used {
+                let import = if let [single] = &path[..] {
+                    format!("{root}::{single}")
+                } else {
+                    format!("{root}::{{{}}}", path.join(", "))
+                };
+
                 span_lint_hir_and_then(
                     cx,
                     MACRO_USE_IMPORTS,
@@ -213,7 +198,7 @@ impl<'tcx> LateLintPass<'tcx> for MacroUseImports {
                         diag.span_suggestion(
                             *span,
                             "remove the attribute and import the macro directly, try",
-                            help,
+                            format!("use {import};"),
                             Applicability::MaybeIncorrect,
                         );
                     },

@@ -1,70 +1,66 @@
 //! LSIF (language server index format) generator
 
-use std::collections::HashMap;
 use std::env;
 use std::time::Instant;
 
 use ide::{
-    Analysis, FileId, FileRange, MonikerKind, PackageInformation, RootDatabase, StaticIndex,
-    StaticIndexedFile, TokenId, TokenStaticData,
+    Analysis, AnalysisHost, FileId, FileRange, MonikerKind, MonikerResult, PackageInformation,
+    RootDatabase, StaticIndex, StaticIndexedFile, TokenId, TokenStaticData,
+    VendoredLibrariesConfig,
 };
-use ide_db::LineIndexDatabase;
-
-use ide_db::base_db::salsa::{self, ParallelDatabase};
-use ide_db::line_index::WideEncoding;
-use lsp_types::{self, lsif};
+use ide_db::{line_index::WideEncoding, LineIndexDatabase};
+use load_cargo::{load_workspace, LoadCargoConfig, ProcMacroServerChoice};
+use lsp_types::lsif;
 use project_model::{CargoConfig, ProjectManifest, ProjectWorkspace, RustLibSource};
+use rustc_hash::FxHashMap;
+use stdx::format_to;
 use vfs::{AbsPathBuf, Vfs};
 
-use crate::cli::load_cargo::ProcMacroServerChoice;
-use crate::cli::{
-    flags,
-    load_cargo::{load_workspace, LoadCargoConfig},
-    Result,
+use crate::{
+    cli::flags,
+    line_index::{LineEndings, LineIndex, PositionEncoding},
+    lsp::to_proto,
+    version::version,
 };
-use crate::line_index::{LineEndings, LineIndex, PositionEncoding};
-use crate::to_proto;
-use crate::version::version;
 
-/// Need to wrap Snapshot to provide `Clone` impl for `map_with`
-struct Snap<DB>(DB);
-impl<DB: ParallelDatabase> Clone for Snap<salsa::Snapshot<DB>> {
-    fn clone(&self) -> Snap<salsa::Snapshot<DB>> {
-        Snap(self.0.snapshot())
-    }
-}
-
-struct LsifManager<'a> {
+struct LsifManager<'a, 'w> {
     count: i32,
-    token_map: HashMap<TokenId, Id>,
-    range_map: HashMap<FileRange, Id>,
-    file_map: HashMap<FileId, Id>,
-    package_map: HashMap<PackageInformation, Id>,
+    token_map: FxHashMap<TokenId, Id>,
+    range_map: FxHashMap<FileRange, Id>,
+    file_map: FxHashMap<FileId, Id>,
+    package_map: FxHashMap<PackageInformation, Id>,
     analysis: &'a Analysis,
     db: &'a RootDatabase,
     vfs: &'a Vfs,
+    out: &'w mut dyn std::io::Write,
 }
 
 #[derive(Clone, Copy)]
 struct Id(i32);
 
 impl From<Id> for lsp_types::NumberOrString {
-    fn from(Id(x): Id) -> Self {
-        lsp_types::NumberOrString::Number(x)
+    fn from(Id(it): Id) -> Self {
+        lsp_types::NumberOrString::Number(it)
     }
 }
 
-impl LsifManager<'_> {
-    fn new<'a>(analysis: &'a Analysis, db: &'a RootDatabase, vfs: &'a Vfs) -> LsifManager<'a> {
+impl LsifManager<'_, '_> {
+    fn new<'a, 'w>(
+        analysis: &'a Analysis,
+        db: &'a RootDatabase,
+        vfs: &'a Vfs,
+        out: &'w mut dyn std::io::Write,
+    ) -> LsifManager<'a, 'w> {
         LsifManager {
             count: 0,
-            token_map: HashMap::default(),
-            range_map: HashMap::default(),
-            file_map: HashMap::default(),
-            package_map: HashMap::default(),
+            token_map: FxHashMap::default(),
+            range_map: FxHashMap::default(),
+            file_map: FxHashMap::default(),
+            package_map: FxHashMap::default(),
             analysis,
             db,
             vfs,
+            out,
         }
     }
 
@@ -83,14 +79,13 @@ impl LsifManager<'_> {
         self.add(lsif::Element::Edge(edge))
     }
 
-    // FIXME: support file in addition to stdout here
-    fn emit(&self, data: &str) {
-        println!("{data}");
+    fn emit(&mut self, data: &str) {
+        format_to!(self.out, "{data}\n");
     }
 
     fn get_token_id(&mut self, id: TokenId) -> Id {
-        if let Some(x) = self.token_map.get(&id) {
-            return *x;
+        if let Some(it) = self.token_map.get(&id) {
+            return *it;
         }
         let result_set_id = self.add_vertex(lsif::Vertex::ResultSet(lsif::ResultSet { key: None }));
         self.token_map.insert(id, result_set_id);
@@ -98,19 +93,19 @@ impl LsifManager<'_> {
     }
 
     fn get_package_id(&mut self, package_information: PackageInformation) -> Id {
-        if let Some(x) = self.package_map.get(&package_information) {
-            return *x;
+        if let Some(it) = self.package_map.get(&package_information) {
+            return *it;
         }
         let pi = package_information.clone();
         let result_set_id =
             self.add_vertex(lsif::Vertex::PackageInformation(lsif::PackageInformation {
                 name: pi.name,
-                manager: "cargo".to_string(),
+                manager: "cargo".to_owned(),
                 uri: None,
                 content: None,
                 repository: pi.repo.map(|url| lsif::Repository {
                     url,
-                    r#type: "git".to_string(),
+                    r#type: "git".to_owned(),
                     commit_id: None,
                 }),
                 version: pi.version,
@@ -120,8 +115,8 @@ impl LsifManager<'_> {
     }
 
     fn get_range_id(&mut self, id: FileRange) -> Id {
-        if let Some(x) = self.range_map.get(&id) {
-            return *x;
+        if let Some(it) = self.range_map.get(&id) {
+            return *it;
         }
         let file_id = id.file_id;
         let doc_id = self.get_file_id(file_id);
@@ -143,13 +138,13 @@ impl LsifManager<'_> {
     }
 
     fn get_file_id(&mut self, id: FileId) -> Id {
-        if let Some(x) = self.file_map.get(&id) {
-            return *x;
+        if let Some(it) = self.file_map.get(&id) {
+            return *it;
         }
         let path = self.vfs.file_path(id);
         let path = path.as_path().unwrap();
         let doc_id = self.add_vertex(lsif::Vertex::Document(lsif::Document {
-            language_id: "rust".to_string(),
+            language_id: "rust".to_owned(),
             uri: lsp_types::Url::from_file_path(path).unwrap(),
         }));
         self.file_map.insert(id, doc_id);
@@ -173,10 +168,10 @@ impl LsifManager<'_> {
                 out_v: result_set_id.into(),
             }));
         }
-        if let Some(moniker) = token.moniker {
+        if let Some(MonikerResult::Moniker(moniker)) = token.moniker {
             let package_id = self.get_package_id(moniker.package_information);
             let moniker_id = self.add_vertex(lsif::Vertex::Moniker(lsp_types::Moniker {
-                scheme: "rust-analyzer".to_string(),
+                scheme: "rust-analyzer".to_owned(),
                 identifier: moniker.identifier.to_string(),
                 unique: lsp_types::UniquenessLevel::Scheme,
                 kind: Some(match moniker.kind {
@@ -216,19 +211,18 @@ impl LsifManager<'_> {
                 out_v: result_set_id.into(),
             }));
             let mut edges = token.references.iter().fold(
-                HashMap::<_, Vec<lsp_types::NumberOrString>>::new(),
-                |mut edges, x| {
-                    let entry =
-                        edges.entry((x.range.file_id, x.is_definition)).or_insert_with(Vec::new);
-                    entry.push((*self.range_map.get(&x.range).unwrap()).into());
+                FxHashMap::<_, Vec<lsp_types::NumberOrString>>::default(),
+                |mut edges, it| {
+                    let entry = edges.entry((it.range.file_id, it.is_definition)).or_default();
+                    entry.push((*self.range_map.get(&it.range).unwrap()).into());
                     edges
                 },
             );
-            for x in token.references {
-                if let Some(vertices) = edges.remove(&(x.range.file_id, x.is_definition)) {
+            for it in token.references {
+                if let Some(vertices) = edges.remove(&(it.range.file_id, it.is_definition)) {
                     self.add_edge(lsif::Edge::Item(lsif::Item {
-                        document: (*self.file_map.get(&x.range.file_id).unwrap()).into(),
-                        property: Some(if x.is_definition {
+                        document: (*self.file_map.get(&it.range.file_id).unwrap()).into(),
+                        property: Some(if it.is_definition {
                             lsif::ItemKind::Definitions
                         } else {
                             lsif::ItemKind::References
@@ -286,36 +280,49 @@ impl LsifManager<'_> {
 }
 
 impl flags::Lsif {
-    pub fn run(self) -> Result<()> {
-        eprintln!("Generating LSIF started...");
+    pub fn run(
+        self,
+        out: &mut dyn std::io::Write,
+        sysroot: Option<RustLibSource>,
+    ) -> anyhow::Result<()> {
         let now = Instant::now();
-        let mut cargo_config = CargoConfig::default();
-        cargo_config.sysroot = Some(RustLibSource::Discover);
+        let cargo_config =
+            &CargoConfig { sysroot, all_targets: true, set_test: true, ..Default::default() };
         let no_progress = &|_| ();
         let load_cargo_config = LoadCargoConfig {
             load_out_dirs_from_check: true,
             with_proc_macro_server: ProcMacroServerChoice::Sysroot,
             prefill_caches: false,
         };
-        let path = AbsPathBuf::assert(env::current_dir()?.join(&self.path));
-        let manifest = ProjectManifest::discover_single(&path)?;
+        let path = AbsPathBuf::assert_utf8(env::current_dir()?.join(self.path));
+        let root = ProjectManifest::discover_single(&path)?;
+        eprintln!("Generating LSIF for project at {root}");
+        let mut workspace = ProjectWorkspace::load(root, cargo_config, no_progress)?;
 
-        let workspace = ProjectWorkspace::load(manifest, &cargo_config, no_progress)?;
+        let build_scripts = workspace.run_build_scripts(cargo_config, no_progress)?;
+        workspace.set_build_scripts(build_scripts);
 
-        let (host, vfs, _proc_macro) =
+        let (db, vfs, _proc_macro) =
             load_workspace(workspace, &cargo_config.extra_env, &load_cargo_config)?;
+        let host = AnalysisHost::with_database(db);
         let db = host.raw_database();
         let analysis = host.analysis();
 
-        let si = StaticIndex::compute(&analysis);
+        let vendored_libs_config = if self.exclude_vendored_libraries {
+            VendoredLibrariesConfig::Excluded
+        } else {
+            VendoredLibrariesConfig::Included { workspace_root: &path.clone().into() }
+        };
 
-        let mut lsif = LsifManager::new(&analysis, db, &vfs);
+        let si = StaticIndex::compute(&analysis, vendored_libs_config);
+
+        let mut lsif = LsifManager::new(&analysis, db, &vfs, out);
         lsif.add_vertex(lsif::Vertex::MetaData(lsif::MetaData {
             version: String::from("0.5.0"),
             project_root: lsp_types::Url::from_file_path(path).unwrap(),
             position_encoding: lsif::Encoding::Utf16,
             tool_info: Some(lsp_types::lsif::ToolInfo {
-                name: "rust-analyzer".to_string(),
+                name: "rust-analyzer".to_owned(),
                 args: vec![],
                 version: Some(version().to_string()),
             }),

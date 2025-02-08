@@ -1,11 +1,18 @@
 use std::marker::PhantomData;
 
-fn _alias_check() {
+fn a() {
     WrongImpl::foo(0i32);
-    //~^ ERROR the trait bound `RawImpl<_>: Raw<_>` is not satisfied
+    //~^ ERROR the function or associated item `foo` exists for struct `SafeImpl<_, RawImpl<_>>`, but its trait bounds were not satisfied
+    //~| ERROR the trait bound `RawImpl<_>: Raw<_>` is not satisfied
+}
+
+fn b() {
     WrongImpl::<()>::foo(0i32);
     //~^ ERROR the trait bound `RawImpl<()>: Raw<()>` is not satisfied
     //~| ERROR trait bounds were not satisfied
+}
+
+fn c() {
     CorrectImpl::foo(0i32);
 }
 

@@ -1,9 +1,9 @@
-// revisions: min
-// we use a single revision because t his shoudl have a `full` revision
+//@ revisions: min
+// we use a single revision because this should have a `full` revision
 // but right now that ICEs and I(@BoxyUwU) could not get stderr normalization to work
 
-#![cfg_attr(full, feature(generic_const_exprs))]
-#![cfg_attr(full, allow(incomplete_features))]
+// #![cfg_attr(full, feature(generic_const_exprs))]
+// #![cfg_attr(full, allow(incomplete_features))]
 
 const fn foo<T>() -> usize { std::mem::size_of::<T>() }
 const fn bar<const N: usize>() -> usize { N }
@@ -23,6 +23,7 @@ fn test<'a, 'b, T, const N: usize>() where &'b (): Sized {
     let _: [u8; baz::<'b>(&())]; //[min]~ ERROR generic parameters may not
 
     let _ = [0; foo::<T>()]; //[min]~ ERROR constant expression depends on a generic parameter
+                             //[min]~^ ERROR constant expression depends on a generic parameter
     let _ = [0; bar::<N>()]; //[min]~ ERROR generic parameters may not
                              //[min]~^ ERROR unresolved item provided when a constant was expected
     let _ = [0; faz::<'a>(&())]; //[min]~ ERROR generic parameters may not

@@ -1,6 +1,8 @@
-//@revisions: stack tree
-//@[tree]compile-flags: -Zmiri-tree-borrows
+//@revisions: stack tree tree_uniq
 //@compile-flags: -Zmiri-strict-provenance
+//@[tree]compile-flags: -Zmiri-tree-borrows
+//@[tree_uniq]compile-flags: -Zmiri-tree-borrows -Zmiri-unique-is-unique
+
 use std::collections::VecDeque;
 
 fn test_all_refs<'a, T: 'a>(dummy: &mut T, iter: impl Iterator<Item = &'a mut T>) {
@@ -29,8 +31,8 @@ fn main() {
     }
 
     // Regression test for Debug impl's
-    println!("{:?} {:?}", dst, dst.iter());
-    println!("{:?}", VecDeque::<u32>::new().iter());
+    let _ = format!("{:?} {:?}", dst, dst.iter());
+    let _ = format!("{:?}", VecDeque::<u32>::new().iter());
 
     for a in dst {
         assert_eq!(*a, 2);

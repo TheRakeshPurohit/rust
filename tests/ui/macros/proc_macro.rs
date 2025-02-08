@@ -1,6 +1,5 @@
-// run-pass
-// aux-build:proc_macro_def.rs
-// ignore-cross-compile
+//@ run-pass
+//@ proc-macro: proc_macro_def.rs
 
 extern crate proc_macro_def;
 

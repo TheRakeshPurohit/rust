@@ -1,11 +1,14 @@
 use clippy_utils::diagnostics::{span_lint_and_help, span_lint_and_sugg};
 use rustc_ast::node_id::{NodeId, NodeMap};
-use rustc_ast::visit::{walk_expr, Visitor};
-use rustc_ast::{ptr::P, Crate, Expr, ExprKind, Item, ItemKind, MacroDef, ModKind, Ty, TyKind, UseTreeKind};
+use rustc_ast::ptr::P;
+use rustc_ast::visit::{Visitor, walk_expr};
+use rustc_ast::{Crate, Expr, ExprKind, Item, ItemKind, MacroDef, ModKind, Ty, TyKind, UseTreeKind};
 use rustc_errors::Applicability;
 use rustc_lint::{EarlyContext, EarlyLintPass, LintContext};
-use rustc_session::{declare_tool_lint, impl_lint_pass};
-use rustc_span::{edition::Edition, symbol::kw, Span, Symbol};
+use rustc_session::impl_lint_pass;
+use rustc_span::edition::Edition;
+use rustc_span::symbol::kw;
+use rustc_span::{Span, Symbol};
 
 declare_clippy_lint! {
     /// ### What it does
@@ -99,7 +102,7 @@ struct ImportUsageVisitor {
     imports_referenced_with_self: Vec<Symbol>,
 }
 
-impl<'tcx> Visitor<'tcx> for ImportUsageVisitor {
+impl Visitor<'_> for ImportUsageVisitor {
     fn visit_expr(&mut self, expr: &Expr) {
         if let ExprKind::Path(_, path) = &expr.kind
             && path.segments.len() > 1
@@ -171,7 +174,7 @@ impl SingleComponentPathImports {
         }
 
         match &item.kind {
-            ItemKind::Mod(_, ModKind::Loaded(ref items, ..)) => {
+            ItemKind::Mod(_, ModKind::Loaded(items, ..)) => {
                 self.check_mod(items);
             },
             ItemKind::MacroDef(MacroDef { macro_rules: true, .. }) => {
@@ -198,8 +201,8 @@ impl SingleComponentPathImports {
 
                 if segments.is_empty() {
                     // keep track of `use {some_module, some_other_module};` usages
-                    if let UseTreeKind::Nested(trees) = &use_tree.kind {
-                        for tree in trees {
+                    if let UseTreeKind::Nested { items, .. } = &use_tree.kind {
+                        for tree in items {
                             let segments = &tree.0.prefix.segments;
                             if segments.len() == 1 {
                                 if let UseTreeKind::Simple(None) = tree.0.kind {
@@ -226,8 +229,8 @@ impl SingleComponentPathImports {
                         }
 
                         // nested case such as `use self::{module1::Struct1, module2::Struct2}`
-                        if let UseTreeKind::Nested(trees) = &use_tree.kind {
-                            for tree in trees {
+                        if let UseTreeKind::Nested { items, .. } = &use_tree.kind {
+                            for tree in items {
                                 let segments = &tree.0.prefix.segments;
                                 if !segments.is_empty() {
                                     imports_reused_with_self.push(segments[0].ident.name);

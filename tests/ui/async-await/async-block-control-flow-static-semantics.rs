@@ -3,7 +3,7 @@
 // 2. get targeted by `return` and not the parent function.
 // 3. get targeted by `?` and not the parent function.
 //
-// edition:2018
+//@ edition:2018
 
 fn main() {}
 
@@ -29,14 +29,14 @@ async fn return_targets_async_block_not_async_fn() -> u8 {
 
 fn no_break_in_async_block() {
     async {
-        break 0u8; //~ ERROR `break` inside of an `async` block
+        break 0u8; //~ ERROR `break` inside `async` block
     };
 }
 
 fn no_break_in_async_block_even_with_outer_loop() {
     loop {
         async {
-            break 0u8; //~ ERROR `break` inside of an `async` block
+            break 0u8; //~ ERROR `break` inside `async` block
         };
     }
 }

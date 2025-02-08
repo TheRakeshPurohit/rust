@@ -1,5 +1,6 @@
-// revisions: current next
-//[next] compile-flags: -Ztrait-solver=next
+//@ revisions: current next
+//@ ignore-compare-mode-next-solver (explicit revisions)
+//@[next] compile-flags: -Znext-solver
 
 //! The unit type, `()`, should be one byte.
 
@@ -8,11 +9,11 @@
 #![allow(dead_code)]
 
 mod assert {
-    use std::mem::{Assume, BikeshedIntrinsicFrom};
+    use std::mem::{Assume, TransmuteFrom};
 
-    pub fn is_transmutable<Src, Dst, Context>()
+    pub fn is_transmutable<Src, Dst>()
     where
-        Dst: BikeshedIntrinsicFrom<Src, Context, {
+        Dst: TransmuteFrom<Src, {
             Assume::ALIGNMENT
                 .and(Assume::LIFETIMES)
                 .and(Assume::SAFETY)
@@ -25,8 +26,7 @@ mod assert {
 struct Zst;
 
 fn should_have_correct_size() {
-    struct Context;
-    assert::is_transmutable::<(), Zst, Context>();
-    assert::is_transmutable::<Zst, (), Context>();
-    assert::is_transmutable::<(), u8, Context>(); //~ ERROR cannot be safely transmuted
+    assert::is_transmutable::<(), Zst>();
+    assert::is_transmutable::<Zst, ()>();
+    assert::is_transmutable::<(), u8>(); //~ ERROR cannot be safely transmuted
 }

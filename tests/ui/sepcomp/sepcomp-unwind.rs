@@ -1,8 +1,8 @@
-// run-pass
-// needs-unwind
+//@ run-pass
+//@ needs-unwind
 #![allow(dead_code)]
-// compile-flags: -C codegen-units=3
-// ignore-emscripten no threads support
+//@ compile-flags: -C codegen-units=3
+//@ needs-threads
 
 // Test unwinding through multiple compilation units.
 

@@ -1,5 +1,5 @@
-// revisions: good bad
-//[good] check-pass
+//@ revisions: good bad
+//@[good] check-pass
 
 use std::marker::PhantomData;
 use std::ops::Drop;
@@ -16,9 +16,9 @@ where
 
 #[cfg(bad)]
 impl<'a, 'b, 'c> Drop for DropMe<'a, 'b, 'c>
+//[bad]~^ ERROR `Drop` impl requires `'a: 'c`
 where
     'a: 'c,
-    //[bad]~^ ERROR `Drop` impl requires `'a: 'c`
 {
     fn drop(&mut self) {}
 }

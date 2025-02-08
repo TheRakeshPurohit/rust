@@ -1,7 +1,5 @@
-// run-pass
-#![allow(improper_ctypes)]
-
-// ignore-wasm32-bare no libc to test ffi with
+//@ run-pass
+#![allow(improper_ctypes, improper_ctypes_definitions)]
 
 #[derive(Copy, Clone)]
 pub struct S {

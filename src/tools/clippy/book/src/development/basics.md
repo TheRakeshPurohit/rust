@@ -66,7 +66,7 @@ If the output of a [UI test] differs from the expected output, you can update
 the reference file with:
 
 ```bash
-cargo dev bless
+cargo bless
 ```
 
 For example, this is necessary if you fix a typo in an error message of a lint,
@@ -107,7 +107,7 @@ More about [intellij] command usage and reasons.
 
 ## lintcheck
 
-`cargo lintcheck` will build and run clippy on a fixed set of crates and
+`cargo lintcheck` will build and run Clippy on a fixed set of crates and
 generate a log of the results.  You can `git diff` the updated log against its
 previous version and see what impact your lint made on a small set of crates.
 If you add a new lint, please audit the resulting warnings and make sure there

@@ -3,13 +3,12 @@
 pub const DEFAULT_BUF_SIZE: usize = if cfg!(target_os = "espidf") { 512 } else { 8 * 1024 };
 
 #[cfg(test)]
-#[allow(dead_code)] // not used on emscripten
+#[allow(dead_code)] // not used on emscripten and wasi
 pub mod test {
-    use crate::env;
-    use crate::fs;
-    use crate::path::{Path, PathBuf};
-    use crate::thread;
     use rand::RngCore;
+
+    use crate::path::{Path, PathBuf};
+    use crate::{env, fs, thread};
 
     pub struct TempDir(PathBuf);
 

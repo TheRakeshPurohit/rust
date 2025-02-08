@@ -8,17 +8,19 @@ LL |         (&[], &[hd, ..]) | (&[hd, ..], &[])
    |                 -- data moved here
 LL |             => println!("one empty"),
 LL |         (&[hd1, ..], &[hd2, ..])
-   |            --- ...and here
+   |                        --- ...and here
    |
    = note: move occurs because these variables have types that don't implement the `Copy` trait
-help: consider borrowing the pattern binding
+help: consider removing the borrow
    |
-LL |         (&[], &[ref hd, ..]) | (&[hd, ..], &[])
-   |                 +++
-help: consider borrowing the pattern binding
+LL -         (&[], &[hd, ..]) | (&[hd, ..], &[])
+LL +         (&[], [hd, ..]) | (&[hd, ..], &[])
    |
-LL |         (&[ref hd1, ..], &[hd2, ..])
-   |            +++
+help: consider removing the borrow
+   |
+LL -         (&[hd1, ..], &[hd2, ..])
+LL +         (&[hd1, ..], [hd2, ..])
+   |
 
 error[E0508]: cannot move out of type `[T]`, a non-copy slice
   --> $DIR/issue-12567.rs:2:11
@@ -30,17 +32,19 @@ LL |         (&[], &[hd, ..]) | (&[hd, ..], &[])
    |                 -- data moved here
 LL |             => println!("one empty"),
 LL |         (&[hd1, ..], &[hd2, ..])
-   |                        --- ...and here
+   |            --- ...and here
    |
    = note: move occurs because these variables have types that don't implement the `Copy` trait
-help: consider borrowing the pattern binding
+help: consider removing the borrow
    |
-LL |         (&[], &[ref hd, ..]) | (&[hd, ..], &[])
-   |                 +++
-help: consider borrowing the pattern binding
+LL -         (&[], &[hd, ..]) | (&[hd, ..], &[])
+LL +         (&[], [hd, ..]) | (&[hd, ..], &[])
    |
-LL |         (&[hd1, ..], &[ref hd2, ..])
-   |                        +++
+help: consider removing the borrow
+   |
+LL -         (&[hd1, ..], &[hd2, ..])
+LL +         ([hd1, ..], &[hd2, ..])
+   |
 
 error: aborting due to 2 previous errors
 

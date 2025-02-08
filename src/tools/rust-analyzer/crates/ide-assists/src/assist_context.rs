@@ -1,8 +1,9 @@
 //! See [`AssistContext`].
 
-use hir::Semantics;
-use ide_db::base_db::{FileId, FileRange};
-use ide_db::{label::Label, RootDatabase};
+use hir::{FileRange, Semantics};
+use ide_db::EditionedFileId;
+use ide_db::{label::Label, FileId, RootDatabase};
+use syntax::Edition;
 use syntax::{
     algo::{self, find_node_at_offset, find_node_at_range},
     AstNode, AstToken, Direction, SourceFile, SyntaxElement, SyntaxKind, SyntaxToken, TextRange,
@@ -90,8 +91,12 @@ impl<'a> AssistContext<'a> {
         self.frange.range.start()
     }
 
-    pub(crate) fn file_id(&self) -> FileId {
+    pub(crate) fn file_id(&self) -> EditionedFileId {
         self.frange.file_id
+    }
+
+    pub(crate) fn edition(&self) -> Edition {
+        self.frange.file_id.edition()
     }
 
     pub(crate) fn has_empty_selection(&self) -> bool {
@@ -102,6 +107,10 @@ impl<'a> AssistContext<'a> {
     /// to the nearest enclosed token.
     pub(crate) fn selection_trimmed(&self) -> TextRange {
         self.trimmed_range
+    }
+
+    pub(crate) fn source_file(&self) -> &SourceFile {
+        &self.source_file
     }
 
     pub(crate) fn token_at_offset(&self) -> TokenAtOffset<SyntaxToken> {
@@ -115,6 +124,9 @@ impl<'a> AssistContext<'a> {
     }
     pub(crate) fn find_node_at_offset<N: AstNode>(&self) -> Option<N> {
         find_node_at_offset(self.source_file.syntax(), self.offset())
+    }
+    pub(crate) fn find_node_at_trimmed_offset<N: AstNode>(&self) -> Option<N> {
+        find_node_at_offset(self.source_file.syntax(), self.trimmed_range.start())
     }
     pub(crate) fn find_node_at_range<N: AstNode>(&self) -> Option<N> {
         find_node_at_range(self.source_file.syntax(), self.trimmed_range)
@@ -139,7 +151,7 @@ impl Assists {
     pub(crate) fn new(ctx: &AssistContext<'_>, resolve: AssistResolveStrategy) -> Assists {
         Assists {
             resolve,
-            file: ctx.frange.file_id,
+            file: ctx.frange.file_id.file_id(),
             buf: Vec::new(),
             allowed: ctx.config.allowed.clone(),
         }
@@ -185,11 +197,11 @@ impl Assists {
             return None;
         }
 
-        let mut trigger_signature_help = false;
+        let mut command = None;
         let source_change = if self.resolve.should_resolve(&id) {
             let mut builder = SourceChangeBuilder::new(self.file);
             f(&mut builder);
-            trigger_signature_help = builder.trigger_signature_help;
+            command = builder.command.take();
             Some(builder.finish())
         } else {
             None
@@ -197,7 +209,7 @@ impl Assists {
 
         let label = Label::new(label);
         let group = group.cloned();
-        self.buf.push(Assist { id, label, group, target, source_change, trigger_signature_help });
+        self.buf.push(Assist { id, label, group, target, source_change, command });
         Some(())
     }
 

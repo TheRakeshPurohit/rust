@@ -1,15 +1,16 @@
 //! Abstract Syntax Tree, layered on top of untyped `SyntaxNode`s
 
-mod generated;
-mod traits;
-mod token_ext;
-mod node_ext;
-mod expr_ext;
-mod operators;
 pub mod edit;
 pub mod edit_in_place;
+mod expr_ext;
+mod generated;
 pub mod make;
+mod node_ext;
+mod operators;
 pub mod prec;
+pub mod syntax_factory;
+mod token_ext;
+mod traits;
 
 use std::marker::PhantomData;
 
@@ -31,8 +32,8 @@ pub use self::{
     operators::{ArithOp, BinaryOp, CmpOp, LogicOp, Ordering, RangeOp, UnaryOp},
     token_ext::{CommentKind, CommentPlacement, CommentShape, IsString, QuoteOffsets, Radix},
     traits::{
-        AttrDocCommentIter, DocCommentIter, HasArgList, HasAttrs, HasDocComments, HasGenericParams,
-        HasLoopBody, HasModuleItem, HasName, HasTypeBounds, HasVisibility,
+        AttrDocCommentIter, DocCommentIter, HasArgList, HasAttrs, HasDocComments, HasGenericArgs,
+        HasGenericParams, HasLoopBody, HasModuleItem, HasName, HasTypeBounds, HasVisibility,
     },
 };
 
@@ -41,6 +42,14 @@ pub use self::{
 /// the same representation: a pointer to the tree root and a pointer to the
 /// node itself.
 pub trait AstNode {
+    /// This panics if the `SyntaxKind` is not statically known.
+    fn kind() -> SyntaxKind
+    where
+        Self: Sized,
+    {
+        panic!("dynamic `SyntaxKind` for `AstNode::kind()`")
+    }
+
     fn can_cast(kind: SyntaxKind) -> bool
     where
         Self: Sized;
@@ -136,24 +145,37 @@ where
 {
 }
 
+/// Trait to describe operations common to both `RangeExpr` and `RangePat`.
+pub trait RangeItem {
+    type Bound;
+
+    fn start(&self) -> Option<Self::Bound>;
+    fn end(&self) -> Option<Self::Bound>;
+    fn op_kind(&self) -> Option<RangeOp>;
+    fn op_token(&self) -> Option<SyntaxToken>;
+}
+
 mod support {
     use super::{AstChildren, AstNode, SyntaxKind, SyntaxNode, SyntaxToken};
 
+    #[inline]
     pub(super) fn child<N: AstNode>(parent: &SyntaxNode) -> Option<N> {
         parent.children().find_map(N::cast)
     }
 
+    #[inline]
     pub(super) fn children<N: AstNode>(parent: &SyntaxNode) -> AstChildren<N> {
         AstChildren::new(parent)
     }
 
+    #[inline]
     pub(super) fn token(parent: &SyntaxNode, kind: SyntaxKind) -> Option<SyntaxToken> {
         parent.children_with_tokens().filter_map(|it| it.into_token()).find(|it| it.kind() == kind)
     }
 }
 
 #[test]
-fn assert_ast_is_object_safe() {
+fn assert_ast_is_dyn_compatible() {
     fn _f(_: &dyn AstNode, _: &dyn HasName) {}
 }
 
@@ -164,6 +186,7 @@ fn test_doc_comment_none() {
         // non-doc
         mod foo {}
         "#,
+        parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();
@@ -179,6 +202,7 @@ fn test_outer_doc_comment_of_items() {
         // non-doc
         mod foo {}
         "#,
+        parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();
@@ -194,6 +218,7 @@ fn test_inner_doc_comment_of_items() {
         // non-doc
         mod foo {}
         "#,
+        parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();
@@ -208,6 +233,7 @@ fn test_doc_comment_of_statics() {
         /// Number of levels
         static LEVELS: i32 = 0;
         "#,
+        parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();
@@ -227,6 +253,7 @@ fn test_doc_comment_preserves_indents() {
         /// ```
         mod foo {}
         "#,
+        parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();
@@ -247,6 +274,7 @@ fn test_doc_comment_preserves_newlines() {
         /// foo
         mod foo {}
         "#,
+        parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();
@@ -261,6 +289,7 @@ fn test_doc_comment_single_line_block_strips_suffix() {
         /** this is mod foo*/
         mod foo {}
         "#,
+        parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();
@@ -275,6 +304,7 @@ fn test_doc_comment_single_line_block_strips_suffix_whitespace() {
         /** this is mod foo */
         mod foo {}
         "#,
+        parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();
@@ -293,6 +323,7 @@ fn test_doc_comment_multi_line_block_strips_suffix() {
         */
         mod foo {}
         "#,
+        parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();
@@ -306,7 +337,7 @@ fn test_doc_comment_multi_line_block_strips_suffix() {
 #[test]
 fn test_comments_preserve_trailing_whitespace() {
     let file = SourceFile::parse(
-        "\n/// Representation of a Realm.   \n/// In the specification these are called Realm Records.\nstruct Realm {}",
+        "\n/// Representation of a Realm.   \n/// In the specification these are called Realm Records.\nstruct Realm {}", parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();
@@ -325,6 +356,7 @@ fn test_four_slash_line_comment() {
         /// doc comment
         mod foo {}
         "#,
+        parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();
@@ -350,6 +382,7 @@ where
    for<'a> F: Fn(&'a str)
 {}
         "#,
+        parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();

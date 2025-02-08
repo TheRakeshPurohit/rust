@@ -1,7 +1,6 @@
 use crate::fmt::{Debug, Display, Formatter, LowerExp, Result, UpperExp};
 use crate::mem::MaybeUninit;
-use crate::num::flt2dec;
-use crate::num::fmt as numfmt;
+use crate::num::{flt2dec, fmt as numfmt};
 
 #[doc(hidden)]
 trait GeneralFormat: PartialOrd {
@@ -14,7 +13,7 @@ macro_rules! impl_general_format {
     ($($t:ident)*) => {
         $(impl GeneralFormat for $t {
             fn already_rounded_value_should_use_exponential(&self) -> bool {
-                let abs = $t::abs_private(*self);
+                let abs = $t::abs(*self);
                 (abs != 0.0 && abs < 1e-4) || abs >= 1e+16
             }
         })*
@@ -35,8 +34,8 @@ fn float_to_decimal_common_exact<T>(
 where
     T: flt2dec::DecodableFloat,
 {
-    let mut buf: [MaybeUninit<u8>; 1024] = MaybeUninit::uninit_array(); // enough for f32 and f64
-    let mut parts: [MaybeUninit<numfmt::Part<'_>>; 4] = MaybeUninit::uninit_array();
+    let mut buf: [MaybeUninit<u8>; 1024] = [MaybeUninit::uninit(); 1024]; // enough for f32 and f64
+    let mut parts: [MaybeUninit<numfmt::Part<'_>>; 4] = [MaybeUninit::uninit(); 4];
     let formatted = flt2dec::to_exact_fixed_str(
         flt2dec::strategy::grisu::format_exact,
         *num,
@@ -62,8 +61,9 @@ where
     T: flt2dec::DecodableFloat,
 {
     // enough for f32 and f64
-    let mut buf: [MaybeUninit<u8>; flt2dec::MAX_SIG_DIGITS] = MaybeUninit::uninit_array();
-    let mut parts: [MaybeUninit<numfmt::Part<'_>>; 4] = MaybeUninit::uninit_array();
+    let mut buf: [MaybeUninit<u8>; flt2dec::MAX_SIG_DIGITS] =
+        [MaybeUninit::uninit(); flt2dec::MAX_SIG_DIGITS];
+    let mut parts: [MaybeUninit<numfmt::Part<'_>>; 4] = [MaybeUninit::uninit(); 4];
     let formatted = flt2dec::to_shortest_str(
         flt2dec::strategy::grisu::format_shortest,
         *num,
@@ -86,7 +86,7 @@ where
         true => flt2dec::Sign::MinusPlus,
     };
 
-    if let Some(precision) = fmt.precision {
+    if let Some(precision) = fmt.options.precision {
         float_to_decimal_common_exact(fmt, num, sign, precision)
     } else {
         let min_precision = 0;
@@ -107,8 +107,8 @@ fn float_to_exponential_common_exact<T>(
 where
     T: flt2dec::DecodableFloat,
 {
-    let mut buf: [MaybeUninit<u8>; 1024] = MaybeUninit::uninit_array(); // enough for f32 and f64
-    let mut parts: [MaybeUninit<numfmt::Part<'_>>; 6] = MaybeUninit::uninit_array();
+    let mut buf: [MaybeUninit<u8>; 1024] = [MaybeUninit::uninit(); 1024]; // enough for f32 and f64
+    let mut parts: [MaybeUninit<numfmt::Part<'_>>; 6] = [MaybeUninit::uninit(); 6];
     let formatted = flt2dec::to_exact_exp_str(
         flt2dec::strategy::grisu::format_exact,
         *num,
@@ -135,8 +135,9 @@ where
     T: flt2dec::DecodableFloat,
 {
     // enough for f32 and f64
-    let mut buf: [MaybeUninit<u8>; flt2dec::MAX_SIG_DIGITS] = MaybeUninit::uninit_array();
-    let mut parts: [MaybeUninit<numfmt::Part<'_>>; 6] = MaybeUninit::uninit_array();
+    let mut buf: [MaybeUninit<u8>; flt2dec::MAX_SIG_DIGITS] =
+        [MaybeUninit::uninit(); flt2dec::MAX_SIG_DIGITS];
+    let mut parts: [MaybeUninit<numfmt::Part<'_>>; 6] = [MaybeUninit::uninit(); 6];
     let formatted = flt2dec::to_shortest_exp_str(
         flt2dec::strategy::grisu::format_shortest,
         *num,
@@ -161,7 +162,7 @@ where
         true => flt2dec::Sign::MinusPlus,
     };
 
-    if let Some(precision) = fmt.precision {
+    if let Some(precision) = fmt.options.precision {
         // 1 integral digit + `precision` fractional digits = `precision + 1` total digits
         float_to_exponential_common_exact(fmt, num, sign, precision + 1, upper)
     } else {
@@ -179,7 +180,7 @@ where
         true => flt2dec::Sign::MinusPlus,
     };
 
-    if let Some(precision) = fmt.precision {
+    if let Some(precision) = fmt.options.precision {
         // this behavior of {:.PREC?} predates exponential formatting for {:?}
         float_to_decimal_common_exact(fmt, num, sign, precision)
     } else {
@@ -195,36 +196,53 @@ where
 }
 
 macro_rules! floating {
-    ($ty:ident) => {
-        #[stable(feature = "rust1", since = "1.0.0")]
-        impl Debug for $ty {
-            fn fmt(&self, fmt: &mut Formatter<'_>) -> Result {
-                float_to_general_debug(fmt, self)
+    ($($ty:ident)*) => {
+        $(
+            #[stable(feature = "rust1", since = "1.0.0")]
+            impl Debug for $ty {
+                fn fmt(&self, fmt: &mut Formatter<'_>) -> Result {
+                    float_to_general_debug(fmt, self)
+                }
             }
-        }
 
-        #[stable(feature = "rust1", since = "1.0.0")]
-        impl Display for $ty {
-            fn fmt(&self, fmt: &mut Formatter<'_>) -> Result {
-                float_to_decimal_display(fmt, self)
+            #[stable(feature = "rust1", since = "1.0.0")]
+            impl Display for $ty {
+                fn fmt(&self, fmt: &mut Formatter<'_>) -> Result {
+                    float_to_decimal_display(fmt, self)
+                }
             }
-        }
 
-        #[stable(feature = "rust1", since = "1.0.0")]
-        impl LowerExp for $ty {
-            fn fmt(&self, fmt: &mut Formatter<'_>) -> Result {
-                float_to_exponential_common(fmt, self, false)
+            #[stable(feature = "rust1", since = "1.0.0")]
+            impl LowerExp for $ty {
+                fn fmt(&self, fmt: &mut Formatter<'_>) -> Result {
+                    float_to_exponential_common(fmt, self, false)
+                }
             }
-        }
 
-        #[stable(feature = "rust1", since = "1.0.0")]
-        impl UpperExp for $ty {
-            fn fmt(&self, fmt: &mut Formatter<'_>) -> Result {
-                float_to_exponential_common(fmt, self, true)
+            #[stable(feature = "rust1", since = "1.0.0")]
+            impl UpperExp for $ty {
+                fn fmt(&self, fmt: &mut Formatter<'_>) -> Result {
+                    float_to_exponential_common(fmt, self, true)
+                }
             }
-        }
+        )*
     };
 }
 
-floating! { f32 }
-floating! { f64 }
+floating! { f32 f64 }
+
+#[stable(feature = "rust1", since = "1.0.0")]
+impl Debug for f16 {
+    #[inline]
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "{:#06x}", self.to_bits())
+    }
+}
+
+#[stable(feature = "rust1", since = "1.0.0")]
+impl Debug for f128 {
+    #[inline]
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "{:#034x}", self.to_bits())
+    }
+}

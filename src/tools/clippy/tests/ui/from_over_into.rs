@@ -1,7 +1,6 @@
-//@run-rustfix
-
 #![feature(type_alias_impl_trait)]
 #![warn(clippy::from_over_into)]
+#![allow(non_local_definitions)]
 #![allow(unused)]
 
 // this should throw an error
@@ -60,6 +59,15 @@ impl From<String> for A {
     }
 }
 
+struct PathInExpansion;
+
+impl Into<String> for PathInExpansion {
+    fn into(self) -> String {
+        // non self/Self paths in expansions are fine
+        panic!()
+    }
+}
+
 #[clippy::msrv = "1.40"]
 fn msrv_1_40() {
     struct FromOverInto<T>(Vec<T>);
@@ -79,6 +87,14 @@ fn msrv_1_41() {
         fn into(self) -> FromOverInto<T> {
             FromOverInto(self)
         }
+    }
+}
+
+fn issue_12138() {
+    struct Hello;
+
+    impl Into<()> for Hello {
+        fn into(self) {}
     }
 }
 

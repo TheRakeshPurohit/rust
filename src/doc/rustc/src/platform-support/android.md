@@ -39,7 +39,30 @@ edition of the [Android NDK].  Supported Android targets are:
 * thumbv7neon-linux-androideabi
 * x86_64-linux-android
 
+The riscv64-linux-android target is supported as a Tier 3 target.
+
 [Android NDK]: https://developer.android.com/ndk/downloads
 
 A list of all supported targets can be found
 [here](../platform-support.html)
+
+## Architecture Notes
+
+### riscv64-linux-android
+
+Currently the `riscv64-linux-android` target requires the following architecture features/extensions:
+
+* `a` (atomics)
+* `d` (double-precision floating-point)
+* `c` (compressed instruction set)
+* `f` (single-precision floating-point)
+* `m` (multiplication and division)
+* `v` (vector)
+* `Zba` (address calculation instructions)
+* `Zbb` (base instructions)
+* `Zbs` (single-bit instructions)
+
+### aarch64-linux-android on Nightly compilers
+
+As soon as `-Zfixed-x18` compiler flag is supplied, the [`ShadowCallStack` sanitizer](https://releases.llvm.org/7.0.1/tools/clang/docs/ShadowCallStack.html)
+instrumentation is also made available by supplying the second compiler flag `-Zsanitizer=shadow-call-stack`.

@@ -1,10 +1,8 @@
-use crate::error;
-use crate::fmt;
 use crate::io::{
-    self, ErrorKind, IntoInnerError, IoSlice, Seek, SeekFrom, Write, DEFAULT_BUF_SIZE,
+    self, DEFAULT_BUF_SIZE, ErrorKind, IntoInnerError, IoSlice, Seek, SeekFrom, Write,
 };
-use crate::mem;
-use crate::ptr;
+use crate::mem::{self, ManuallyDrop};
+use crate::{error, fmt, ptr};
 
 /// Wraps a writer and buffers its output.
 ///
@@ -62,8 +60,7 @@ use crate::ptr;
 /// together by the buffer and will all be written out in one system call when
 /// the `stream` is flushed.
 ///
-// HACK(#78696): can't use `crate` for associated items
-/// [`TcpStream::write`]: super::super::super::net::TcpStream::write
+/// [`TcpStream::write`]: crate::net::TcpStream::write
 /// [`TcpStream`]: crate::net::TcpStream
 /// [`flush`]: BufWriter::flush
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -81,7 +78,7 @@ pub struct BufWriter<W: ?Sized + Write> {
 }
 
 impl<W: Write> BufWriter<W> {
-    /// Creates a new `BufWriter<W>` with a default buffer capacity. The default is currently 8 KB,
+    /// Creates a new `BufWriter<W>` with a default buffer capacity. The default is currently 8 KiB,
     /// but may change in the future.
     ///
     /// # Examples
@@ -95,6 +92,16 @@ impl<W: Write> BufWriter<W> {
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn new(inner: W) -> BufWriter<W> {
         BufWriter::with_capacity(DEFAULT_BUF_SIZE, inner)
+    }
+
+    pub(crate) fn try_new_buffer() -> io::Result<Vec<u8>> {
+        Vec::try_with_capacity(DEFAULT_BUF_SIZE).map_err(|_| {
+            io::const_error!(ErrorKind::OutOfMemory, "failed to allocate write buffer")
+        })
+    }
+
+    pub(crate) fn with_buffer(inner: W, buf: Vec<u8>) -> Self {
+        Self { inner, buf, panicked: false }
     }
 
     /// Creates a new `BufWriter<W>` with at least the specified buffer capacity.
@@ -165,13 +172,13 @@ impl<W: Write> BufWriter<W> {
     /// assert_eq!(&buffered_data.unwrap(), b"ata");
     /// ```
     #[stable(feature = "bufwriter_into_parts", since = "1.56.0")]
-    pub fn into_parts(mut self) -> (W, Result<Vec<u8>, WriterPanicked>) {
-        let buf = mem::take(&mut self.buf);
-        let buf = if !self.panicked { Ok(buf) } else { Err(WriterPanicked { buf }) };
+    pub fn into_parts(self) -> (W, Result<Vec<u8>, WriterPanicked>) {
+        let mut this = ManuallyDrop::new(self);
+        let buf = mem::take(&mut this.buf);
+        let buf = if !this.panicked { Ok(buf) } else { Err(WriterPanicked { buf }) };
 
-        // SAFETY: forget(self) prevents double dropping inner
-        let inner = unsafe { ptr::read(&self.inner) };
-        mem::forget(self);
+        // SAFETY: double-drops are prevented by putting `this` in a ManuallyDrop that is never dropped
+        let inner = unsafe { ptr::read(&this.inner) };
 
         (inner, buf)
     }
@@ -231,13 +238,13 @@ impl<W: ?Sized + Write> BufWriter<W> {
 
             match r {
                 Ok(0) => {
-                    return Err(io::const_io_error!(
+                    return Err(io::const_error!(
                         ErrorKind::WriteZero,
                         "failed to write the buffered data",
                     ));
                 }
                 Ok(n) => guard.consume(n),
-                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(ref e) if e.is_interrupted() => {}
                 Err(e) => return Err(e),
             }
         }
@@ -434,9 +441,11 @@ impl<W: ?Sized + Write> BufWriter<W> {
         let old_len = self.buf.len();
         let buf_len = buf.len();
         let src = buf.as_ptr();
-        let dst = self.buf.as_mut_ptr().add(old_len);
-        ptr::copy_nonoverlapping(src, dst, buf_len);
-        self.buf.set_len(old_len + buf_len);
+        unsafe {
+            let dst = self.buf.as_mut_ptr().add(old_len);
+            ptr::copy_nonoverlapping(src, dst, buf_len);
+            self.buf.set_len(old_len + buf_len);
+        }
     }
 
     #[inline]
@@ -555,35 +564,38 @@ impl<W: ?Sized + Write> Write for BufWriter<W> {
             // same underlying buffer, as otherwise the buffers wouldn't fit in memory). If the
             // computation overflows, then surely the input cannot fit in our buffer, so we forward
             // to the inner writer's `write_vectored` method to let it handle it appropriately.
-            let saturated_total_len =
-                bufs.iter().fold(0usize, |acc, b| acc.saturating_add(b.len()));
+            let mut saturated_total_len: usize = 0;
 
-            if saturated_total_len > self.spare_capacity() {
-                // Flush if the total length of the input exceeds our buffer's spare capacity.
-                // If we would have overflowed, this condition also holds, and we need to flush.
-                self.flush_buf()?;
+            for buf in bufs {
+                saturated_total_len = saturated_total_len.saturating_add(buf.len());
+
+                if saturated_total_len > self.spare_capacity() && !self.buf.is_empty() {
+                    // Flush if the total length of the input exceeds our buffer's spare capacity.
+                    // If we would have overflowed, this condition also holds, and we need to flush.
+                    self.flush_buf()?;
+                }
+
+                if saturated_total_len >= self.buf.capacity() {
+                    // Forward to our inner writer if the total length of the input is greater than or
+                    // equal to our buffer capacity. If we would have overflowed, this condition also
+                    // holds, and we punt to the inner writer.
+                    self.panicked = true;
+                    let r = self.get_mut().write_vectored(bufs);
+                    self.panicked = false;
+                    return r;
+                }
             }
 
-            if saturated_total_len >= self.buf.capacity() {
-                // Forward to our inner writer if the total length of the input is greater than or
-                // equal to our buffer capacity. If we would have overflowed, this condition also
-                // holds, and we punt to the inner writer.
-                self.panicked = true;
-                let r = self.get_mut().write_vectored(bufs);
-                self.panicked = false;
-                r
-            } else {
-                // `saturated_total_len < self.buf.capacity()` implies that we did not saturate.
+            // `saturated_total_len < self.buf.capacity()` implies that we did not saturate.
 
-                // SAFETY: We checked whether or not the spare capacity was large enough above. If
-                // it was, then we're safe already. If it wasn't, we flushed, making sufficient
-                // room for any input <= the buffer size, which includes this input.
-                unsafe {
-                    bufs.iter().for_each(|b| self.write_to_buffer_unchecked(b));
-                };
+            // SAFETY: We checked whether or not the spare capacity was large enough above. If
+            // it was, then we're safe already. If it wasn't, we flushed, making sufficient
+            // room for any input <= the buffer size, which includes this input.
+            unsafe {
+                bufs.iter().for_each(|b| self.write_to_buffer_unchecked(b));
+            };
 
-                Ok(saturated_total_len)
-            }
+            Ok(saturated_total_len)
         } else {
             let mut iter = bufs.iter();
             let mut total_written = if let Some(buf) = iter.by_ref().find(|&buf| !buf.is_empty()) {

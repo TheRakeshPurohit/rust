@@ -11,11 +11,7 @@ note: closure cannot be moved more than once as it is not `Copy` due to moving t
    |
 LL |         let SingleVariant::Point(ref mut x, _) = point;
    |                                                  ^^^^^
-help: consider mutably borrowing `c`
-   |
-LL |     let b = &mut c;
-   |             ++++
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0382`.

@@ -1,15 +1,15 @@
-use crate::deriving::generic::ty::*;
-use crate::deriving::generic::*;
-use crate::deriving::path_std;
 use rustc_ast::{self as ast, Generics, ItemKind, MetaItem, VariantData};
 use rustc_data_structures::fx::FxHashSet;
 use rustc_expand::base::{Annotatable, ExtCtxt};
-use rustc_span::symbol::{kw, sym, Ident};
-use rustc_span::Span;
-use thin_vec::{thin_vec, ThinVec};
+use rustc_span::{Ident, Span, kw, sym};
+use thin_vec::{ThinVec, thin_vec};
 
-pub fn expand_deriving_clone(
-    cx: &mut ExtCtxt<'_>,
+use crate::deriving::generic::ty::*;
+use crate::deriving::generic::*;
+use crate::deriving::path_std;
+
+pub(crate) fn expand_deriving_clone(
+    cx: &ExtCtxt<'_>,
     span: Span,
     mitem: &MetaItem,
     item: &Annotatable,
@@ -62,10 +62,10 @@ pub fn expand_deriving_clone(
                     cs_clone_simple("Clone", c, s, sub, true)
                 }));
             }
-            _ => cx.span_bug(span, "`#[derive(Clone)]` on wrong item kind"),
+            _ => cx.dcx().span_bug(span, "`#[derive(Clone)]` on wrong item kind"),
         },
 
-        _ => cx.span_bug(span, "`#[derive(Clone)]` on trait item or impl item"),
+        _ => cx.dcx().span_bug(span, "`#[derive(Clone)]` on trait item or impl item"),
     }
 
     let trait_def = TraitDef {
@@ -94,7 +94,7 @@ pub fn expand_deriving_clone(
 
 fn cs_clone_simple(
     name: &str,
-    cx: &mut ExtCtxt<'_>,
+    cx: &ExtCtxt<'_>,
     trait_span: Span,
     substr: &Substructure<'_>,
     is_union: bool,
@@ -106,17 +106,18 @@ fn cs_clone_simple(
             // This basic redundancy checking only prevents duplication of
             // assertions like `AssertParamIsClone<Foo>` where the type is a
             // simple name. That's enough to get a lot of cases, though.
-            if let Some(name) = field.ty.kind.is_simple_path() && !seen_type_names.insert(name) {
+            if let Some(name) = field.ty.kind.is_simple_path()
+                && !seen_type_names.insert(name)
+            {
                 // Already produced an assertion for this type.
+                // Anonymous structs or unions must be eliminated as they cannot be
+                // type parameters.
             } else {
                 // let _: AssertParamIsClone<FieldTy>;
-                super::assert_ty_bounds(
-                    cx,
-                    &mut stmts,
-                    field.ty.clone(),
-                    field.span,
-                    &[sym::clone, sym::AssertParamIsClone],
-                );
+                super::assert_ty_bounds(cx, &mut stmts, field.ty.clone(), field.span, &[
+                    sym::clone,
+                    sym::AssertParamIsClone,
+                ]);
             }
         }
     };
@@ -125,13 +126,10 @@ fn cs_clone_simple(
         // Just a single assertion for unions, that the union impls `Copy`.
         // let _: AssertParamIsCopy<Self>;
         let self_ty = cx.ty_path(cx.path_ident(trait_span, Ident::with_dummy_span(kw::SelfUpper)));
-        super::assert_ty_bounds(
-            cx,
-            &mut stmts,
-            self_ty,
-            trait_span,
-            &[sym::clone, sym::AssertParamIsCopy],
-        );
+        super::assert_ty_bounds(cx, &mut stmts, self_ty, trait_span, &[
+            sym::clone,
+            sym::AssertParamIsCopy,
+        ]);
     } else {
         match *substr.fields {
             StaticStruct(vdata, ..) => {
@@ -142,9 +140,9 @@ fn cs_clone_simple(
                     process_variant(&variant.data);
                 }
             }
-            _ => cx.span_bug(
+            _ => cx.dcx().span_bug(
                 trait_span,
-                format!("unexpected substructure in simple `derive({})`", name),
+                format!("unexpected substructure in simple `derive({name})`"),
             ),
         }
     }
@@ -153,14 +151,14 @@ fn cs_clone_simple(
 
 fn cs_clone(
     name: &str,
-    cx: &mut ExtCtxt<'_>,
+    cx: &ExtCtxt<'_>,
     trait_span: Span,
     substr: &Substructure<'_>,
 ) -> BlockOrExpr {
     let ctor_path;
     let all_fields;
     let fn_path = cx.std_path(&[sym::clone, sym::Clone, sym::clone]);
-    let subcall = |cx: &mut ExtCtxt<'_>, field: &FieldInfo| {
+    let subcall = |cx: &ExtCtxt<'_>, field: &FieldInfo| {
         let args = thin_vec![field.self_expr.clone()];
         cx.expr_call_global(field.span, fn_path.clone(), args)
     };
@@ -177,23 +175,23 @@ fn cs_clone(
             all_fields = af;
             vdata = &variant.data;
         }
-        EnumTag(..) | AllFieldlessEnum(..) => {
-            cx.span_bug(trait_span, format!("enum tags in `derive({})`", name,))
+        EnumDiscr(..) | AllFieldlessEnum(..) => {
+            cx.dcx().span_bug(trait_span, format!("enum discriminants in `derive({name})`",))
         }
         StaticEnum(..) | StaticStruct(..) => {
-            cx.span_bug(trait_span, format!("associated function in `derive({})`", name))
+            cx.dcx().span_bug(trait_span, format!("associated function in `derive({name})`"))
         }
     }
 
     let expr = match *vdata {
-        VariantData::Struct(..) => {
+        VariantData::Struct { .. } => {
             let fields = all_fields
                 .iter()
                 .map(|field| {
                     let Some(ident) = field.name else {
-                        cx.span_bug(
+                        cx.dcx().span_bug(
                             trait_span,
-                            format!("unnamed field in normal struct in `derive({})`", name,),
+                            format!("unnamed field in normal struct in `derive({name})`",),
                         );
                     };
                     let call = subcall(cx, field);

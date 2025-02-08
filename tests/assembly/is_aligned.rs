@@ -1,14 +1,12 @@
-// assembly-output: emit-asm
-// min-llvm-version: 15.0
-// only-x86_64
-// ignore-sgx
-// revisions: opt-speed opt-size
-// [opt-speed] compile-flags: -Copt-level=1
-// [opt-size] compile-flags: -Copt-level=s
-#![crate_type="rlib"]
-
+//@ assembly-output: emit-asm
+//@ only-x86_64
+//@ ignore-sgx
+//@ revisions: opt-speed opt-size
+//@ [opt-speed] compile-flags: -Copt-level=2 -Cdebug-assertions=no
+//@ [opt-size] compile-flags: -Copt-level=s -Cdebug-assertions=no
+#![crate_type = "rlib"]
 #![feature(core_intrinsics)]
-#![feature(pointer_is_aligned)]
+#![feature(pointer_is_aligned_to)]
 
 // CHECK-LABEL: is_aligned_to_unchecked
 // CHECK: decq
@@ -17,9 +15,7 @@
 // CHECK: retq
 #[no_mangle]
 pub unsafe fn is_aligned_to_unchecked(ptr: *const u8, align: usize) -> bool {
-    unsafe {
-        std::intrinsics::assume(align.is_power_of_two())
-    }
+    unsafe { std::intrinsics::assume(align.is_power_of_two()) }
     ptr.is_aligned_to(align)
 }
 

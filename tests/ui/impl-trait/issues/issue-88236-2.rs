@@ -13,15 +13,15 @@ impl<'a> Hrtb<'a> for &'a () {
 }
 
 fn make_impl() -> impl for<'a> Hrtb<'a, Assoc = impl Send + 'a> {}
-//~^ ERROR higher kinded lifetime bounds on nested opaque types are not supported yet
+//~^ ERROR `impl Trait` cannot capture higher-ranked lifetime from outer `impl Trait`
 
 fn make_weird_impl<'b>(x: &'b ()) -> impl for<'a> Hrtb<'a, Assoc = impl Send + 'a> {
-    //~^ ERROR higher kinded lifetime bounds on nested opaque types are not supported yet
+    //~^ ERROR `impl Trait` cannot capture higher-ranked lifetime from outer `impl Trait`
     &()
 }
 
 fn make_bad_impl<'b>(x: &'b ()) -> impl for<'a> Hrtb<'a, Assoc = impl Send + 'a> {
-    //~^ ERROR higher kinded lifetime bounds on nested opaque types are not supported yet
+    //~^ ERROR `impl Trait` cannot capture higher-ranked lifetime from outer `impl Trait`
     x
 }
 

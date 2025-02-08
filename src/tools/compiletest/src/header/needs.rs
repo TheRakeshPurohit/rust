@@ -1,6 +1,5 @@
-use crate::common::{Config, Debugger};
-use crate::header::IgnoreDecision;
-use crate::util;
+use crate::common::{Config, KNOWN_TARGET_HAS_ATOMIC_WIDTHS, Sanitizer};
+use crate::header::{IgnoreDecision, llvm_has_libzstd};
 
 pub(super) fn handle_needs(
     cache: &CachedNeedsConditions,
@@ -29,6 +28,11 @@ pub(super) fn handle_needs(
             name: "needs-sanitizer-cfi",
             condition: cache.sanitizer_cfi,
             ignore_reason: "ignored on targets without CFI sanitizer",
+        },
+        Need {
+            name: "needs-sanitizer-dataflow",
+            condition: cache.sanitizer_dataflow,
+            ignore_reason: "ignored on targets without dataflow sanitizer",
         },
         Need {
             name: "needs-sanitizer-kcfi",
@@ -76,9 +80,24 @@ pub(super) fn handle_needs(
             ignore_reason: "ignored on targets without SafeStack support",
         },
         Need {
+            name: "needs-enzyme",
+            condition: config.has_enzyme,
+            ignore_reason: "ignored when LLVM Enzyme is disabled",
+        },
+        Need {
             name: "needs-run-enabled",
             condition: config.run_enabled(),
             ignore_reason: "ignored when running the resulting test binaries is disabled",
+        },
+        Need {
+            name: "needs-threads",
+            condition: config.has_threads(),
+            ignore_reason: "ignored on targets without threading support",
+        },
+        Need {
+            name: "needs-subprocess",
+            condition: config.has_subprocess_support(),
+            ignore_reason: "ignored on targets without subprocess support",
         },
         Need {
             name: "needs-unwind",
@@ -86,14 +105,14 @@ pub(super) fn handle_needs(
             ignore_reason: "ignored on targets without unwinding support",
         },
         Need {
-            name: "needs-profiler-support",
-            condition: std::env::var_os("RUSTC_PROFILER_SUPPORT").is_some(),
-            ignore_reason: "ignored when profiler support is disabled",
+            name: "needs-profiler-runtime",
+            condition: config.profiler_runtime,
+            ignore_reason: "ignored when the profiler runtime is not available",
         },
         Need {
-            name: "needs-matching-clang",
+            name: "needs-force-clang-based-tests",
             condition: config.run_clang_based_tests_with.is_some(),
-            ignore_reason: "ignored when the used clang does not match the built LLVM",
+            ignore_reason: "ignored when RUSTBUILD_FORCE_CLANG_BASED_TESTS is not set",
         },
         Need {
             name: "needs-xray",
@@ -106,21 +125,6 @@ pub(super) fn handle_needs(
             ignore_reason: "ignored on targets without Rust's LLD",
         },
         Need {
-            name: "needs-rust-lldb",
-            condition: config.debugger != Some(Debugger::Lldb) || config.lldb_native_rust,
-            ignore_reason: "ignored on targets without Rust's LLDB",
-        },
-        Need {
-            name: "needs-i686-dlltool",
-            condition: cache.i686_dlltool,
-            ignore_reason: "ignored when dlltool for i686 is not present",
-        },
-        Need {
-            name: "needs-x86_64-dlltool",
-            condition: cache.x86_64_dlltool,
-            ignore_reason: "ignored when dlltool for x86_64 is not present",
-        },
-        Need {
             name: "needs-dlltool",
             condition: cache.dlltool,
             ignore_reason: "ignored when dlltool for the current architecture is not present",
@@ -130,12 +134,95 @@ pub(super) fn handle_needs(
             condition: config.git_hash,
             ignore_reason: "ignored when git hashes have been omitted for building",
         },
+        Need {
+            name: "needs-dynamic-linking",
+            condition: config.target_cfg().dynamic_linking,
+            ignore_reason: "ignored on targets without dynamic linking",
+        },
+        Need {
+            name: "needs-relocation-model-pic",
+            condition: config.target_cfg().relocation_model == "pic",
+            ignore_reason: "ignored on targets without PIC relocation model",
+        },
+        Need {
+            name: "needs-deterministic-layouts",
+            condition: !config.rust_randomized_layout,
+            ignore_reason: "ignored when randomizing layouts",
+        },
+        Need {
+            name: "needs-wasmtime",
+            condition: config.runner.as_ref().is_some_and(|r| r.contains("wasmtime")),
+            ignore_reason: "ignored when wasmtime runner is not available",
+        },
+        Need {
+            name: "needs-symlink",
+            condition: cache.symlinks,
+            ignore_reason: "ignored if symlinks are unavailable",
+        },
+        Need {
+            name: "needs-llvm-zstd",
+            condition: cache.llvm_zstd,
+            ignore_reason: "ignored if LLVM wasn't build with zstd for ELF section compression",
+        },
+        Need {
+            name: "needs-rustc-debug-assertions",
+            condition: config.with_rustc_debug_assertions,
+            ignore_reason: "ignored if rustc wasn't built with debug assertions",
+        },
+        Need {
+            name: "needs-std-debug-assertions",
+            condition: config.with_std_debug_assertions,
+            ignore_reason: "ignored if std wasn't built with debug assertions",
+        },
     ];
 
-    let (name, comment) = match ln.split_once([':', ' ']) {
-        Some((name, comment)) => (name, Some(comment)),
+    let (name, rest) = match ln.split_once([':', ' ']) {
+        Some((name, rest)) => (name, Some(rest)),
         None => (ln, None),
     };
+
+    // FIXME(jieyouxu): tighten up this parsing to reject using both `:` and ` ` as means to
+    // delineate value.
+    if name == "needs-target-has-atomic" {
+        let Some(rest) = rest else {
+            return IgnoreDecision::Error {
+                message: "expected `needs-target-has-atomic` to have a comma-separated list of atomic widths".to_string(),
+            };
+        };
+
+        // Expect directive value to be a list of comma-separated atomic widths.
+        let specified_widths = rest
+            .split(',')
+            .map(|width| width.trim())
+            .map(ToString::to_string)
+            .collect::<Vec<String>>();
+
+        for width in &specified_widths {
+            if !KNOWN_TARGET_HAS_ATOMIC_WIDTHS.contains(&width.as_str()) {
+                return IgnoreDecision::Error {
+                    message: format!(
+                        "unknown width specified in `needs-target-has-atomic`: `{width}` is not a \
+                        known `target_has_atomic_width`, known values are `{:?}`",
+                        KNOWN_TARGET_HAS_ATOMIC_WIDTHS
+                    ),
+                };
+            }
+        }
+
+        let satisfies_all_specified_widths = specified_widths
+            .iter()
+            .all(|specified| config.target_cfg().target_has_atomic.contains(specified));
+        if satisfies_all_specified_widths {
+            return IgnoreDecision::Continue;
+        } else {
+            return IgnoreDecision::Ignore {
+                reason: format!(
+                    "skipping test as target does not support all of the required `target_has_atomic` widths `{:?}`",
+                    specified_widths
+                ),
+            };
+        }
+    }
 
     if !name.starts_with("needs-") {
         return IgnoreDecision::Continue;
@@ -154,8 +241,8 @@ pub(super) fn handle_needs(
                 break;
             } else {
                 return IgnoreDecision::Ignore {
-                    reason: if let Some(comment) = comment {
-                        format!("{} ({comment})", need.ignore_reason)
+                    reason: if let Some(comment) = rest {
+                        format!("{} ({})", need.ignore_reason, comment.trim())
                     } else {
                         need.ignore_reason.into()
                     },
@@ -181,6 +268,7 @@ pub(super) struct CachedNeedsConditions {
     sanitizer_support: bool,
     sanitizer_address: bool,
     sanitizer_cfi: bool,
+    sanitizer_dataflow: bool,
     sanitizer_kcfi: bool,
     sanitizer_kasan: bool,
     sanitizer_leak: bool,
@@ -192,45 +280,34 @@ pub(super) struct CachedNeedsConditions {
     sanitizer_safestack: bool,
     xray: bool,
     rust_lld: bool,
-    i686_dlltool: bool,
-    x86_64_dlltool: bool,
     dlltool: bool,
+    symlinks: bool,
+    /// Whether LLVM built with zstd, for the `needs-llvm-zstd` directive.
+    llvm_zstd: bool,
 }
 
 impl CachedNeedsConditions {
     pub(super) fn load(config: &Config) -> Self {
-        let path = std::env::var_os("PATH").expect("missing PATH environment variable");
-        let path = std::env::split_paths(&path).collect::<Vec<_>>();
-
-        // On Windows, dlltool.exe is used for all architectures.
-        #[cfg(windows)]
-        let dlltool = path.iter().any(|dir| dir.join("dlltool.exe").is_file());
-
-        // For non-Windows, there are architecture specific dlltool binaries.
-        #[cfg(not(windows))]
-        let i686_dlltool = path.iter().any(|dir| dir.join("i686-w64-mingw32-dlltool").is_file());
-        #[cfg(not(windows))]
-        let x86_64_dlltool =
-            path.iter().any(|dir| dir.join("x86_64-w64-mingw32-dlltool").is_file());
-
         let target = &&*config.target;
+        let sanitizers = &config.target_cfg().sanitizers;
         Self {
             sanitizer_support: std::env::var_os("RUSTC_SANITIZER_SUPPORT").is_some(),
-            sanitizer_address: util::ASAN_SUPPORTED_TARGETS.contains(target),
-            sanitizer_cfi: util::CFI_SUPPORTED_TARGETS.contains(target),
-            sanitizer_kcfi: util::KCFI_SUPPORTED_TARGETS.contains(target),
-            sanitizer_kasan: util::KASAN_SUPPORTED_TARGETS.contains(target),
-            sanitizer_leak: util::LSAN_SUPPORTED_TARGETS.contains(target),
-            sanitizer_memory: util::MSAN_SUPPORTED_TARGETS.contains(target),
-            sanitizer_thread: util::TSAN_SUPPORTED_TARGETS.contains(target),
-            sanitizer_hwaddress: util::HWASAN_SUPPORTED_TARGETS.contains(target),
-            sanitizer_memtag: util::MEMTAG_SUPPORTED_TARGETS.contains(target),
-            sanitizer_shadow_call_stack: util::SHADOWCALLSTACK_SUPPORTED_TARGETS.contains(target),
-            sanitizer_safestack: util::SAFESTACK_SUPPORTED_TARGETS.contains(target),
-            xray: util::XRAY_SUPPORTED_TARGETS.contains(target),
+            sanitizer_address: sanitizers.contains(&Sanitizer::Address),
+            sanitizer_cfi: sanitizers.contains(&Sanitizer::Cfi),
+            sanitizer_dataflow: sanitizers.contains(&Sanitizer::Dataflow),
+            sanitizer_kcfi: sanitizers.contains(&Sanitizer::Kcfi),
+            sanitizer_kasan: sanitizers.contains(&Sanitizer::KernelAddress),
+            sanitizer_leak: sanitizers.contains(&Sanitizer::Leak),
+            sanitizer_memory: sanitizers.contains(&Sanitizer::Memory),
+            sanitizer_thread: sanitizers.contains(&Sanitizer::Thread),
+            sanitizer_hwaddress: sanitizers.contains(&Sanitizer::Hwaddress),
+            sanitizer_memtag: sanitizers.contains(&Sanitizer::Memtag),
+            sanitizer_shadow_call_stack: sanitizers.contains(&Sanitizer::ShadowCallStack),
+            sanitizer_safestack: sanitizers.contains(&Sanitizer::Safestack),
+            xray: config.target_cfg().xray,
 
-            // For tests using the `needs-rust-lld` directive (e.g. for `-Zgcc-ld=lld`), we need to find
-            // whether `rust-lld` is present in the compiler under test.
+            // For tests using the `needs-rust-lld` directive (e.g. for `-Clink-self-contained=+linker`),
+            // we need to find whether `rust-lld` is present in the compiler under test.
             //
             // The --compile-lib-path is the path to host shared libraries, but depends on the OS. For
             // example:
@@ -249,26 +326,54 @@ impl CachedNeedsConditions {
                 .join(if config.host.contains("windows") { "rust-lld.exe" } else { "rust-lld" })
                 .exists(),
 
-            #[cfg(windows)]
-            i686_dlltool: dlltool,
-            #[cfg(windows)]
-            x86_64_dlltool: dlltool,
-            #[cfg(windows)]
-            dlltool,
-
-            // For non-Windows, there are architecture specific dlltool binaries.
-            #[cfg(not(windows))]
-            i686_dlltool,
-            #[cfg(not(windows))]
-            x86_64_dlltool,
-            #[cfg(not(windows))]
-            dlltool: if config.matches_arch("x86") {
-                i686_dlltool
-            } else if config.matches_arch("x86_64") {
-                x86_64_dlltool
-            } else {
-                false
-            },
+            llvm_zstd: llvm_has_libzstd(&config),
+            dlltool: find_dlltool(&config),
+            symlinks: has_symlinks(),
         }
     }
+}
+
+fn find_dlltool(config: &Config) -> bool {
+    let path = std::env::var_os("PATH").expect("missing PATH environment variable");
+    let path = std::env::split_paths(&path).collect::<Vec<_>>();
+
+    // dlltool is used ony by GNU based `*-*-windows-gnu`
+    if !(config.matches_os("windows") && config.matches_env("gnu") && config.matches_abi("")) {
+        return false;
+    }
+
+    // On Windows, dlltool.exe is used for all architectures.
+    // For non-Windows, there are architecture specific dlltool binaries.
+    let dlltool_found = if cfg!(windows) {
+        path.iter().any(|dir| dir.join("dlltool.exe").is_file())
+    } else if config.matches_arch("i686") {
+        path.iter().any(|dir| dir.join("i686-w64-mingw32-dlltool").is_file())
+    } else if config.matches_arch("x86_64") {
+        path.iter().any(|dir| dir.join("x86_64-w64-mingw32-dlltool").is_file())
+    } else {
+        false
+    };
+    dlltool_found
+}
+
+// FIXME(#135928): this is actually not quite right because this detection is run on the **host**.
+// This however still helps the case of windows -> windows local development in case symlinks are
+// not available.
+#[cfg(windows)]
+fn has_symlinks() -> bool {
+    if std::env::var_os("CI").is_some() {
+        return true;
+    }
+    let link = std::env::temp_dir().join("RUST_COMPILETEST_SYMLINK_CHECK");
+    if std::os::windows::fs::symlink_file("DOES NOT EXIST", &link).is_ok() {
+        std::fs::remove_file(&link).unwrap();
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(not(windows))]
+fn has_symlinks() -> bool {
+    true
 }

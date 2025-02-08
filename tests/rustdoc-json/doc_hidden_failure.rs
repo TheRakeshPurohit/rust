@@ -1,8 +1,5 @@
 // Regression test for <https://github.com/rust-lang/rust/issues/98007>.
 
-#![feature(no_core)]
-#![no_core]
-
 mod auto {
     mod action_row {
         pub struct ActionRowBuilder;
@@ -14,8 +11,8 @@ mod auto {
     }
 }
 
-// @count "$.index[*][?(@.name=='builders')]" 1
-// @has "$.index[*][?(@.name == 'ActionRowBuilder')"]
+//@ count "$.index[*][?(@.name=='builders')]" 1
+//@ has "$.index[*][?(@.name == 'ActionRowBuilder')"]
 pub use auto::*;
 
 pub mod builders {

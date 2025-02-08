@@ -1,7 +1,6 @@
-// run-pass
+//@ run-pass
 #![allow(unused_must_use)]
-// ignore-emscripten no threads support
-// pretty-expanded FIXME #23616
+//@ needs-threads
 
 // Issue #922
 
@@ -9,9 +8,8 @@
 
 use std::thread;
 
-fn f() {
-}
+fn f() {}
 
 pub fn main() {
-    thread::spawn(move|| f() ).join();
+    thread::spawn(move || f()).join();
 }

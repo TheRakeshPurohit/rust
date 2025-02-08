@@ -1,4 +1,4 @@
-//! Detecting language items.
+//! Detecting lang items.
 //!
 //! Language items are items that represent concepts intrinsic to the language
 //! itself. Examples are:
@@ -7,23 +7,31 @@
 //! * Traits that represent operators; e.g., `Add`, `Sub`, `Index`.
 //! * Functions called by the compiler itself.
 
-use crate::ty::{self, TyCtxt};
-
-use rustc_hir::def_id::DefId;
 use rustc_hir::LangItem;
+use rustc_hir::def_id::DefId;
 use rustc_span::Span;
 use rustc_target::spec::PanicStrategy;
+
+use crate::ty::{self, TyCtxt};
 
 impl<'tcx> TyCtxt<'tcx> {
     /// Returns the `DefId` for a given `LangItem`.
     /// If not found, fatally aborts compilation.
     pub fn require_lang_item(self, lang_item: LangItem, span: Option<Span>) -> DefId {
         self.lang_items().get(lang_item).unwrap_or_else(|| {
-            self.sess.emit_fatal(crate::error::RequiresLangItem { span, name: lang_item.name() });
+            self.dcx().emit_fatal(crate::error::RequiresLangItem { span, name: lang_item.name() });
         })
     }
 
-    /// Given a [`DefId`] of a [`Fn`], [`FnMut`] or [`FnOnce`] traits,
+    pub fn is_lang_item(self, def_id: DefId, lang_item: LangItem) -> bool {
+        self.lang_items().get(lang_item) == Some(def_id)
+    }
+
+    pub fn as_lang_item(self, def_id: DefId) -> Option<LangItem> {
+        self.lang_items().from_def_id(def_id)
+    }
+
+    /// Given a [`DefId`] of one of the [`Fn`], [`FnMut`] or [`FnOnce`] traits,
     /// returns a corresponding [`ty::ClosureKind`].
     /// For any other [`DefId`] return `None`.
     pub fn fn_trait_kind_from_def_id(self, id: DefId) -> Option<ty::ClosureKind> {
@@ -33,6 +41,41 @@ impl<'tcx> TyCtxt<'tcx> {
             x if x == items.fn_mut_trait() => Some(ty::ClosureKind::FnMut),
             x if x == items.fn_once_trait() => Some(ty::ClosureKind::FnOnce),
             _ => None,
+        }
+    }
+
+    /// Given a [`DefId`] of one of the `AsyncFn`, `AsyncFnMut` or `AsyncFnOnce` traits,
+    /// returns a corresponding [`ty::ClosureKind`].
+    /// For any other [`DefId`] return `None`.
+    pub fn async_fn_trait_kind_from_def_id(self, id: DefId) -> Option<ty::ClosureKind> {
+        let items = self.lang_items();
+        match Some(id) {
+            x if x == items.async_fn_trait() => Some(ty::ClosureKind::Fn),
+            x if x == items.async_fn_mut_trait() => Some(ty::ClosureKind::FnMut),
+            x if x == items.async_fn_once_trait() => Some(ty::ClosureKind::FnOnce),
+            _ => None,
+        }
+    }
+
+    /// Given a [`ty::ClosureKind`], get the [`DefId`] of its corresponding `Fn`-family
+    /// trait, if it is defined.
+    pub fn fn_trait_kind_to_def_id(self, kind: ty::ClosureKind) -> Option<DefId> {
+        let items = self.lang_items();
+        match kind {
+            ty::ClosureKind::Fn => items.fn_trait(),
+            ty::ClosureKind::FnMut => items.fn_mut_trait(),
+            ty::ClosureKind::FnOnce => items.fn_once_trait(),
+        }
+    }
+
+    /// Given a [`ty::ClosureKind`], get the [`DefId`] of its corresponding `Fn`-family
+    /// trait, if it is defined.
+    pub fn async_fn_trait_kind_to_def_id(self, kind: ty::ClosureKind) -> Option<DefId> {
+        let items = self.lang_items();
+        match kind {
+            ty::ClosureKind::Fn => items.async_fn_trait(),
+            ty::ClosureKind::FnMut => items.async_fn_mut_trait(),
+            ty::ClosureKind::FnOnce => items.async_fn_once_trait(),
         }
     }
 

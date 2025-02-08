@@ -1,5 +1,4 @@
-// compile-flags: -Zdrop-tracking
-// edition: 2021
+//@ edition: 2021
 
 fn main() {}
 

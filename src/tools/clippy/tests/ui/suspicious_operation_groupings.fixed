@@ -1,4 +1,5 @@
-//@run-rustfix
+//@compile-flags: -Zdeduplicate-diagnostics=yes
+
 #![warn(clippy::suspicious_operation_groupings)]
 #![allow(dead_code, unused_parens, clippy::eq_op)]
 

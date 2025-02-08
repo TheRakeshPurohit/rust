@@ -1,11 +1,12 @@
-use super::UnmatchedDelim;
 use rustc_ast::token::Delimiter;
-use rustc_errors::Diagnostic;
-use rustc_span::source_map::SourceMap;
+use rustc_errors::Diag;
 use rustc_span::Span;
+use rustc_span::source_map::SourceMap;
+
+use super::UnmatchedDelim;
 
 #[derive(Default)]
-pub struct TokenTreeDiagInfo {
+pub(super) struct TokenTreeDiagInfo {
     /// Stack of open delimiters and their spans. Used for error message.
     pub open_braces: Vec<(Delimiter, Span)>,
     pub unmatched_delims: Vec<UnmatchedDelim>,
@@ -21,7 +22,7 @@ pub struct TokenTreeDiagInfo {
     pub matching_block_spans: Vec<(Span, Span)>,
 }
 
-pub fn same_indentation_level(sm: &SourceMap, open_sp: Span, close_sp: Span) -> bool {
+pub(super) fn same_indentation_level(sm: &SourceMap, open_sp: Span, close_sp: Span) -> bool {
     match (sm.span_to_margin(open_sp), sm.span_to_margin(close_sp)) {
         (Some(open_padding), Some(close_padding)) => open_padding == close_padding,
         _ => false,
@@ -30,10 +31,7 @@ pub fn same_indentation_level(sm: &SourceMap, open_sp: Span, close_sp: Span) -> 
 
 // When we get a `)` or `]` for `{`, we should emit help message here
 // it's more friendly compared to report `unmatched error` in later phase
-pub fn report_missing_open_delim(
-    err: &mut Diagnostic,
-    unmatched_delims: &[UnmatchedDelim],
-) -> bool {
+fn report_missing_open_delim(err: &mut Diag<'_>, unmatched_delims: &[UnmatchedDelim]) -> bool {
     let mut reported_missing_open = false;
     for unmatch_brace in unmatched_delims.iter() {
         if let Some(delim) = unmatch_brace.found_delim
@@ -46,7 +44,7 @@ pub fn report_missing_open_delim(
             };
             err.span_label(
                 unmatch_brace.found_span.shrink_to_lo(),
-                format!("missing open `{}` for this delimiter", missed_open),
+                format!("missing open `{missed_open}` for this delimiter"),
             );
             reported_missing_open = true;
         }
@@ -54,8 +52,8 @@ pub fn report_missing_open_delim(
     reported_missing_open
 }
 
-pub fn report_suspicious_mismatch_block(
-    err: &mut Diagnostic,
+pub(super) fn report_suspicious_mismatch_block(
+    err: &mut Diag<'_>,
     diag_info: &TokenTreeDiagInfo,
     sm: &SourceMap,
     delim: Delimiter,
@@ -87,7 +85,7 @@ pub fn report_suspicious_mismatch_block(
         }
     }
 
-    // Find the inner-most span candidate for final report
+    // Find the innermost span candidate for final report
     let candidate_span =
         matched_spans.into_iter().rev().find(|&(_, same_ident)| !same_ident).map(|(span, _)| span);
 
@@ -111,9 +109,10 @@ pub fn report_suspicious_mismatch_block(
         // If there is no suspicious span, give the last properly closed block may help
         if let Some(parent) = diag_info.matching_block_spans.last()
             && diag_info.open_braces.last().is_none()
-            && diag_info.empty_block_spans.iter().all(|&sp| sp != parent.0.to(parent.1)) {
-                err.span_label(parent.0, "this opening brace...");
-                err.span_label(parent.1, "...matches this closing brace");
+            && diag_info.empty_block_spans.iter().all(|&sp| sp != parent.0.to(parent.1))
+        {
+            err.span_label(parent.0, "this opening brace...");
+            err.span_label(parent.1, "...matches this closing brace");
         }
     }
 }

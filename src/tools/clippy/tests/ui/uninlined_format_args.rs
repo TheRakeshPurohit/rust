@@ -1,8 +1,13 @@
 //@aux-build:proc_macros.rs
-//@run-rustfix
+
 #![warn(clippy::uninlined_format_args)]
 #![allow(named_arguments_used_positionally, unused)]
-#![allow(clippy::eq_op, clippy::format_in_format_args, clippy::print_literal)]
+#![allow(
+    clippy::eq_op,
+    clippy::format_in_format_args,
+    clippy::print_literal,
+    clippy::unnecessary_literal_unwrap
+)]
 
 extern crate proc_macros;
 use proc_macros::with_span;
@@ -257,8 +262,6 @@ fn tester2() {
     my_concat!("{}", local_i32);
     my_good_macro!("{}", local_i32);
     my_good_macro!("{}", local_i32,);
-
-    // FIXME: Broken false positives, currently unhandled
     my_bad_macro!("{}", local_i32);
     my_bad_macro2!("{}", local_i32);
     used_twice! {
@@ -266,4 +269,23 @@ fn tester2() {
         small = "small value: {}",
         local_i32,
     };
+}
+
+#[clippy::format_args]
+macro_rules! usr_println {
+    ($target:expr, $($args:tt)*) => {{
+        if $target {
+            println!($($args)*)
+        }
+    }};
+}
+
+fn user_format() {
+    let local_i32 = 1;
+    let local_f64 = 2.0;
+
+    usr_println!(true, "val='{}'", local_i32);
+    usr_println!(true, "{}", local_i32);
+    usr_println!(true, "{:#010x}", local_i32);
+    usr_println!(true, "{:.1}", local_f64);
 }

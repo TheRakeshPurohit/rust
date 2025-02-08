@@ -1,7 +1,9 @@
-FROM ubuntu:20.04
+FROM ubuntu:22.04
 
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
   clang-11 \
+  llvm-11 \
   g++ \
   make \
   ninja-build \
@@ -15,22 +17,20 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
   gdb \
   libssl-dev \
   pkg-config \
+  bzip2 \
   xz-utils \
   wget \
   patch \
   ovmf \
+  ovmf-ia32 \
   qemu-efi-aarch64 \
   qemu-system-arm \
   qemu-system-x86 \
   && rm -rf /var/lib/apt/lists/*
 
-RUN curl -sL https://nodejs.org/dist/v15.14.0/node-v15.14.0-linux-x64.tar.xz | \
-  tar -xJ
-
-# Install 32-bit OVMF files for the i686-unknown-uefi test. This package
-# is not available in ubuntu 20.04, so download a 22.04 package.
-RUN curl -sL --output ovmf-ia32.deb http://mirrors.kernel.org/ubuntu/pool/universe/e/edk2/ovmf-ia32_2022.02-3_all.deb
-RUN dpkg -i ovmf-ia32.deb && rm ovmf-ia32.deb
+COPY scripts/nodejs.sh /scripts/
+RUN sh /scripts/nodejs.sh /node
+ENV PATH="/node/bin:${PATH}"
 
 WORKDIR /build/
 COPY scripts/musl-toolchain.sh /build/
@@ -40,9 +40,12 @@ WORKDIR /
 COPY scripts/sccache.sh /scripts/
 RUN sh /scripts/sccache.sh
 
+RUN curl -L https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sdk-25.0-x86_64-linux.tar.gz | \
+  tar -xz
+ENV WASI_SDK_PATH=/wasi-sdk-25.0-x86_64-linux
+
 ENV RUST_CONFIGURE_ARGS \
   --musl-root-x86_64=/usr/local/x86_64-linux-musl \
-  --set build.nodejs=/node-v15.14.0-linux-x64/bin/node \
   --set rust.lld
 
 # Some run-make tests have assertions about code size, and enabling debug
@@ -52,12 +55,18 @@ ENV RUST_CONFIGURE_ARGS \
 ENV NO_DEBUG_ASSERTIONS=1
 ENV NO_OVERFLOW_CHECKS=1
 
-ENV WASM_TARGETS=wasm32-unknown-unknown
+RUN curl -L https://github.com/bytecodealliance/wasmtime/releases/download/v19.0.0/wasmtime-v19.0.0-x86_64-linux.tar.xz | \
+  tar -xJ
+ENV PATH "$PATH:/wasmtime-v19.0.0-x86_64-linux"
+
+ENV WASM_TARGETS=wasm32-wasip1
 ENV WASM_SCRIPT python3 /checkout/x.py --stage 2 test --host='' --target $WASM_TARGETS \
   tests/run-make \
   tests/ui \
   tests/mir-opt \
   tests/codegen-units \
+  tests/codegen \
+  tests/assembly \
   library/core
 
 ENV NVPTX_TARGETS=nvptx64-nvidia-cuda

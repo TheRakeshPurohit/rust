@@ -1,8 +1,6 @@
-// compile-flags: -Z mir-opt-level=3
-// edition:2018
-// build-pass
-
-#![feature(async_closure)]
+//@ compile-flags: -Z mir-opt-level=3
+//@ edition:2018
+//@ build-pass
 
 use std::future::Future;
 

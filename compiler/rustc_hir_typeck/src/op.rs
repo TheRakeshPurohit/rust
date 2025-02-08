@@ -1,30 +1,31 @@
 //! Code related to processing overloaded binary and unary operators.
 
-use super::method::MethodCallee;
-use super::{has_expected_num_generic_args, FnCtxt};
-use crate::Expectation;
-use rustc_ast as ast;
-use rustc_errors::{self, struct_span_err, Applicability, Diagnostic};
-use rustc_hir as hir;
-use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
+use rustc_data_structures::packed::Pu128;
+use rustc_errors::codes::*;
+use rustc_errors::{Applicability, Diag, struct_span_code_err};
 use rustc_infer::traits::ObligationCauseCode;
 use rustc_middle::ty::adjustment::{
     Adjust, Adjustment, AllowTwoPhase, AutoBorrow, AutoBorrowMutability,
 };
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::{self, IsSuggestable, Ty, TyCtxt, TypeVisitableExt};
+use rustc_middle::{bug, span_bug};
 use rustc_session::errors::ExprParenthesesNeeded;
 use rustc_span::source_map::Spanned;
-use rustc_span::symbol::{sym, Ident};
-use rustc_span::Span;
+use rustc_span::{Ident, Span, sym};
 use rustc_trait_selection::infer::InferCtxtExt;
-use rustc_trait_selection::traits::error_reporting::suggestions::TypeErrCtxtExt as _;
-use rustc_trait_selection::traits::{self, FulfillmentError, ObligationCtxt};
-use rustc_type_ir::sty::TyKind::*;
+use rustc_trait_selection::traits::{FulfillmentError, Obligation, ObligationCtxt};
+use rustc_type_ir::TyKind::*;
+use tracing::debug;
+use {rustc_ast as ast, rustc_hir as hir};
+
+use super::FnCtxt;
+use super::method::MethodCallee;
+use crate::Expectation;
 
 impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// Checks a `a <op>= b`
-    pub fn check_binop_assign(
+    pub(crate) fn check_expr_binop_assign(
         &self,
         expr: &'tcx hir::Expr<'tcx>,
         op: hir::BinOp,
@@ -38,16 +39,16 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let ty =
             if !lhs_ty.is_ty_var() && !rhs_ty.is_ty_var() && is_builtin_binop(lhs_ty, rhs_ty, op) {
                 self.enforce_builtin_binop_types(lhs.span, lhs_ty, rhs.span, rhs_ty, op);
-                self.tcx.mk_unit()
+                self.tcx.types.unit
             } else {
                 return_ty
             };
 
-        self.check_lhs_assignable(lhs, "E0067", op.span, |err| {
+        self.check_lhs_assignable(lhs, E0067, op.span, |err| {
             if let Some(lhs_deref_ty) = self.deref_once_mutably_for_diagnostic(lhs_ty) {
                 if self
                     .lookup_op_method(
-                        lhs_deref_ty,
+                        (lhs, lhs_deref_ty),
                         Some((rhs, rhs_ty)),
                         Op::Binary(op, IsAssign::Yes),
                         expected,
@@ -58,7 +59,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     // emitted a better suggestion during error handling in check_overloaded_binop.
                     if self
                         .lookup_op_method(
-                            lhs_ty,
+                            (lhs, lhs_ty),
                             Some((rhs, rhs_ty)),
                             Op::Binary(op, IsAssign::Yes),
                             expected,
@@ -83,7 +84,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     }
 
     /// Checks a potentially overloaded binary operator.
-    pub fn check_binop(
+    pub(crate) fn check_expr_binop(
         &self,
         expr: &'tcx hir::Expr<'tcx>,
         op: hir::BinOp,
@@ -218,10 +219,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 // e.g., adding `&'a T` and `&'b T`, given `&'x T: Add<&'x T>`, will result
                 // in `&'a T <: &'x T` and `&'b T <: &'x T`, instead of `'a = 'b = 'x`.
                 let lhs_ty = self.check_expr(lhs_expr);
-                let fresh_var = self.next_ty_var(TypeVariableOrigin {
-                    kind: TypeVariableOriginKind::MiscVariable,
-                    span: lhs_expr.span,
-                });
+                let fresh_var = self.next_ty_var(lhs_expr.span);
                 self.demand_coerce(lhs_expr, lhs_ty, fresh_var, Some(rhs_expr), AllowTwoPhase::No)
             }
             IsAssign::Yes => {
@@ -240,43 +238,47 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // using this variable as the expected type, which sometimes lets
         // us do better coercions than we would be able to do otherwise,
         // particularly for things like `String + &String`.
-        let rhs_ty_var = self.next_ty_var(TypeVariableOrigin {
-            kind: TypeVariableOriginKind::MiscVariable,
-            span: rhs_expr.span,
-        });
+        let rhs_ty_var = self.next_ty_var(rhs_expr.span);
 
         let result = self.lookup_op_method(
-            lhs_ty,
+            (lhs_expr, lhs_ty),
             Some((rhs_expr, rhs_ty_var)),
             Op::Binary(op, is_assign),
             expected,
         );
 
         // see `NB` above
-        let rhs_ty = self.check_expr_coercible_to_type(rhs_expr, rhs_ty_var, Some(lhs_expr));
+        let rhs_ty = self.check_expr_coercible_to_type_or_error(
+            rhs_expr,
+            rhs_ty_var,
+            Some(lhs_expr),
+            |err, ty| {
+                self.suggest_swapping_lhs_and_rhs(err, ty, lhs_ty, rhs_expr, lhs_expr, op);
+            },
+        );
         let rhs_ty = self.resolve_vars_with_obligations(rhs_ty);
 
         let return_ty = match result {
             Ok(method) => {
                 let by_ref_binop = !op.node.is_by_value();
                 if is_assign == IsAssign::Yes || by_ref_binop {
-                    if let ty::Ref(region, _, mutbl) = method.sig.inputs()[0].kind() {
+                    if let ty::Ref(_, _, mutbl) = method.sig.inputs()[0].kind() {
                         let mutbl = AutoBorrowMutability::new(*mutbl, AllowTwoPhase::Yes);
                         let autoref = Adjustment {
-                            kind: Adjust::Borrow(AutoBorrow::Ref(*region, mutbl)),
+                            kind: Adjust::Borrow(AutoBorrow::Ref(mutbl)),
                             target: method.sig.inputs()[0],
                         };
                         self.apply_adjustments(lhs_expr, vec![autoref]);
                     }
                 }
                 if by_ref_binop {
-                    if let ty::Ref(region, _, mutbl) = method.sig.inputs()[1].kind() {
+                    if let ty::Ref(_, _, mutbl) = method.sig.inputs()[1].kind() {
                         // Allow two-phase borrows for binops in initial deployment
                         // since they desugar to methods
                         let mutbl = AutoBorrowMutability::new(*mutbl, AllowTwoPhase::Yes);
 
                         let autoref = Adjustment {
-                            kind: Adjust::Borrow(AutoBorrow::Ref(*region, mutbl)),
+                            kind: Adjust::Borrow(AutoBorrow::Ref(mutbl)),
                             target: method.sig.inputs()[1],
                         };
                         // HACK(eddyb) Bypass checks due to reborrows being in
@@ -291,74 +293,78 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             .push(autoref);
                     }
                 }
-                self.write_method_call(expr.hir_id, method);
+                self.write_method_call_and_enforce_effects(expr.hir_id, expr.span, method);
 
                 method.sig.output()
             }
             // error types are considered "builtin"
             Err(_) if lhs_ty.references_error() || rhs_ty.references_error() => {
-                self.tcx.ty_error_misc()
+                Ty::new_misc_error(self.tcx)
             }
             Err(errors) => {
                 let (_, trait_def_id) =
                     lang_item_for_op(self.tcx, Op::Binary(op, is_assign), op.span);
                 let missing_trait = trait_def_id
                     .map(|def_id| with_no_trimmed_paths!(self.tcx.def_path_str(def_id)));
+                let mut path = None;
+                let lhs_ty_str = self.tcx.short_string(lhs_ty, &mut path);
+                let rhs_ty_str = self.tcx.short_string(rhs_ty, &mut path);
                 let (mut err, output_def_id) = match is_assign {
                     IsAssign::Yes => {
-                        let mut err = struct_span_err!(
-                            self.tcx.sess,
+                        let mut err = struct_span_code_err!(
+                            self.dcx(),
                             expr.span,
                             E0368,
                             "binary assignment operation `{}=` cannot be applied to type `{}`",
                             op.node.as_str(),
-                            lhs_ty,
+                            lhs_ty_str,
                         );
                         err.span_label(
                             lhs_expr.span,
-                            format!("cannot use `{}=` on type `{}`", op.node.as_str(), lhs_ty),
+                            format!("cannot use `{}=` on type `{}`", op.node.as_str(), lhs_ty_str),
                         );
-                        self.note_unmet_impls_on_type(&mut err, errors);
+                        self.note_unmet_impls_on_type(&mut err, errors, false);
                         (err, None)
                     }
                     IsAssign::No => {
                         let message = match op.node {
                             hir::BinOpKind::Add => {
-                                format!("cannot add `{rhs_ty}` to `{lhs_ty}`")
+                                format!("cannot add `{rhs_ty_str}` to `{lhs_ty_str}`")
                             }
                             hir::BinOpKind::Sub => {
-                                format!("cannot subtract `{rhs_ty}` from `{lhs_ty}`")
+                                format!("cannot subtract `{rhs_ty_str}` from `{lhs_ty_str}`")
                             }
                             hir::BinOpKind::Mul => {
-                                format!("cannot multiply `{lhs_ty}` by `{rhs_ty}`")
+                                format!("cannot multiply `{lhs_ty_str}` by `{rhs_ty_str}`")
                             }
                             hir::BinOpKind::Div => {
-                                format!("cannot divide `{lhs_ty}` by `{rhs_ty}`")
+                                format!("cannot divide `{lhs_ty_str}` by `{rhs_ty_str}`")
                             }
                             hir::BinOpKind::Rem => {
                                 format!(
-                                    "cannot calculate the remainder of `{lhs_ty}` divided by `{rhs_ty}`"
+                                    "cannot calculate the remainder of `{lhs_ty_str}` divided by \
+                                     `{rhs_ty_str}`"
                                 )
                             }
                             hir::BinOpKind::BitAnd => {
-                                format!("no implementation for `{lhs_ty} & {rhs_ty}`")
+                                format!("no implementation for `{lhs_ty_str} & {rhs_ty_str}`")
                             }
                             hir::BinOpKind::BitXor => {
-                                format!("no implementation for `{lhs_ty} ^ {rhs_ty}`")
+                                format!("no implementation for `{lhs_ty_str} ^ {rhs_ty_str}`")
                             }
                             hir::BinOpKind::BitOr => {
-                                format!("no implementation for `{lhs_ty} | {rhs_ty}`")
+                                format!("no implementation for `{lhs_ty_str} | {rhs_ty_str}`")
                             }
                             hir::BinOpKind::Shl => {
-                                format!("no implementation for `{lhs_ty} << {rhs_ty}`")
+                                format!("no implementation for `{lhs_ty_str} << {rhs_ty_str}`")
                             }
                             hir::BinOpKind::Shr => {
-                                format!("no implementation for `{lhs_ty} >> {rhs_ty}`")
+                                format!("no implementation for `{lhs_ty_str} >> {rhs_ty_str}`")
                             }
                             _ => format!(
                                 "binary operation `{}` cannot be applied to type `{}`",
                                 op.node.as_str(),
-                                lhs_ty
+                                lhs_ty_str,
                             ),
                         };
                         let output_def_id = trait_def_id.and_then(|def_id| {
@@ -370,20 +376,39 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                 })
                                 .cloned()
                         });
-                        let mut err = struct_span_err!(self.tcx.sess, op.span, E0369, "{message}");
+                        let mut err =
+                            struct_span_code_err!(self.dcx(), op.span, E0369, "{message}");
                         if !lhs_expr.span.eq(&rhs_expr.span) {
-                            err.span_label(lhs_expr.span, lhs_ty.to_string());
-                            err.span_label(rhs_expr.span, rhs_ty.to_string());
+                            err.span_label(lhs_expr.span, lhs_ty_str.clone());
+                            err.span_label(rhs_expr.span, rhs_ty_str);
                         }
-                        self.note_unmet_impls_on_type(&mut err, errors);
+                        let suggest_derive = self.can_eq(self.param_env, lhs_ty, rhs_ty);
+                        self.note_unmet_impls_on_type(&mut err, errors, suggest_derive);
                         (err, output_def_id)
                     }
                 };
+                *err.long_ty_path() = path;
 
-                let mut suggest_deref_binop = |lhs_deref_ty: Ty<'tcx>| {
+                // Try to suggest a semicolon if it's `A \n *B` where `B` is a place expr
+                let maybe_missing_semi = self.check_for_missing_semi(expr, &mut err);
+
+                // We defer to the later error produced by `check_lhs_assignable`.
+                // We only downgrade this if it's the LHS, though, and if this is a
+                // valid assignment statement.
+                if maybe_missing_semi
+                    && let hir::Node::Expr(parent) = self.tcx.parent_hir_node(expr.hir_id)
+                    && let hir::ExprKind::Assign(lhs, _, _) = parent.kind
+                    && let hir::Node::Stmt(stmt) = self.tcx.parent_hir_node(parent.hir_id)
+                    && let hir::StmtKind::Expr(_) | hir::StmtKind::Semi(_) = stmt.kind
+                    && lhs.hir_id == expr.hir_id
+                {
+                    err.downgrade_to_delayed_bug();
+                }
+
+                let suggest_deref_binop = |err: &mut Diag<'_, _>, lhs_deref_ty: Ty<'tcx>| {
                     if self
                         .lookup_op_method(
-                            lhs_deref_ty,
+                            (lhs_expr, lhs_deref_ty),
                             Some((rhs_expr, rhs_ty)),
                             Op::Binary(op, is_assign),
                             expected,
@@ -397,7 +422,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                 IsAssign::Yes => "=",
                                 IsAssign::No => "",
                             },
-                            lhs_deref_ty,
+                            self.tcx.short_string(lhs_deref_ty, err.long_ty_path()),
                         );
                         err.span_suggestion_verbose(
                             lhs_expr.span.shrink_to_lo(),
@@ -408,9 +433,72 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     }
                 };
 
+                let suggest_different_borrow =
+                    |err: &mut Diag<'_, _>,
+                     lhs_adjusted_ty,
+                     lhs_new_mutbl: Option<ast::Mutability>,
+                     rhs_adjusted_ty,
+                     rhs_new_mutbl: Option<ast::Mutability>| {
+                        if self
+                            .lookup_op_method(
+                                (lhs_expr, lhs_adjusted_ty),
+                                Some((rhs_expr, rhs_adjusted_ty)),
+                                Op::Binary(op, is_assign),
+                                expected,
+                            )
+                            .is_ok()
+                        {
+                            let lhs = self.tcx.short_string(lhs_adjusted_ty, err.long_ty_path());
+                            let rhs = self.tcx.short_string(rhs_adjusted_ty, err.long_ty_path());
+                            let op = op.node.as_str();
+                            err.note(format!("an implementation for `{lhs} {op} {rhs}` exists"));
+
+                            if let Some(lhs_new_mutbl) = lhs_new_mutbl
+                                && let Some(rhs_new_mutbl) = rhs_new_mutbl
+                                && lhs_new_mutbl.is_not()
+                                && rhs_new_mutbl.is_not()
+                            {
+                                err.multipart_suggestion_verbose(
+                                    "consider reborrowing both sides",
+                                    vec![
+                                        (lhs_expr.span.shrink_to_lo(), "&*".to_string()),
+                                        (rhs_expr.span.shrink_to_lo(), "&*".to_string()),
+                                    ],
+                                    rustc_errors::Applicability::MachineApplicable,
+                                );
+                            } else {
+                                let mut suggest_new_borrow =
+                                    |new_mutbl: ast::Mutability, sp: Span| {
+                                        // Can reborrow (&mut -> &)
+                                        if new_mutbl.is_not() {
+                                            err.span_suggestion_verbose(
+                                                sp.shrink_to_lo(),
+                                                "consider reborrowing this side",
+                                                "&*",
+                                                rustc_errors::Applicability::MachineApplicable,
+                                            );
+                                        // Works on &mut but have &
+                                        } else {
+                                            err.span_help(
+                                                sp,
+                                                "consider making this expression a mutable borrow",
+                                            );
+                                        }
+                                    };
+
+                                if let Some(lhs_new_mutbl) = lhs_new_mutbl {
+                                    suggest_new_borrow(lhs_new_mutbl, lhs_expr.span);
+                                }
+                                if let Some(rhs_new_mutbl) = rhs_new_mutbl {
+                                    suggest_new_borrow(rhs_new_mutbl, rhs_expr.span);
+                                }
+                            }
+                        }
+                    };
+
                 let is_compatible_after_call = |lhs_ty, rhs_ty| {
                     self.lookup_op_method(
-                        lhs_ty,
+                        (lhs_expr, lhs_ty),
                         Some((rhs_expr, rhs_ty)),
                         Op::Binary(op, is_assign),
                         expected,
@@ -429,15 +517,45 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 } else if is_assign == IsAssign::Yes
                     && let Some(lhs_deref_ty) = self.deref_once_mutably_for_diagnostic(lhs_ty)
                 {
-                    suggest_deref_binop(lhs_deref_ty);
+                    suggest_deref_binop(&mut err, lhs_deref_ty);
                 } else if is_assign == IsAssign::No
-                    && let Ref(_, lhs_deref_ty, _) = lhs_ty.kind()
+                    && let Ref(region, lhs_deref_ty, mutbl) = lhs_ty.kind()
                 {
-                    if self.type_is_copy_modulo_regions(
-                        self.param_env,
-                        *lhs_deref_ty,
-                    ) {
-                        suggest_deref_binop(*lhs_deref_ty);
+                    if self.type_is_copy_modulo_regions(self.param_env, *lhs_deref_ty) {
+                        suggest_deref_binop(&mut err, *lhs_deref_ty);
+                    } else {
+                        let lhs_inv_mutbl = mutbl.invert();
+                        let lhs_inv_mutbl_ty =
+                            Ty::new_ref(self.tcx, *region, *lhs_deref_ty, lhs_inv_mutbl);
+
+                        suggest_different_borrow(
+                            &mut err,
+                            lhs_inv_mutbl_ty,
+                            Some(lhs_inv_mutbl),
+                            rhs_ty,
+                            None,
+                        );
+
+                        if let Ref(region, rhs_deref_ty, mutbl) = rhs_ty.kind() {
+                            let rhs_inv_mutbl = mutbl.invert();
+                            let rhs_inv_mutbl_ty =
+                                Ty::new_ref(self.tcx, *region, *rhs_deref_ty, rhs_inv_mutbl);
+
+                            suggest_different_borrow(
+                                &mut err,
+                                lhs_ty,
+                                None,
+                                rhs_inv_mutbl_ty,
+                                Some(rhs_inv_mutbl),
+                            );
+                            suggest_different_borrow(
+                                &mut err,
+                                lhs_inv_mutbl_ty,
+                                Some(lhs_inv_mutbl),
+                                rhs_inv_mutbl_ty,
+                                Some(rhs_inv_mutbl),
+                            );
+                        }
                     }
                 } else if self.suggest_fn_call(&mut err, lhs_expr, lhs_ty, |lhs_ty| {
                     is_compatible_after_call(lhs_ty, rhs_ty)
@@ -473,7 +591,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         // suggestion for the user.
                         let errors = self
                             .lookup_op_method(
-                                lhs_ty,
+                                (lhs_expr, lhs_ty),
                                 Some((rhs_expr, rhs_ty)),
                                 Op::Binary(op, is_assign),
                                 expected,
@@ -482,7 +600,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         if !errors.is_empty() {
                             for error in errors {
                                 if let Some(trait_pred) =
-                                    error.obligation.predicate.to_opt_poly_trait_pred()
+                                    error.obligation.predicate.as_trait_clause()
                                 {
                                     let output_associated_item = match error.obligation.cause.code()
                                     {
@@ -494,7 +612,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                             if let Some(output_def_id) = output_def_id
                                                 && let Some(trait_def_id) = trait_def_id
                                                 && self.tcx.parent(output_def_id) == trait_def_id
-                                                && let Some(output_ty) = output_ty.make_suggestable(self.tcx, false)
+                                                && let Some(output_ty) = output_ty
+                                                    .make_suggestable(self.tcx, false, None)
                                             {
                                                 Some(("Output", output_ty))
                                             } else {
@@ -516,7 +635,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             // When we know that a missing bound is responsible, we don't show
                             // this note as it is redundant.
                             err.note(format!(
-                                "the trait `{missing_trait}` is not implemented for `{lhs_ty}`"
+                                "the trait `{missing_trait}` is not implemented for `{lhs_ty_str}`"
                             ));
                         }
                     }
@@ -542,24 +661,32 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         hir::BinOpKind::Sub => {
                             if lhs_ty.is_unsafe_ptr() && rhs_ty.is_integral() {
                                 err.multipart_suggestion(
-                                    "consider using `wrapping_sub` or `sub` for pointer - {integer}",
+                                    "consider using `wrapping_sub` or `sub` for \
+                                     pointer - {integer}",
                                     vec![
-                                        (lhs_expr.span.between(rhs_expr.span), ".wrapping_sub(".to_owned()),
+                                        (
+                                            lhs_expr.span.between(rhs_expr.span),
+                                            ".wrapping_sub(".to_owned(),
+                                        ),
                                         (rhs_expr.span.shrink_to_hi(), ")".to_owned()),
                                     ],
-                                    Applicability::MaybeIncorrect
+                                    Applicability::MaybeIncorrect,
                                 );
                             }
 
                             if lhs_ty.is_unsafe_ptr() && rhs_ty.is_unsafe_ptr() {
                                 err.multipart_suggestion(
-                                    "consider using `offset_from` for pointer - pointer if the pointers point to the same allocation",
+                                    "consider using `offset_from` for pointer - pointer if the \
+                                     pointers point to the same allocation",
                                     vec![
                                         (lhs_expr.span.shrink_to_lo(), "unsafe { ".to_owned()),
-                                        (lhs_expr.span.between(rhs_expr.span), ".offset_from(".to_owned()),
+                                        (
+                                            lhs_expr.span.between(rhs_expr.span),
+                                            ".offset_from(".to_owned(),
+                                        ),
                                         (rhs_expr.span.shrink_to_hi(), ") }".to_owned()),
                                     ],
-                                    Applicability::MaybeIncorrect
+                                    Applicability::MaybeIncorrect,
                                 );
                             }
                         }
@@ -568,7 +695,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 }
 
                 let reported = err.emit();
-                self.tcx.ty_error(reported)
+                Ty::new_error(self.tcx, reported)
             }
         };
 
@@ -586,7 +713,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         rhs_expr: &'tcx hir::Expr<'tcx>,
         lhs_ty: Ty<'tcx>,
         rhs_ty: Ty<'tcx>,
-        err: &mut Diagnostic,
+        err: &mut Diag<'_>,
         is_assign: IsAssign,
         op: hir::BinOp,
     ) -> bool {
@@ -665,7 +792,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         }
     }
 
-    pub fn check_user_unop(
+    pub(crate) fn check_user_unop(
         &self,
         ex: &'tcx hir::Expr<'tcx>,
         operand_ty: Ty<'tcx>,
@@ -673,31 +800,33 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         expected: Expectation<'tcx>,
     ) -> Ty<'tcx> {
         assert!(op.is_by_value());
-        match self.lookup_op_method(operand_ty, None, Op::Unary(op, ex.span), expected) {
+        match self.lookup_op_method((ex, operand_ty), None, Op::Unary(op, ex.span), expected) {
             Ok(method) => {
-                self.write_method_call(ex.hir_id, method);
+                self.write_method_call_and_enforce_effects(ex.hir_id, ex.span, method);
                 method.sig.output()
             }
             Err(errors) => {
                 let actual = self.resolve_vars_if_possible(operand_ty);
                 let guar = actual.error_reported().err().unwrap_or_else(|| {
-                    let mut err = struct_span_err!(
-                        self.tcx.sess,
+                    let mut file = None;
+                    let ty_str = self.tcx.short_string(actual, &mut file);
+                    let mut err = struct_span_code_err!(
+                        self.dcx(),
                         ex.span,
                         E0600,
-                        "cannot apply unary operator `{}` to type `{}`",
+                        "cannot apply unary operator `{}` to type `{ty_str}`",
                         op.as_str(),
-                        actual
                     );
+                    *err.long_ty_path() = file;
                     err.span_label(
                         ex.span,
                         format!("cannot apply unary operator `{}`", op.as_str()),
                     );
 
                     if operand_ty.has_non_region_param() {
-                        let predicates = errors.iter().filter_map(|error| {
-                            error.obligation.predicate.to_opt_poly_trait_pred()
-                        });
+                        let predicates = errors
+                            .iter()
+                            .filter_map(|error| error.obligation.predicate.as_trait_clause());
                         for pred in predicates {
                             self.err_ctxt().suggest_restricting_param_bound(
                                 &mut err,
@@ -710,7 +839,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
                     let sp = self.tcx.sess.source_map().start_point(ex.span).with_parent(None);
                     if let Some(sp) =
-                        self.tcx.sess.parse_sess.ambiguous_block_expr_parse.borrow().get(&sp)
+                        self.tcx.sess.psess.ambiguous_block_expr_parse.borrow().get(&sp)
                     {
                         // If the previous expression was a block expression, suggest parentheses
                         // (turning this into a binary subtraction operation instead.)
@@ -726,15 +855,24 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                     hir::Expr {
                                         kind:
                                             hir::ExprKind::Lit(Spanned {
-                                                node: ast::LitKind::Int(1, _),
+                                                node: ast::LitKind::Int(Pu128(1), _),
                                                 ..
                                             }),
                                         ..
                                     },
                                 ) = ex.kind
                                 {
-                                    err.span_suggestion(
-                                        ex.span,
+                                    let span = if let hir::Node::Expr(parent) =
+                                        self.tcx.parent_hir_node(ex.hir_id)
+                                        && let hir::ExprKind::Cast(..) = parent.kind
+                                    {
+                                        // `-1 as usize` -> `usize::MAX`
+                                        parent.span
+                                    } else {
+                                        ex.span
+                                    };
+                                    err.span_suggestion_verbose(
+                                        span,
                                         format!(
                                             "you may have meant the maximum value of `{actual}`",
                                         ),
@@ -746,20 +884,20 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             Str | Never | Char | Tuple(_) | Array(_, _) => {}
                             Ref(_, lty, _) if *lty.kind() == Str => {}
                             _ => {
-                                self.note_unmet_impls_on_type(&mut err, errors);
+                                self.note_unmet_impls_on_type(&mut err, errors, true);
                             }
                         }
                     }
                     err.emit()
                 });
-                self.tcx.ty_error(guar)
+                Ty::new_error(self.tcx, guar)
             }
         }
     }
 
     fn lookup_op_method(
         &self,
-        lhs_ty: Ty<'tcx>,
+        (lhs_expr, lhs_ty): (&'tcx hir::Expr<'tcx>, Ty<'tcx>),
         opt_rhs: Option<(&'tcx hir::Expr<'tcx>, Ty<'tcx>)>,
         op: Op,
         expected: Expectation<'tcx>,
@@ -778,45 +916,18 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             lhs_ty, op, opname, trait_did
         );
 
-        // Catches cases like #83893, where a lang item is declared with the
-        // wrong number of generic arguments. Should have yielded an error
-        // elsewhere by now, but we have to catch it here so that we do not
-        // index `other_tys` out of bounds (if the lang item has too many
-        // generic arguments, `other_tys` is too short).
-        if !has_expected_num_generic_args(
-            self.tcx,
-            trait_did,
-            match op {
-                // Binary ops have a generic right-hand side, unary ops don't
-                Op::Binary(..) => 1,
-                Op::Unary(..) => 0,
-            },
-        ) {
-            self.tcx
-                .sess
-                .delay_span_bug(span, "operator didn't have the right number of generic args");
-            return Err(vec![]);
-        }
-
         let opname = Ident::with_dummy_span(opname);
         let (opt_rhs_expr, opt_rhs_ty) = opt_rhs.unzip();
-        let input_types = opt_rhs_ty.as_slice();
-        let cause = self.cause(
-            span,
-            traits::BinOp {
-                rhs_span: opt_rhs_expr.map(|expr| expr.span),
-                is_lit: opt_rhs_expr.is_some_and(|expr| matches!(expr.kind, hir::ExprKind::Lit(_))),
-                output_ty: expected.only_has_type(self),
-            },
-        );
+        let cause = self.cause(span, ObligationCauseCode::BinOp {
+            lhs_hir_id: lhs_expr.hir_id,
+            rhs_hir_id: opt_rhs_expr.map(|expr| expr.hir_id),
+            rhs_span: opt_rhs_expr.map(|expr| expr.span),
+            rhs_is_lit: opt_rhs_expr.is_some_and(|expr| matches!(expr.kind, hir::ExprKind::Lit(_))),
+            output_ty: expected.only_has_type(self),
+        });
 
-        let method = self.lookup_method_in_trait(
-            cause.clone(),
-            opname,
-            trait_did,
-            lhs_ty,
-            Some(input_types),
-        );
+        let method =
+            self.lookup_method_in_trait(cause.clone(), opname, trait_did, lhs_ty, opt_rhs_ty);
         match method {
             Some(ok) => {
                 let method = self.register_infer_ok_obligations(ok);
@@ -827,7 +938,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 // This path may do some inference, so make sure we've really
                 // doomed compilation so as to not accidentally stabilize new
                 // inference or something here...
-                self.tcx.sess.delay_span_bug(span, "this path really should be doomed...");
+                self.dcx().span_delayed_bug(span, "this path really should be doomed...");
                 // Guide inference for the RHS expression if it's provided --
                 // this will allow us to better error reporting, at the expense
                 // of making some error messages a bit more specific.
@@ -837,10 +948,28 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     self.check_expr_coercible_to_type(rhs_expr, rhs_ty, None);
                 }
 
-                let (obligation, _) =
-                    self.obligation_for_method(cause, trait_did, lhs_ty, Some(input_types));
-                // FIXME: This should potentially just add the obligation to the `FnCtxt`
-                let ocx = ObligationCtxt::new(&self.infcx);
+                // Construct an obligation `self_ty : Trait<input_tys>`
+                let args =
+                    ty::GenericArgs::for_item(self.tcx, trait_did, |param, _| match param.kind {
+                        ty::GenericParamDefKind::Lifetime
+                        | ty::GenericParamDefKind::Const { .. } => {
+                            unreachable!("did not expect operand trait to have lifetime/const args")
+                        }
+                        ty::GenericParamDefKind::Type { .. } => {
+                            if param.index == 0 {
+                                lhs_ty.into()
+                            } else {
+                                opt_rhs_ty.expect("expected RHS for binop").into()
+                            }
+                        }
+                    });
+                let obligation = Obligation::new(
+                    self.tcx,
+                    cause,
+                    self.param_env,
+                    ty::TraitRef::new_from_args(self.tcx, trait_did, args),
+                );
+                let ocx = ObligationCtxt::new_with_diagnostics(&self.infcx);
                 ocx.register_obligation(obligation);
                 Err(ocx.select_all_or_error())
             }

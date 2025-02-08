@@ -18,8 +18,10 @@ pub struct PanicContext {
 }
 
 impl PanicContext {
+    #[allow(clippy::print_stderr)]
     fn init() {
         let default_hook = panic::take_hook();
+        #[allow(deprecated)]
         let hook = move |panic_info: &panic::PanicInfo<'_>| {
             with_ctx(|ctx| {
                 if !ctx.is_empty() {
@@ -43,7 +45,7 @@ impl Drop for PanicContext {
 
 fn with_ctx(f: impl FnOnce(&mut Vec<String>)) {
     thread_local! {
-        static CTX: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        static CTX: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     }
     CTX.with(|ctx| f(&mut ctx.borrow_mut()));
 }

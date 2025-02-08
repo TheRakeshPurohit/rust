@@ -6,7 +6,7 @@
 //! * Extracting markup (mainly, `$0` markers) out of fixture strings.
 //! * marks (see the eponymous module).
 
-#![warn(rust_2018_idioms, unused_lifetimes, semicolon_in_expressions_from_macros)]
+#![allow(clippy::print_stderr)]
 
 mod assert_linear;
 pub mod bench_fixture;
@@ -18,6 +18,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use paths::Utf8PathBuf;
 use profile::StopWatch;
 use stdx::is_ci;
 use text_size::{TextRange, TextSize};
@@ -163,7 +164,7 @@ pub fn extract_tags(mut text: &str, tag: &str) -> (Vec<(TextRange, Option<String
                 if text.starts_with(&open) {
                     let close_open = text.find('>').unwrap();
                     let attr = text[open.len()..close_open].trim();
-                    let attr = if attr.is_empty() { None } else { Some(attr.to_string()) };
+                    let attr = if attr.is_empty() { None } else { Some(attr.to_owned()) };
                     text = &text[close_open + '>'.len_utf8()..];
                     let from = TextSize::of(&res);
                     stack.push((from, attr));
@@ -223,7 +224,7 @@ pub fn add_cursor(text: &str, offset: TextSize) -> String {
 /// Annotations point to the last line that actually was long enough for the
 /// range, not counting annotations themselves. So overlapping annotations are
 /// possible:
-/// ```no_run
+/// ```text
 /// // stuff        other stuff
 /// // ^^ 'st'
 /// // ^^^^^ 'stuff'
@@ -304,7 +305,7 @@ fn extract_line_annotations(mut line: &str) -> Vec<LineAnnotation> {
         }
         let range = TextRange::at(offset, len.try_into().unwrap());
         let line_no_caret = &line[len..];
-        let end_marker = line_no_caret.find(|c| c == '$');
+        let end_marker = line_no_caret.find('$');
         let next = line_no_caret.find(marker).map_or(line.len(), |it| it + len);
 
         let cond = |end_marker| {
@@ -325,7 +326,7 @@ fn extract_line_annotations(mut line: &str) -> Vec<LineAnnotation> {
             content = &content["file".len()..];
         }
 
-        let content = content.trim_start().to_string();
+        let content = content.trim_start().to_owned();
 
         let annotation = if continuation {
             LineAnnotation::Continuation { offset: range.end(), content }
@@ -402,9 +403,10 @@ pub fn skip_slow_tests() -> bool {
 }
 
 /// Returns the path to the root directory of `rust-analyzer` project.
-pub fn project_root() -> PathBuf {
+pub fn project_root() -> Utf8PathBuf {
     let dir = env!("CARGO_MANIFEST_DIR");
-    PathBuf::from(dir).parent().unwrap().parent().unwrap().to_owned()
+    Utf8PathBuf::from_path_buf(PathBuf::from(dir).parent().unwrap().parent().unwrap().to_owned())
+        .unwrap()
 }
 
 pub fn format_diff(chunks: Vec<dissimilar::Chunk<'_>>) -> String {
@@ -424,7 +426,7 @@ pub fn format_diff(chunks: Vec<dissimilar::Chunk<'_>>) -> String {
 ///
 /// A benchmark test looks like this:
 ///
-/// ```
+/// ```ignore
 /// #[test]
 /// fn benchmark_foo() {
 ///     if skip_slow_tests() { return; }

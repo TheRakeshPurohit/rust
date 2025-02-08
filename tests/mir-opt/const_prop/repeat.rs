@@ -1,9 +1,11 @@
-// unit-test: ConstProp
+//@ test-mir-pass: GVN
 // EMIT_MIR_FOR_EACH_PANIC_STRATEGY
-// compile-flags: -Zmir-enable-passes=+NormalizeArrayLen
 // EMIT_MIR_FOR_EACH_BIT_WIDTH
 
-// EMIT_MIR repeat.main.ConstProp.diff
+// EMIT_MIR repeat.main.GVN.diff
 fn main() {
+    // CHECK-LABEL: fn main(
+    // CHECK: debug x => [[x:_.*]];
+    // CHECK: [[x]] = const 42_u32;
     let x: u32 = [42; 8][2] + 0;
 }

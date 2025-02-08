@@ -1,8 +1,8 @@
-// run-pass
-// needs-unwind
+//@ run-pass
+//@ needs-unwind
 
 #![allow(non_camel_case_types)]
-// ignore-emscripten no threads support
+//@ needs-threads
 
 use std::sync::mpsc::{channel, Sender};
 use std::thread;
@@ -21,9 +21,7 @@ impl Drop for complainer {
 
 fn complainer(tx: Sender<bool>) -> complainer {
     println!("Hello!");
-    complainer {
-        tx: tx
-    }
+    complainer { tx: tx }
 }
 
 fn f(tx: Sender<bool>) {
@@ -33,7 +31,7 @@ fn f(tx: Sender<bool>) {
 
 pub fn main() {
     let (tx, rx) = channel();
-    let t = thread::spawn(move|| f(tx.clone()));
+    let t = thread::spawn(move || f(tx.clone()));
     println!("hiiiiiiiii");
     assert!(rx.recv().unwrap());
     drop(t.join());

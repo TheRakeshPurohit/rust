@@ -1,20 +1,19 @@
-#![deny(rustc::untranslatable_diagnostic)]
-#![deny(rustc::diagnostic_outside_of_impl)]
-use crate::BorrowckInferCtxt;
 use rustc_index::IndexSlice;
 use rustc_infer::infer::NllRegionVariableOrigin;
 use rustc_middle::mir::visit::{MutVisitor, TyContext};
-use rustc_middle::mir::Constant;
-use rustc_middle::mir::{Body, Location, Promoted};
-use rustc_middle::ty::subst::SubstsRef;
-use rustc_middle::ty::{self, Ty, TyCtxt, TypeFoldable};
-use rustc_span::{Span, Symbol};
+use rustc_middle::mir::{Body, ConstOperand, Location, Promoted};
+use rustc_middle::ty::fold::fold_regions;
+use rustc_middle::ty::{self, GenericArgsRef, Ty, TyCtxt, TypeFoldable};
+use rustc_span::Symbol;
+use tracing::{debug, instrument};
+
+use crate::BorrowckInferCtxt;
 
 /// Replaces all free regions appearing in the MIR with fresh
 /// inference variables, returning the number of variables created.
 #[instrument(skip(infcx, body, promoted), level = "debug")]
-pub fn renumber_mir<'tcx>(
-    infcx: &BorrowckInferCtxt<'_, 'tcx>,
+pub(crate) fn renumber_mir<'tcx>(
+    infcx: &BorrowckInferCtxt<'tcx>,
     body: &mut Body<'tcx>,
     promoted: &mut IndexSlice<Promoted, Body<'tcx>>,
 ) {
@@ -29,21 +28,15 @@ pub fn renumber_mir<'tcx>(
     renumberer.visit_body(body);
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub(crate) enum BoundRegionInfo {
-    Name(Symbol),
-    Span(Span),
-}
-
+// The fields are used only for debugging output in `sccs_info`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub(crate) enum RegionCtxt {
     Location(Location),
     TyContext(TyContext),
     Free(Symbol),
-    Bound(BoundRegionInfo),
-    LateBound(BoundRegionInfo),
+    LateBound(Symbol),
     Existential(Option<Symbol>),
-    Placeholder(BoundRegionInfo),
+    Placeholder(Symbol),
     Unknown,
 }
 
@@ -63,7 +56,7 @@ impl RegionCtxt {
 }
 
 struct RegionRenumberer<'a, 'tcx> {
-    infcx: &'a BorrowckInferCtxt<'a, 'tcx>,
+    infcx: &'a BorrowckInferCtxt<'tcx>,
 }
 
 impl<'a, 'tcx> RegionRenumberer<'a, 'tcx> {
@@ -75,7 +68,7 @@ impl<'a, 'tcx> RegionRenumberer<'a, 'tcx> {
         F: Fn() -> RegionCtxt,
     {
         let origin = NllRegionVariableOrigin::Existential { from_forall: false };
-        self.infcx.tcx.fold_regions(value, |_region, _depth| {
+        fold_regions(self.infcx.tcx, value, |_region, _depth| {
             self.infcx.next_nll_region_var(origin, || region_ctxt_fn())
         })
     }
@@ -88,16 +81,20 @@ impl<'a, 'tcx> MutVisitor<'tcx> for RegionRenumberer<'a, 'tcx> {
 
     #[instrument(skip(self), level = "debug")]
     fn visit_ty(&mut self, ty: &mut Ty<'tcx>, ty_context: TyContext) {
+        if matches!(ty_context, TyContext::ReturnTy(_)) {
+            // We will renumber the return ty when called again with `TyContext::LocalDecl`
+            return;
+        }
         *ty = self.renumber_regions(*ty, || RegionCtxt::TyContext(ty_context));
 
         debug!(?ty);
     }
 
     #[instrument(skip(self), level = "debug")]
-    fn visit_substs(&mut self, substs: &mut SubstsRef<'tcx>, location: Location) {
-        *substs = self.renumber_regions(*substs, || RegionCtxt::Location(location));
+    fn visit_args(&mut self, args: &mut GenericArgsRef<'tcx>, location: Location) {
+        *args = self.renumber_regions(*args, || RegionCtxt::Location(location));
 
-        debug!(?substs);
+        debug!(?args);
     }
 
     #[instrument(skip(self), level = "debug")]
@@ -117,9 +114,9 @@ impl<'a, 'tcx> MutVisitor<'tcx> for RegionRenumberer<'a, 'tcx> {
     }
 
     #[instrument(skip(self), level = "debug")]
-    fn visit_constant(&mut self, constant: &mut Constant<'tcx>, location: Location) {
-        let literal = constant.literal;
-        constant.literal = self.renumber_regions(literal, || RegionCtxt::Location(location));
+    fn visit_const_operand(&mut self, constant: &mut ConstOperand<'tcx>, location: Location) {
+        let const_ = constant.const_;
+        constant.const_ = self.renumber_regions(const_, || RegionCtxt::Location(location));
         debug!("constant: {:#?}", constant);
     }
 }

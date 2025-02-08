@@ -1,12 +1,14 @@
 //! MIR lowering for places
 
+use crate::mir::MutBorrowKind;
+
 use super::*;
-use hir_def::{lang_item::lang_attr, FunctionId};
-use hir_expand::name;
+use hir_def::FunctionId;
+use intern::sym;
 
 macro_rules! not_supported {
-    ($x: expr) => {
-        return Err(MirLowerError::NotSupported(format!($x)))
+    ($it: expr) => {
+        return Err(MirLowerError::NotSupported(format!($it)))
     };
 }
 
@@ -18,7 +20,9 @@ impl MirLowerCtx<'_> {
     ) -> Result<Option<(Place, BasicBlockId)>> {
         let ty = self.expr_ty_without_adjust(expr_id);
         let place = self.temp(ty, prev_block, expr_id.into())?;
-        let Some(current) = self.lower_expr_to_place_without_adjust(expr_id, place.into(), prev_block)? else {
+        let Some(current) =
+            self.lower_expr_to_place_without_adjust(expr_id, place.into(), prev_block)?
+        else {
             return Ok(None);
         };
         Ok(Some((place.into(), current)))
@@ -32,10 +36,12 @@ impl MirLowerCtx<'_> {
     ) -> Result<Option<(Place, BasicBlockId)>> {
         let ty = adjustments
             .last()
-            .map(|x| x.target.clone())
+            .map(|it| it.target.clone())
             .unwrap_or_else(|| self.expr_ty_without_adjust(expr_id));
         let place = self.temp(ty, prev_block, expr_id.into())?;
-        let Some(current) = self.lower_expr_to_place_with_adjust(expr_id, place.into(), prev_block, adjustments)? else {
+        let Some(current) =
+            self.lower_expr_to_place_with_adjust(expr_id, place.into(), prev_block, adjustments)?
+        else {
             return Ok(None);
         };
         Ok(Some((place.into(), current)))
@@ -57,16 +63,17 @@ impl MirLowerCtx<'_> {
         if let Some((last, rest)) = adjustments.split_last() {
             match last.kind {
                 Adjust::Deref(None) => {
-                    let Some(mut x) = self.lower_expr_as_place_with_adjust(
+                    let Some(mut it) = self.lower_expr_as_place_with_adjust(
                         current,
                         expr_id,
                         upgrade_rvalue,
                         rest,
-                    )? else {
+                    )?
+                    else {
                         return Ok(None);
                     };
-                    x.0 = x.0.project(ProjectionElem::Deref);
-                    Ok(Some(x))
+                    it.0 = it.0.project(ProjectionElem::Deref, &mut self.result.projection_store);
+                    Ok(Some(it))
                 }
                 Adjust::Deref(Some(od)) => {
                     let Some((r, current)) = self.lower_expr_as_place_with_adjust(
@@ -74,14 +81,15 @@ impl MirLowerCtx<'_> {
                         expr_id,
                         upgrade_rvalue,
                         rest,
-                    )? else {
+                    )?
+                    else {
                         return Ok(None);
                     };
                     self.lower_overloaded_deref(
                         current,
                         r,
                         rest.last()
-                            .map(|x| x.target.clone())
+                            .map(|it| it.target.clone())
                             .unwrap_or_else(|| self.expr_ty_without_adjust(expr_id)),
                         last.target.clone(),
                         expr_id.into(),
@@ -127,8 +135,13 @@ impl MirLowerCtx<'_> {
         };
         match &self.body.exprs[expr_id] {
             Expr::Path(p) => {
-                let resolver = resolver_for_expr(self.db.upcast(), self.owner, expr_id);
-                let Some(pr) = resolver.resolve_path_in_value_ns_fully(self.db.upcast(), p) else {
+                let resolver_guard =
+                    self.resolver.update_to_inner_scope(self.db.upcast(), self.owner, expr_id);
+                let hygiene = self.body.expr_path_hygiene(expr_id);
+                let resolved =
+                    self.resolver.resolve_path_in_value_ns_fully(self.db.upcast(), p, hygiene);
+                self.resolver.reset_to_guard(resolver_guard);
+                let Some(pr) = resolved else {
                     return try_rvalue(self);
                 };
                 match pr {
@@ -142,64 +155,65 @@ impl MirLowerCtx<'_> {
                         let temp: Place = self.temp(ref_ty, current, expr_id.into())?.into();
                         self.push_assignment(
                             current,
-                            temp.clone(),
+                            temp,
                             Operand::Static(s).into(),
                             expr_id.into(),
                         );
-                        Ok(Some((temp.project(ProjectionElem::Deref), current)))
+                        Ok(Some((
+                            temp.project(ProjectionElem::Deref, &mut self.result.projection_store),
+                            current,
+                        )))
                     }
                     _ => try_rvalue(self),
                 }
             }
-            Expr::UnaryOp { expr, op } => match op {
-                hir_def::hir::UnaryOp::Deref => {
-                    let is_builtin = match self.expr_ty_without_adjust(*expr).kind(Interner) {
-                        TyKind::Ref(..) | TyKind::Raw(..) => true,
-                        TyKind::Adt(id, _) => {
-                            if let Some(lang_item) = lang_attr(self.db.upcast(), id.0) {
-                                lang_item == LangItem::OwnedBox
-                            } else {
-                                false
-                            }
+            Expr::UnaryOp { expr, op: hir_def::hir::UnaryOp::Deref } => {
+                let is_builtin = match self.expr_ty_without_adjust(*expr).kind(Interner) {
+                    TyKind::Ref(..) | TyKind::Raw(..) => true,
+                    TyKind::Adt(id, _) => {
+                        if let Some(lang_item) = self.db.lang_attr(id.0.into()) {
+                            lang_item == LangItem::OwnedBox
+                        } else {
+                            false
                         }
-                        _ => false,
-                    };
-                    if !is_builtin {
-                        let Some((p, current)) = self.lower_expr_as_place(current, *expr, true)? else {
-                            return Ok(None);
-                        };
-                        return self.lower_overloaded_deref(
-                            current,
-                            p,
-                            self.expr_ty_after_adjustments(*expr),
-                            self.expr_ty_without_adjust(expr_id),
-                            expr_id.into(),
-                            'b: {
-                                if let Some((f, _)) = self.infer.method_resolution(expr_id) {
-                                    if let Some(deref_trait) =
-                                        self.resolve_lang_item(LangItem::DerefMut)?.as_trait()
-                                    {
-                                        if let Some(deref_fn) = self
-                                            .db
-                                            .trait_data(deref_trait)
-                                            .method_by_name(&name![deref_mut])
-                                        {
-                                            break 'b deref_fn == f;
-                                        }
-                                    }
-                                }
-                                false
-                            },
-                        );
                     }
-                    let Some((mut r, current)) = self.lower_expr_as_place(current, *expr, true)? else {
+                    _ => false,
+                };
+                if !is_builtin {
+                    let Some((p, current)) = self.lower_expr_as_place(current, *expr, true)? else {
                         return Ok(None);
                     };
-                    r = r.project(ProjectionElem::Deref);
-                    Ok(Some((r, current)))
+                    return self.lower_overloaded_deref(
+                        current,
+                        p,
+                        self.expr_ty_after_adjustments(*expr),
+                        self.expr_ty_without_adjust(expr_id),
+                        expr_id.into(),
+                        'b: {
+                            if let Some((f, _)) = self.infer.method_resolution(expr_id) {
+                                if let Some(deref_trait) =
+                                    self.resolve_lang_item(LangItem::DerefMut)?.as_trait()
+                                {
+                                    if let Some(deref_fn) =
+                                        self.db.trait_data(deref_trait).method_by_name(
+                                            &Name::new_symbol_root(sym::deref_mut.clone()),
+                                        )
+                                    {
+                                        break 'b deref_fn == f;
+                                    }
+                                }
+                            }
+                            false
+                        },
+                    );
                 }
-                _ => try_rvalue(self),
-            },
+                let Some((mut r, current)) = self.lower_expr_as_place(current, *expr, true)? else {
+                    return Ok(None);
+                };
+                r = r.project(ProjectionElem::Deref, &mut self.result.projection_store);
+                Ok(Some((r, current)))
+            }
+            Expr::UnaryOp { .. } => try_rvalue(self),
             Expr::Field { expr, .. } => {
                 let Some((mut r, current)) = self.lower_expr_as_place(current, *expr, true)? else {
                     return Ok(None);
@@ -217,12 +231,18 @@ impl MirLowerCtx<'_> {
                     )
                 {
                     let Some(index_fn) = self.infer.method_resolution(expr_id) else {
-                        return Err(MirLowerError::UnresolvedMethod("[overloaded index]".to_string()));
+                        return Err(MirLowerError::UnresolvedMethod(
+                            "[overloaded index]".to_owned(),
+                        ));
                     };
-                    let Some((base_place, current)) = self.lower_expr_as_place(current, *base, true)? else {
+                    let Some((base_place, current)) =
+                        self.lower_expr_as_place(current, *base, true)?
+                    else {
                         return Ok(None);
                     };
-                    let Some((index_operand, current)) = self.lower_expr_to_some_operand(*index, current)? else {
+                    let Some((index_operand, current)) =
+                        self.lower_expr_to_some_operand(*index, current)?
+                    else {
                         return Ok(None);
                     };
                     return self.lower_overloaded_index(
@@ -239,8 +259,8 @@ impl MirLowerCtx<'_> {
                     .infer
                     .expr_adjustments
                     .get(base)
-                    .and_then(|x| x.split_last())
-                    .map(|x| x.1)
+                    .and_then(|it| it.split_last())
+                    .map(|it| it.1)
                     .unwrap_or(&[]);
                 let Some((mut p_base, current)) =
                     self.lower_expr_as_place_with_adjust(current, *base, true, adjusts)?
@@ -249,10 +269,12 @@ impl MirLowerCtx<'_> {
                 };
                 let l_index =
                     self.temp(self.expr_ty_after_adjustments(*index), current, expr_id.into())?;
-                let Some(current) = self.lower_expr_to_place(*index, l_index.into(), current)? else {
+                let Some(current) = self.lower_expr_to_place(*index, l_index.into(), current)?
+                else {
                     return Ok(None);
                 };
-                p_base = p_base.project(ProjectionElem::Index(l_index));
+                p_base = p_base
+                    .project(ProjectionElem::Index(l_index), &mut self.result.projection_store);
                 Ok(Some((p_base, current)))
             }
             _ => try_rvalue(self),
@@ -273,7 +295,7 @@ impl MirLowerCtx<'_> {
             Some((_, _, mutability)) => mutability,
             None => Mutability::Not,
         };
-        let result_ref = TyKind::Ref(mutability, static_lifetime(), result_ty).intern(Interner);
+        let result_ref = TyKind::Ref(mutability, error_lifetime(), result_ty).intern(Interner);
         let mut result: Place = self.temp(result_ref, current, span)?.into();
         let index_fn_op = Operand::const_zst(
             TyKind::FnDef(
@@ -282,10 +304,18 @@ impl MirLowerCtx<'_> {
             )
             .intern(Interner),
         );
-        let Some(current) = self.lower_call(index_fn_op, Box::new([Operand::Copy(place), index_operand]), result.clone(), current, false, span)? else {
+        let Some(current) = self.lower_call(
+            index_fn_op,
+            Box::new([Operand::Copy(place), index_operand]),
+            result,
+            current,
+            false,
+            span,
+        )?
+        else {
             return Ok(None);
         };
-        result = result.project(ProjectionElem::Deref);
+        result = result.project(ProjectionElem::Deref, &mut self.result.projection_store);
         Ok(Some((result, current)))
     }
 
@@ -299,19 +329,24 @@ impl MirLowerCtx<'_> {
         mutability: bool,
     ) -> Result<Option<(Place, BasicBlockId)>> {
         let (chalk_mut, trait_lang_item, trait_method_name, borrow_kind) = if !mutability {
-            (Mutability::Not, LangItem::Deref, name![deref], BorrowKind::Shared)
+            (
+                Mutability::Not,
+                LangItem::Deref,
+                Name::new_symbol_root(sym::deref.clone()),
+                BorrowKind::Shared,
+            )
         } else {
             (
                 Mutability::Mut,
                 LangItem::DerefMut,
-                name![deref_mut],
-                BorrowKind::Mut { allow_two_phase_borrow: false },
+                Name::new_symbol_root(sym::deref_mut.clone()),
+                BorrowKind::Mut { kind: MutBorrowKind::Default },
             )
         };
-        let ty_ref = TyKind::Ref(chalk_mut, static_lifetime(), source_ty.clone()).intern(Interner);
-        let target_ty_ref = TyKind::Ref(chalk_mut, static_lifetime(), target_ty).intern(Interner);
+        let ty_ref = TyKind::Ref(chalk_mut, error_lifetime(), source_ty.clone()).intern(Interner);
+        let target_ty_ref = TyKind::Ref(chalk_mut, error_lifetime(), target_ty).intern(Interner);
         let ref_place: Place = self.temp(ty_ref, current, span)?.into();
-        self.push_assignment(current, ref_place.clone(), Rvalue::Ref(borrow_kind, place), span);
+        self.push_assignment(current, ref_place, Rvalue::Ref(borrow_kind, place), span);
         let deref_trait = self
             .resolve_lang_item(trait_lang_item)?
             .as_trait()
@@ -329,10 +364,18 @@ impl MirLowerCtx<'_> {
             .intern(Interner),
         );
         let mut result: Place = self.temp(target_ty_ref, current, span)?.into();
-        let Some(current) = self.lower_call(deref_fn_op, Box::new([Operand::Copy(ref_place)]), result.clone(), current, false, span)? else {
+        let Some(current) = self.lower_call(
+            deref_fn_op,
+            Box::new([Operand::Copy(ref_place)]),
+            result,
+            current,
+            false,
+            span,
+        )?
+        else {
             return Ok(None);
         };
-        result = result.project(ProjectionElem::Deref);
+        result = result.project(ProjectionElem::Deref, &mut self.result.projection_store);
         Ok(Some((result, current)))
     }
 }

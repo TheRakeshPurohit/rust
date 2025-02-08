@@ -1,6 +1,4 @@
-// aux-build:consts.rs
-
-#![warn(indirect_structural_match)]
+//@ aux-build:consts.rs
 
 extern crate consts;
 
@@ -11,15 +9,13 @@ fn main() {
     let _ = Defaulted;
     match None {
         consts::SOME => panic!(),
-        //~^ must be annotated with `#[derive(PartialEq, Eq)]`
-
+        //~^ ERROR constant of non-structural type `CustomEq` in a pattern
         _ => {}
     }
 
     match None {
         <Defaulted as consts::AssocConst>::SOME  => panic!(),
-        //~^ must be annotated with `#[derive(PartialEq, Eq)]`
-
+        //~^ ERROR constant of non-structural type `CustomEq` in a pattern
         _ => {}
     }
 }

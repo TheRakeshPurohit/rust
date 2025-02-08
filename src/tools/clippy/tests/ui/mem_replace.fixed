@@ -1,8 +1,5 @@
-//@run-rustfix
-
-#![allow(unused)]
+#![allow(unused, clippy::needless_lifetimes)]
 #![warn(
-    clippy::all,
     clippy::style,
     clippy::mem_replace_option_with_none,
     clippy::mem_replace_with_default
@@ -71,6 +68,14 @@ fn dont_lint_primitive() {
 
     let mut pint = 5;
     let _ = std::mem::replace(&mut pint, 0);
+}
+
+// lint is disabled for expressions that are not used because changing to `take` is not the
+// recommended fix. Additionally, the `replace` is #[must_use], so that lint will provide
+// the correct suggestion
+fn dont_lint_not_used() {
+    let mut s = String::from("foo");
+    std::mem::replace(&mut s, String::default());
 }
 
 fn main() {

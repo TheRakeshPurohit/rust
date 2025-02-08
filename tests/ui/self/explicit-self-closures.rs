@@ -1,8 +1,7 @@
-// build-pass (FIXME(62277): could be check-pass?)
+//@ build-pass (FIXME(62277): could be check-pass?)
 #![allow(dead_code)]
 // Test to make sure that explicit self params work inside closures
 
-// pretty-expanded FIXME #23616
 
 struct Box {
     x: usize

@@ -1,3 +1,7 @@
+//@ revisions: current next
+//@[next] compile-flags: -Znext-solver
+//@ ignore-compare-mode-next-solver (explicit revisions)
+
 //! Regression test for https://github.com/rust-lang/rust/issues/62211
 //!
 //! The old implementation of defaults did not check whether the provided

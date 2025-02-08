@@ -1,8 +1,8 @@
-// run-pass
+//@ run-pass
 #![allow(dead_code)]
 #![allow(non_camel_case_types)]
 
-// aux-build:cci_class_trait.rs
+//@ aux-build:cci_class_trait.rs
 extern crate cci_class_trait;
 use cci_class_trait::animals::noisy;
 
@@ -53,7 +53,7 @@ fn cat(in_x : usize, in_y : isize, in_name: String) -> cat {
 pub fn main() {
   let mut nyan = cat(0_usize, 2, "nyan".to_string());
   nyan.eat();
-  assert!((!nyan.eat()));
+  assert!(!nyan.eat());
   for _ in 1_usize..10_usize { nyan.speak(); };
-  assert!((nyan.eat()));
+  assert!(nyan.eat());
 }

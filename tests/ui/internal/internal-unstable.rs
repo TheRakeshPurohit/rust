@@ -1,4 +1,4 @@
-// aux-build:internal_unstable.rs
+//@ aux-build:internal_unstable.rs
 
 #![feature(allow_internal_unstable)]
 #[allow(dead_code)]
@@ -8,7 +8,6 @@ extern crate internal_unstable;
 
 struct Baz {
     #[allow_internal_unstable]
-    //^ WARN `#[allow_internal_unstable]` is ignored on struct fields and match arms
     baz: u8,
 }
 
@@ -27,6 +26,14 @@ macro_rules! bar {
              internal_unstable::unstable());
         internal_unstable::unstable();
     }}
+}
+
+#[allow_internal_unstable(stmt_expr_attributes)]
+macro_rules! internal_attr {
+    ($e: expr) => {
+        #[allow(overflowing_literals)]
+        $e
+    }
 }
 
 fn main() {
@@ -50,7 +57,8 @@ fn main() {
 
     match true {
         #[allow_internal_unstable]
-        //^ WARN `#[allow_internal_unstable]` is ignored on struct fields and match arms
         _ => {}
     }
+
+    assert_eq!(internal_attr!(1e100_f32), f32::INFINITY);
 }

@@ -1,10 +1,9 @@
-// compile-flags: -O -C debuginfo=0 -Zmir-opt-level=2
-// only-64bit
-// ignore-debug
+// skip-filecheck
+//@ compile-flags: -O -C debuginfo=0 -Zmir-opt-level=2
 
 // Checks that we do not have any branches in the MIR for the two tested functions.
 
-// compile-flags: -Cpanic=abort
+//@ compile-flags: -Cpanic=abort
 #![feature(core_intrinsics)]
 #![crate_type = "lib"]
 
@@ -12,7 +11,6 @@
 pub fn f_unit() {
     f_dispatch(());
 }
-
 
 // EMIT_MIR intrinsics.f_u64.PreCodegen.after.mir
 pub fn f_u64() {
@@ -29,8 +27,7 @@ pub fn f_dispatch<T>(t: T) {
 }
 
 #[inline(never)]
-pub fn f_zst<T>(_t: T) {
-}
+pub fn f_zst<T>(_t: T) {}
 
 #[inline(never)]
 pub fn f_non_zst<T>(_t: T) {}

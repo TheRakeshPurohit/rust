@@ -1,6 +1,4 @@
-// check-pass
-
-#![feature(lint_reasons)]
+//@ check-pass
 
 fn expect_early_pass_lints() {
     #[expect(while_true)]

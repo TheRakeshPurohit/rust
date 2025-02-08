@@ -1,10 +1,5 @@
-// run-pass
-#![allow(stable_features)]
-
-// ignore-emscripten no processes
-// ignore-sgx no processes
-
-#![feature(os)]
+//@ run-pass
+//@ needs-subprocess
 
 #[cfg(unix)]
 fn main() {

@@ -53,7 +53,7 @@
 //! ## Synchronization
 //!
 //! There is some synchronization needed in order for the compiler to be able to
-//! determine whether a given private session directory is not in used any more.
+//! determine whether a given private session directory is not in use any more.
 //! This is done by creating a lock file for each session directory and
 //! locking it while the directory is still being used. Since file locks have
 //! operating system support, we can rely on the lock being released if the
@@ -103,22 +103,25 @@
 //! unsupported file system and emit a warning in that case. This is not yet
 //! implemented.
 
-use crate::errors;
-use rustc_data_structures::fx::{FxHashSet, FxIndexSet};
-use rustc_data_structures::svh::Svh;
-use rustc_data_structures::unord::{UnordMap, UnordSet};
-use rustc_data_structures::{base_n, flock};
-use rustc_errors::ErrorGuaranteed;
-use rustc_fs_util::{link_or_copy, try_canonicalize, LinkOrCopy};
-use rustc_session::{Session, StableCrateId};
-use rustc_span::Symbol;
-
 use std::fs as std_fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rand::{thread_rng, RngCore};
+use rand::{RngCore, thread_rng};
+use rustc_data_structures::base_n::{BaseNString, CASE_INSENSITIVE, ToBaseN};
+use rustc_data_structures::fx::{FxHashSet, FxIndexSet};
+use rustc_data_structures::svh::Svh;
+use rustc_data_structures::unord::{UnordMap, UnordSet};
+use rustc_data_structures::{base_n, flock};
+use rustc_fs_util::{LinkOrCopy, link_or_copy, try_canonicalize};
+use rustc_middle::bug;
+use rustc_session::config::CrateType;
+use rustc_session::output::{collect_crate_types, find_crate_name};
+use rustc_session::{Session, StableCrateId};
+use tracing::debug;
+
+use crate::errors;
 
 #[cfg(test)]
 mod tests;
@@ -136,30 +139,36 @@ const QUERY_CACHE_FILENAME: &str = "query-cache.bin";
 const INT_ENCODE_BASE: usize = base_n::CASE_INSENSITIVE;
 
 /// Returns the path to a session's dependency graph.
-pub fn dep_graph_path(sess: &Session) -> PathBuf {
+pub(crate) fn dep_graph_path(sess: &Session) -> PathBuf {
     in_incr_comp_dir_sess(sess, DEP_GRAPH_FILENAME)
 }
+
 /// Returns the path to a session's staging dependency graph.
 ///
 /// On the difference between dep-graph and staging dep-graph,
 /// see `build_dep_graph`.
-pub fn staging_dep_graph_path(sess: &Session) -> PathBuf {
+pub(crate) fn staging_dep_graph_path(sess: &Session) -> PathBuf {
     in_incr_comp_dir_sess(sess, STAGING_DEP_GRAPH_FILENAME)
 }
-pub fn work_products_path(sess: &Session) -> PathBuf {
+
+pub(crate) fn work_products_path(sess: &Session) -> PathBuf {
     in_incr_comp_dir_sess(sess, WORK_PRODUCTS_FILENAME)
 }
+
 /// Returns the path to a session's query cache.
-pub fn query_cache_path(sess: &Session) -> PathBuf {
+pub(crate) fn query_cache_path(sess: &Session) -> PathBuf {
     in_incr_comp_dir_sess(sess, QUERY_CACHE_FILENAME)
 }
 
 /// Locks a given session directory.
-pub fn lock_file_path(session_dir: &Path) -> PathBuf {
+fn lock_file_path(session_dir: &Path) -> PathBuf {
     let crate_dir = session_dir.parent().unwrap();
 
-    let directory_name = session_dir.file_name().unwrap().to_string_lossy();
-    assert_no_characters_lost(&directory_name);
+    let directory_name = session_dir
+        .file_name()
+        .unwrap()
+        .to_str()
+        .expect("malformed session dir name: contains non-Unicode characters");
 
     let dash_indices: Vec<_> = directory_name.match_indices('-').map(|(idx, _)| idx).collect();
     if dash_indices.len() != 3 {
@@ -202,13 +211,9 @@ pub fn in_incr_comp_dir(incr_comp_session_dir: &Path, file_name: &str) -> PathBu
 /// The garbage collection will take care of it.
 ///
 /// [`rustc_interface::queries::dep_graph`]: ../../rustc_interface/struct.Queries.html#structfield.dep_graph
-pub fn prepare_session_directory(
-    sess: &Session,
-    crate_name: Symbol,
-    stable_crate_id: StableCrateId,
-) -> Result<(), ErrorGuaranteed> {
+pub(crate) fn prepare_session_directory(sess: &Session) {
     if sess.opts.incremental.is_none() {
-        return Ok(());
+        return;
     }
 
     let _timer = sess.timer("incr_comp_prepare_session_directory");
@@ -216,9 +221,9 @@ pub fn prepare_session_directory(
     debug!("prepare_session_directory");
 
     // {incr-comp-dir}/{crate-name-and-disambiguator}
-    let crate_dir = crate_path(sess, crate_name, stable_crate_id);
+    let crate_dir = crate_path(sess);
     debug!("crate-dir: {}", crate_dir.display());
-    create_dir(sess, &crate_dir, "crate")?;
+    create_dir(sess, &crate_dir, "crate");
 
     // Hack: canonicalize the path *after creating the directory*
     // because, on windows, long paths can cause problems;
@@ -227,7 +232,7 @@ pub fn prepare_session_directory(
     let crate_dir = match try_canonicalize(&crate_dir) {
         Ok(v) => v,
         Err(err) => {
-            return Err(sess.emit_err(errors::CanonicalizePath { path: crate_dir, err }));
+            sess.dcx().emit_fatal(errors::CanonicalizePath { path: crate_dir, err });
         }
     };
 
@@ -242,11 +247,11 @@ pub fn prepare_session_directory(
 
         // Lock the new session directory. If this fails, return an
         // error without retrying
-        let (directory_lock, lock_file_path) = lock_directory(sess, &session_dir)?;
+        let (directory_lock, lock_file_path) = lock_directory(sess, &session_dir);
 
         // Now that we have the lock, we can actually create the session
         // directory
-        create_dir(sess, &session_dir, "session")?;
+        create_dir(sess, &session_dir, "session");
 
         // Find a suitable source directory to copy from. Ignore those that we
         // have already tried before.
@@ -259,8 +264,8 @@ pub fn prepare_session_directory(
                     directory."
             );
 
-            sess.init_incr_comp_session(session_dir, directory_lock, false);
-            return Ok(());
+            sess.init_incr_comp_session(session_dir, directory_lock);
+            return;
         };
 
         debug!("attempting to copy data from source: {}", source_directory.display());
@@ -270,11 +275,11 @@ pub fn prepare_session_directory(
             debug!("successfully copied data from: {}", source_directory.display());
 
             if !allows_links {
-                sess.emit_warning(errors::HardLinkFailed { path: &session_dir });
+                sess.dcx().emit_warn(errors::HardLinkFailed { path: &session_dir });
             }
 
-            sess.init_incr_comp_session(session_dir, directory_lock, true);
-            return Ok(());
+            sess.init_incr_comp_session(session_dir, directory_lock);
+            return;
         } else {
             debug!("copying failed - trying next directory");
 
@@ -285,7 +290,7 @@ pub fn prepare_session_directory(
             // Try to remove the session directory we just allocated. We don't
             // know if there's any garbage in it from the failed copy action.
             if let Err(err) = safe_remove_dir_all(&session_dir) {
-                sess.emit_warning(errors::DeletePartial { path: &session_dir, err });
+                sess.dcx().emit_warn(errors::DeletePartial { path: &session_dir, err });
             }
 
             delete_session_dir_lock_file(sess, &lock_file_path);
@@ -309,7 +314,7 @@ pub fn finalize_session_directory(sess: &Session, svh: Option<Svh>) {
 
     let incr_comp_session_dir: PathBuf = sess.incr_comp_session_dir().clone();
 
-    if let Some(_) = sess.has_errors_or_delayed_span_bugs() {
+    if sess.dcx().has_errors_or_delayed_bugs().is_some() {
         // If there have been any errors during compilation, we don't want to
         // publish this session directory. Rather, we'll just delete it.
 
@@ -319,7 +324,7 @@ pub fn finalize_session_directory(sess: &Session, svh: Option<Svh>) {
         );
 
         if let Err(err) = safe_remove_dir_all(&*incr_comp_session_dir) {
-            sess.emit_warning(errors::DeleteFull { path: &incr_comp_session_dir, err });
+            sess.dcx().emit_warn(errors::DeleteFull { path: &incr_comp_session_dir, err });
         }
 
         let lock_file_path = lock_file_path(&*incr_comp_session_dir);
@@ -329,28 +334,24 @@ pub fn finalize_session_directory(sess: &Session, svh: Option<Svh>) {
 
     debug!("finalize_session_directory() - session directory: {}", incr_comp_session_dir.display());
 
-    let old_sub_dir_name = incr_comp_session_dir.file_name().unwrap().to_string_lossy();
-    assert_no_characters_lost(&old_sub_dir_name);
+    let mut sub_dir_name = incr_comp_session_dir
+        .file_name()
+        .unwrap()
+        .to_str()
+        .expect("malformed session dir name: contains non-Unicode characters")
+        .to_string();
 
-    // Keep the 's-{timestamp}-{random-number}' prefix, but replace the
-    // '-working' part with the SVH of the crate
-    let dash_indices: Vec<_> = old_sub_dir_name.match_indices('-').map(|(idx, _)| idx).collect();
-    if dash_indices.len() != 3 {
-        bug!(
-            "Encountered incremental compilation session directory with \
-              malformed name: {}",
-            incr_comp_session_dir.display()
-        )
-    }
+    // Keep the 's-{timestamp}-{random-number}' prefix, but replace "working" with the SVH of the crate
+    sub_dir_name.truncate(sub_dir_name.len() - "working".len());
+    // Double-check that we kept this: "s-{timestamp}-{random-number}-"
+    assert!(sub_dir_name.ends_with('-'), "{:?}", sub_dir_name);
+    assert!(sub_dir_name.as_bytes().iter().filter(|b| **b == b'-').count() == 3);
 
-    // State: "s-{timestamp}-{random-number}-"
-    let mut new_sub_dir_name = String::from(&old_sub_dir_name[..=dash_indices[2]]);
-
-    // Append the svh
-    base_n::push_str(svh.as_u128(), INT_ENCODE_BASE, &mut new_sub_dir_name);
+    // Append the SVH
+    sub_dir_name.push_str(&svh.as_u128().to_base_fixed_len(CASE_INSENSITIVE));
 
     // Create the full path
-    let new_path = incr_comp_session_dir.parent().unwrap().join(new_sub_dir_name);
+    let new_path = incr_comp_session_dir.parent().unwrap().join(&*sub_dir_name);
     debug!("finalize_session_directory() - new path: {}", new_path.display());
 
     match rename_path_with_retry(&*incr_comp_session_dir, &new_path, 3) {
@@ -362,7 +363,7 @@ pub fn finalize_session_directory(sess: &Session, svh: Option<Svh>) {
         }
         Err(e) => {
             // Warn about the error. However, no need to abort compilation now.
-            sess.emit_warning(errors::Finalize { path: &incr_comp_session_dir, err: e });
+            sess.dcx().emit_warn(errors::Finalize { path: &incr_comp_session_dir, err: e });
 
             debug!("finalize_session_directory() - error, marking as invalid");
             // Drop the file lock, so we can garage collect
@@ -373,7 +374,7 @@ pub fn finalize_session_directory(sess: &Session, svh: Option<Svh>) {
     let _ = garbage_collect_session_directories(sess);
 }
 
-pub fn delete_all_session_dir_contents(sess: &Session) -> io::Result<()> {
+pub(crate) fn delete_all_session_dir_contents(sess: &Session) -> io::Result<()> {
     let sess_dir_iterator = sess.incr_comp_session_dir().read_dir()?;
     for entry in sess_dir_iterator {
         let entry = entry?;
@@ -427,13 +428,11 @@ fn copy_files(sess: &Session, target_dir: &Path, source_dir: &Path) -> Result<bo
     if sess.opts.unstable_opts.incremental_info {
         eprintln!(
             "[incremental] session directory: \
-                  {} files hard-linked",
-            files_linked
+                  {files_linked} files hard-linked"
         );
         eprintln!(
             "[incremental] session directory: \
-                 {} files copied",
-            files_copied
+                 {files_copied} files copied"
         );
     }
 
@@ -448,32 +447,28 @@ fn generate_session_dir_path(crate_dir: &Path) -> PathBuf {
     let random_number = thread_rng().next_u32();
     debug!("generate_session_dir_path: random_number = {}", random_number);
 
-    let directory_name = format!(
-        "s-{}-{}-working",
-        timestamp,
-        base_n::encode(random_number as u128, INT_ENCODE_BASE)
-    );
+    // Chop the first 3 characters off the timestamp. Those 3 bytes will be zero for a while.
+    let (zeroes, timestamp) = timestamp.split_at(3);
+    assert_eq!(zeroes, "000");
+    let directory_name =
+        format!("s-{}-{}-working", timestamp, random_number.to_base_fixed_len(CASE_INSENSITIVE));
     debug!("generate_session_dir_path: directory_name = {}", directory_name);
     let directory_path = crate_dir.join(directory_name);
     debug!("generate_session_dir_path: directory_path = {}", directory_path.display());
     directory_path
 }
 
-fn create_dir(sess: &Session, path: &Path, dir_tag: &str) -> Result<(), ErrorGuaranteed> {
+fn create_dir(sess: &Session, path: &Path, dir_tag: &str) {
     match std_fs::create_dir_all(path) {
         Ok(()) => {
             debug!("{} directory created successfully", dir_tag);
-            Ok(())
         }
-        Err(err) => Err(sess.emit_err(errors::CreateIncrCompDir { tag: dir_tag, path, err })),
+        Err(err) => sess.dcx().emit_fatal(errors::CreateIncrCompDir { tag: dir_tag, path, err }),
     }
 }
 
 /// Allocate the lock-file and lock it.
-fn lock_directory(
-    sess: &Session,
-    session_dir: &Path,
-) -> Result<(flock::Lock, PathBuf), ErrorGuaranteed> {
+fn lock_directory(sess: &Session, session_dir: &Path) -> (flock::Lock, PathBuf) {
     let lock_file_path = lock_file_path(session_dir);
     debug!("lock_directory() - lock_file: {}", lock_file_path.display());
 
@@ -484,22 +479,22 @@ fn lock_directory(
         true,
     ) {
         // the lock should be exclusive
-        Ok(lock) => Ok((lock, lock_file_path)),
+        Ok(lock) => (lock, lock_file_path),
         Err(lock_err) => {
-            let is_unsupported_lock = flock::Lock::error_unsupported(&lock_err).then_some(());
-            Err(sess.emit_err(errors::CreateLock {
+            let is_unsupported_lock = flock::Lock::error_unsupported(&lock_err);
+            sess.dcx().emit_fatal(errors::CreateLock {
                 lock_err,
                 session_dir,
                 is_unsupported_lock,
-                is_cargo: std::env::var_os("CARGO").map(|_| ()),
-            }))
+                is_cargo: rustc_session::utils::was_invoked_from_cargo(),
+            });
         }
     }
 }
 
 fn delete_session_dir_lock_file(sess: &Session, lock_file_path: &Path) {
-    if let Err(err) = safe_remove_file(&lock_file_path) {
-        sess.emit_warning(errors::DeleteLock { path: lock_file_path, err });
+    if let Err(err) = safe_remove_file(lock_file_path) {
+        sess.dcx().emit_warn(errors::DeleteLock { path: lock_file_path, err });
     }
 }
 
@@ -529,8 +524,10 @@ where
     for session_dir in iter {
         debug!("find_source_directory_in_iter - inspecting `{}`", session_dir.display());
 
-        let directory_name = session_dir.file_name().unwrap().to_string_lossy();
-        assert_no_characters_lost(&directory_name);
+        let Some(directory_name) = session_dir.file_name().unwrap().to_str() else {
+            debug!("find_source_directory_in_iter - ignoring");
+            continue;
+        };
 
         if source_directories_already_tried.contains(&session_dir)
             || !is_session_directory(&directory_name)
@@ -540,9 +537,13 @@ where
             continue;
         }
 
-        let timestamp = extract_timestamp_from_session_dir(&directory_name).unwrap_or_else(|_| {
-            bug!("unexpected incr-comp session dir: {}", session_dir.display())
-        });
+        let timestamp = match extract_timestamp_from_session_dir(&directory_name) {
+            Ok(timestamp) => timestamp,
+            Err(e) => {
+                debug!("unexpected incr-comp session dir: {}: {}", session_dir.display(), e);
+                continue;
+            }
+        };
 
         if timestamp > best_candidate.0 {
             best_candidate = (timestamp, Some(session_dir.clone()));
@@ -564,54 +565,50 @@ fn is_session_directory_lock_file(file_name: &str) -> bool {
     file_name.starts_with("s-") && file_name.ends_with(LOCK_FILE_EXT)
 }
 
-fn extract_timestamp_from_session_dir(directory_name: &str) -> Result<SystemTime, ()> {
+fn extract_timestamp_from_session_dir(directory_name: &str) -> Result<SystemTime, &'static str> {
     if !is_session_directory(directory_name) {
-        return Err(());
+        return Err("not a directory");
     }
 
     let dash_indices: Vec<_> = directory_name.match_indices('-').map(|(idx, _)| idx).collect();
     if dash_indices.len() != 3 {
-        return Err(());
+        return Err("not three dashes in name");
     }
 
     string_to_timestamp(&directory_name[dash_indices[0] + 1..dash_indices[1]])
 }
 
-fn timestamp_to_string(timestamp: SystemTime) -> String {
+fn timestamp_to_string(timestamp: SystemTime) -> BaseNString {
     let duration = timestamp.duration_since(UNIX_EPOCH).unwrap();
-    let micros = duration.as_secs() * 1_000_000 + (duration.subsec_nanos() as u64) / 1000;
-    base_n::encode(micros as u128, INT_ENCODE_BASE)
+    let micros: u64 = duration.as_micros().try_into().unwrap();
+    micros.to_base_fixed_len(CASE_INSENSITIVE)
 }
 
-fn string_to_timestamp(s: &str) -> Result<SystemTime, ()> {
-    let micros_since_unix_epoch = u64::from_str_radix(s, INT_ENCODE_BASE as u32);
+fn string_to_timestamp(s: &str) -> Result<SystemTime, &'static str> {
+    let micros_since_unix_epoch = match u64::from_str_radix(s, INT_ENCODE_BASE as u32) {
+        Ok(micros) => micros,
+        Err(_) => return Err("timestamp not an int"),
+    };
 
-    if micros_since_unix_epoch.is_err() {
-        return Err(());
-    }
-
-    let micros_since_unix_epoch = micros_since_unix_epoch.unwrap();
-
-    let duration = Duration::new(
-        micros_since_unix_epoch / 1_000_000,
-        1000 * (micros_since_unix_epoch % 1_000_000) as u32,
-    );
+    let duration = Duration::from_micros(micros_since_unix_epoch);
     Ok(UNIX_EPOCH + duration)
 }
 
-fn crate_path(sess: &Session, crate_name: Symbol, stable_crate_id: StableCrateId) -> PathBuf {
+fn crate_path(sess: &Session) -> PathBuf {
     let incr_dir = sess.opts.incremental.as_ref().unwrap().clone();
 
-    let stable_crate_id = base_n::encode(stable_crate_id.as_u64() as u128, INT_ENCODE_BASE);
+    let crate_name = find_crate_name(sess, &[]);
+    let crate_types = collect_crate_types(sess, &[]);
+    let stable_crate_id = StableCrateId::new(
+        crate_name,
+        crate_types.contains(&CrateType::Executable),
+        sess.opts.cg.metadata.clone(),
+        sess.cfg_version,
+    );
 
-    let crate_name = format!("{}-{}", crate_name, stable_crate_id);
+    let crate_name =
+        format!("{crate_name}-{}", stable_crate_id.as_u64().to_base_fixed_len(CASE_INSENSITIVE));
     incr_dir.join(crate_name)
-}
-
-fn assert_no_characters_lost(s: &str) {
-    if s.contains('\u{FFFD}') {
-        bug!("Could not losslessly convert '{}'.", s)
-    }
 }
 
 fn is_old_enough_to_be_collected(timestamp: SystemTime) -> bool {
@@ -619,7 +616,7 @@ fn is_old_enough_to_be_collected(timestamp: SystemTime) -> bool {
 }
 
 /// Runs garbage collection for the current session.
-pub fn garbage_collect_session_directories(sess: &Session) -> io::Result<()> {
+pub(crate) fn garbage_collect_session_directories(sess: &Session) -> io::Result<()> {
     debug!("garbage_collect_session_directories() - begin");
 
     let session_directory = sess.incr_comp_session_dir();
@@ -646,14 +643,14 @@ pub fn garbage_collect_session_directories(sess: &Session) -> io::Result<()> {
         };
 
         let entry_name = dir_entry.file_name();
-        let entry_name = entry_name.to_string_lossy();
+        let Some(entry_name) = entry_name.to_str() else {
+            continue;
+        };
 
         if is_session_directory_lock_file(&entry_name) {
-            assert_no_characters_lost(&entry_name);
-            lock_files.insert(entry_name.into_owned());
+            lock_files.insert(entry_name.to_string());
         } else if is_session_directory(&entry_name) {
-            assert_no_characters_lost(&entry_name);
-            session_directories.insert(entry_name.into_owned());
+            session_directories.insert(entry_name.to_string());
         } else {
             // This is something we don't know, leave it alone
         }
@@ -719,7 +716,7 @@ pub fn garbage_collect_session_directories(sess: &Session) -> io::Result<()> {
         if !lock_file_to_session_dir.items().any(|(_, dir)| *dir == directory_name) {
             let path = crate_directory.join(directory_name);
             if let Err(err) = safe_remove_dir_all(&path) {
-                sess.emit_warning(errors::InvalidGcFailed { path: &path, err });
+                sess.dcx().emit_warn(errors::InvalidGcFailed { path: &path, err });
             }
         }
     }
@@ -730,13 +727,13 @@ pub fn garbage_collect_session_directories(sess: &Session) -> io::Result<()> {
             debug!("garbage_collect_session_directories() - inspecting: {}", directory_name);
 
             let Ok(timestamp) = extract_timestamp_from_session_dir(directory_name) else {
-            debug!(
-                "found session-dir with malformed timestamp: {}",
-                crate_directory.join(directory_name).display()
-            );
-            // Ignore it
-            return None;
-        };
+                debug!(
+                    "found session-dir with malformed timestamp: {}",
+                    crate_directory.join(directory_name).display()
+                );
+                // Ignore it
+                return None;
+            };
 
             if is_finalized(directory_name) {
                 let lock_file_path = crate_directory.join(lock_file_name);
@@ -825,7 +822,7 @@ pub fn garbage_collect_session_directories(sess: &Session) -> io::Result<()> {
         debug!("garbage_collect_session_directories() - deleting `{}`", path.display());
 
         if let Err(err) = safe_remove_dir_all(&path) {
-            sess.emit_warning(errors::FinalizedGcFailed { path: &path, err });
+            sess.dcx().emit_warn(errors::FinalizedGcFailed { path: &path, err });
         } else {
             delete_session_dir_lock_file(sess, &lock_file_path(&path));
         }
@@ -842,10 +839,10 @@ pub fn garbage_collect_session_directories(sess: &Session) -> io::Result<()> {
 fn delete_old(sess: &Session, path: &Path) {
     debug!("garbage_collect_session_directories() - deleting `{}`", path.display());
 
-    if let Err(err) = safe_remove_dir_all(&path) {
-        sess.emit_warning(errors::SessionGcFailed { path: &path, err });
+    if let Err(err) = safe_remove_dir_all(path) {
+        sess.dcx().emit_warn(errors::SessionGcFailed { path, err });
     } else {
-        delete_session_dir_lock_file(sess, &lock_file_path(&path));
+        delete_session_dir_lock_file(sess, &lock_file_path(path));
     }
 }
 
@@ -855,12 +852,11 @@ fn all_except_most_recent(
     let most_recent = deletion_candidates.items().map(|(&(timestamp, _), _)| timestamp).max();
 
     if let Some(most_recent) = most_recent {
-        UnordMap::from(
-            deletion_candidates
-                .into_items()
-                .filter(|&((timestamp, _), _)| timestamp != most_recent)
-                .map(|((_, path), lock)| (path, lock)),
-        )
+        deletion_candidates
+            .into_items()
+            .filter(|&((timestamp, _), _)| timestamp != most_recent)
+            .map(|((_, path), lock)| (path, lock))
+            .collect()
     } else {
         UnordMap::default()
     }

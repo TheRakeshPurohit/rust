@@ -1,14 +1,15 @@
 // Make sure that marks from declarative macros are applied to tokens in nonterminal.
 
-// check-pass
-// compile-flags: -Z span-debug -Z macro-backtrace -Z unpretty=expanded,hygiene
-// compile-flags: -Z trim-diagnostic-paths=no
-// normalize-stdout-test "\d+#" -> "0#"
-// normalize-stdout-test "expn\d{3,}" -> "expnNNN"
-// aux-build:test-macros.rs
+//@ check-pass
+//@ compile-flags: -Z span-debug -Z macro-backtrace -Z unpretty=expanded,hygiene
+//@ compile-flags: -Z trim-diagnostic-paths=no
+// ignore-tidy-linelength
+//@ normalize-stdout: "\d+#" -> "0#"
+//@ normalize-stdout: "expn\d{3,}" -> "expnNNN"
+//@ normalize-stdout: "extern crate compiler_builtins /\* \d+ \*/" -> "extern crate compiler_builtins /* NNN */"
+//@ proc-macro: test-macros.rs
 
 #![feature(decl_macro)]
-
 #![no_std] // Don't load unnecessary hygiene information from std
 extern crate std;
 

@@ -1,11 +1,11 @@
 // Test warnings for a library crate
 
-// check-pass
-// aux-crate:bar=bar.rs
-// compile-flags:--crate-type lib -Wunused-crate-dependencies
+//@ check-pass
+//@ aux-crate:bar=bar.rs
+//@ compile-flags:--crate-type lib -Wunused-crate-dependencies
 
 pub fn fib(n: u32) -> Vec<u32> {
-//~^ WARNING external crate `bar` unused in
+//~^ WARNING extern crate `bar` is unused in
 let mut prev = 0;
     let mut cur = 1;
     let mut v = vec![];

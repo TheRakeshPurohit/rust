@@ -1,9 +1,7 @@
-// compile-flags: --force-warn while_true
-// compile-flags: --force-warn unused_variables
-// compile-flags: --force-warn unused_mut
-// check-pass
-
-#![feature(lint_reasons)]
+//@ compile-flags: --force-warn while_true
+//@ compile-flags: --force-warn unused_variables
+//@ compile-flags: --force-warn unused_mut
+//@ check-pass
 
 fn expect_early_pass_lint(terminate: bool) {
     #[expect(while_true)]

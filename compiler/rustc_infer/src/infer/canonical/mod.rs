@@ -21,35 +21,33 @@
 //!
 //! [c]: https://rust-lang.github.io/chalk/book/canonical_queries/canonicalization.html
 
-use crate::infer::{ConstVariableOrigin, ConstVariableOriginKind};
-use crate::infer::{InferCtxt, RegionVariableOrigin, TypeVariableOrigin, TypeVariableOriginKind};
+pub use instantiate::CanonicalExt;
 use rustc_index::IndexVec;
-use rustc_middle::ty::fold::TypeFoldable;
-use rustc_middle::ty::subst::GenericArg;
-use rustc_middle::ty::{self, List, TyCtxt};
-use rustc_span::source_map::Span;
-
 pub use rustc_middle::infer::canonical::*;
-pub use substitute::CanonicalExt;
+use rustc_middle::ty::fold::TypeFoldable;
+use rustc_middle::ty::{self, GenericArg, List, Ty, TyCtxt};
+use rustc_span::Span;
+
+use crate::infer::{InferCtxt, RegionVariableOrigin};
 
 mod canonicalizer;
+mod instantiate;
 pub mod query_response;
-mod substitute;
 
 impl<'tcx> InferCtxt<'tcx> {
-    /// Creates a substitution S for the canonical value with fresh
-    /// inference variables and applies it to the canonical value.
-    /// Returns both the instantiated result *and* the substitution S.
+    /// Creates an instantiation S for the canonical value with fresh inference
+    /// variables and placeholders then applies it to the canonical value.
+    /// Returns both the instantiated result *and* the instantiation S.
     ///
     /// This can be invoked as part of constructing an
     /// inference context at the start of a query (see
     /// `InferCtxtBuilder::build_with_canonical`). It basically
     /// brings the canonical value "into scope" within your new infcx.
     ///
-    /// At the end of processing, the substitution S (once
+    /// At the end of processing, the instantiation S (once
     /// canonicalized) then represents the values that you computed
     /// for each of the canonical inputs to your query.
-    pub fn instantiate_canonical_with_fresh_inference_vars<T>(
+    pub fn instantiate_canonical<T>(
         &self,
         span: Span,
         canonical: &Canonical<'tcx, T>,
@@ -72,14 +70,14 @@ impl<'tcx> InferCtxt<'tcx> {
 
         let canonical_inference_vars =
             self.instantiate_canonical_vars(span, canonical.variables, |ui| universes[ui]);
-        let result = canonical.substitute(self.tcx, &canonical_inference_vars);
+        let result = canonical.instantiate(self.tcx, &canonical_inference_vars);
         (result, canonical_inference_vars)
     }
 
     /// Given the "infos" about the canonical variables from some
     /// canonical, creates fresh variables with the same
     /// characteristics (see `instantiate_canonical_var` for
-    /// details). You can then use `substitute` to instantiate the
+    /// details). You can then use `instantiate` to instantiate the
     /// canonical variable with these inference variables.
     fn instantiate_canonical_vars(
         &self,
@@ -88,7 +86,7 @@ impl<'tcx> InferCtxt<'tcx> {
         universe_map: impl Fn(ty::UniverseIndex) -> ty::UniverseIndex,
     ) -> CanonicalVarValues<'tcx> {
         CanonicalVarValues {
-            var_values: self.tcx.mk_substs_from_iter(
+            var_values: self.tcx.mk_args_from_iter(
                 variables
                     .iter()
                     .map(|info| self.instantiate_canonical_var(span, info, &universe_map)),
@@ -101,7 +99,7 @@ impl<'tcx> InferCtxt<'tcx> {
     /// variable, then you'll get a new inference variable; if it is a
     /// universally quantified variable, you get a placeholder.
     ///
-    /// FIXME(-Ztrait-solver=next): This is public because it's used by the
+    /// FIXME(-Znext-solver): This is public because it's used by the
     /// new trait solver which has a different canonicalization routine.
     /// We should somehow deduplicate all of this.
     pub fn instantiate_canonical_var(
@@ -113,10 +111,9 @@ impl<'tcx> InferCtxt<'tcx> {
         match cv_info.kind {
             CanonicalVarKind::Ty(ty_kind) => {
                 let ty = match ty_kind {
-                    CanonicalTyVarKind::General(ui) => self.next_ty_var_in_universe(
-                        TypeVariableOrigin { kind: TypeVariableOriginKind::MiscVariable, span },
-                        universe_map(ui),
-                    ),
+                    CanonicalTyVarKind::General(ui) => {
+                        self.next_ty_var_in_universe(span, universe_map(ui))
+                    }
 
                     CanonicalTyVarKind::Int => self.next_int_var(),
 
@@ -128,7 +125,7 @@ impl<'tcx> InferCtxt<'tcx> {
             CanonicalVarKind::PlaceholderTy(ty::PlaceholderType { universe, bound }) => {
                 let universe_mapped = universe_map(universe);
                 let placeholder_mapped = ty::PlaceholderType { universe: universe_mapped, bound };
-                self.tcx.mk_placeholder(placeholder_mapped).into()
+                Ty::new_placeholder(self.tcx, placeholder_mapped).into()
             }
 
             CanonicalVarKind::Region(ui) => self
@@ -144,18 +141,13 @@ impl<'tcx> InferCtxt<'tcx> {
                 ty::Region::new_placeholder(self.tcx, placeholder_mapped).into()
             }
 
-            CanonicalVarKind::Const(ui, ty) => self
-                .next_const_var_in_universe(
-                    ty,
-                    ConstVariableOrigin { kind: ConstVariableOriginKind::MiscVariable, span },
-                    universe_map(ui),
-                )
-                .into(),
-
-            CanonicalVarKind::PlaceholderConst(ty::PlaceholderConst { universe, bound }, ty) => {
+            CanonicalVarKind::Const(ui) => {
+                self.next_const_var_in_universe(span, universe_map(ui)).into()
+            }
+            CanonicalVarKind::PlaceholderConst(ty::PlaceholderConst { universe, bound }) => {
                 let universe_mapped = universe_map(universe);
                 let placeholder_mapped = ty::PlaceholderConst { universe: universe_mapped, bound };
-                self.tcx.mk_const(placeholder_mapped, ty).into()
+                ty::Const::new_placeholder(self.tcx, placeholder_mapped).into()
             }
         }
     }

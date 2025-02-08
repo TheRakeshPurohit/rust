@@ -1,17 +1,14 @@
 use clippy_utils::ty::{has_iter_method, implements_trait};
 use clippy_utils::{get_parent_expr, is_integer_const, path_to_local, path_to_local_id, sugg};
-use if_chain::if_chain;
 use rustc_ast::ast::{LitIntType, LitKind};
 use rustc_errors::Applicability;
-use rustc_hir::intravisit::{walk_expr, walk_local, walk_pat, walk_stmt, Visitor};
-use rustc_hir::{BinOpKind, BorrowKind, Expr, ExprKind, HirId, HirIdMap, Local, Mutability, Pat, PatKind, Stmt};
-use rustc_hir_analysis::hir_ty_to_ty;
+use rustc_hir::intravisit::{Visitor, walk_expr, walk_local};
+use rustc_hir::{BinOpKind, BorrowKind, Expr, ExprKind, HirId, HirIdMap, LetStmt, Mutability, PatKind};
 use rustc_lint::LateContext;
 use rustc_middle::hir::nested_filter;
 use rustc_middle::ty::{self, Ty};
 use rustc_span::source_map::Spanned;
-use rustc_span::symbol::{sym, Symbol};
-use std::iter::Iterator;
+use rustc_span::symbol::{Symbol, sym};
 
 #[derive(Debug, PartialEq, Eq)]
 enum IncrementVisitorVarState {
@@ -47,7 +44,7 @@ impl<'a, 'tcx> IncrementVisitor<'a, 'tcx> {
     }
 }
 
-impl<'a, 'tcx> Visitor<'tcx> for IncrementVisitor<'a, 'tcx> {
+impl<'tcx> Visitor<'tcx> for IncrementVisitor<'_, 'tcx> {
     fn visit_expr(&mut self, expr: &'tcx Expr<'_>) {
         // If node is a variable
         if let Some(def_id) = path_to_local(expr) {
@@ -76,7 +73,7 @@ impl<'a, 'tcx> Visitor<'tcx> for IncrementVisitor<'a, 'tcx> {
                     ExprKind::Assign(lhs, _, _) if lhs.hir_id == expr.hir_id => {
                         *state = IncrementVisitorVarState::DontWarn;
                     },
-                    ExprKind::AddrOf(BorrowKind::Ref, mutability, _) if mutability == Mutability::Mut => {
+                    ExprKind::AddrOf(BorrowKind::Ref, Mutability::Mut, _) => {
                         *state = IncrementVisitorVarState::DontWarn;
                     },
                     _ => (),
@@ -141,25 +138,23 @@ impl<'a, 'tcx> InitializeVisitor<'a, 'tcx> {
     }
 }
 
-impl<'a, 'tcx> Visitor<'tcx> for InitializeVisitor<'a, 'tcx> {
+impl<'tcx> Visitor<'tcx> for InitializeVisitor<'_, 'tcx> {
     type NestedFilter = nested_filter::OnlyBodies;
 
-    fn visit_local(&mut self, l: &'tcx Local<'_>) {
+    fn visit_local(&mut self, l: &'tcx LetStmt<'_>) {
         // Look for declarations of the variable
-        if_chain! {
-            if l.pat.hir_id == self.var_id;
-            if let PatKind::Binding(.., ident, _) = l.pat.kind;
-            then {
-                let ty = l.ty.map(|ty| hir_ty_to_ty(self.cx.tcx, ty));
+        if l.pat.hir_id == self.var_id
+            && let PatKind::Binding(.., ident, _) = l.pat.kind
+        {
+            let ty = l.ty.map(|_| self.cx.typeck_results().pat_ty(l.pat));
 
-                self.state = l.init.map_or(InitializeVisitorState::Declared(ident.name, ty), |init| {
-                    InitializeVisitorState::Initialized {
-                        initializer: init,
-                        ty,
-                        name: ident.name,
-                    }
-                })
-            }
+            self.state = l.init.map_or(InitializeVisitorState::Declared(ident.name, ty), |init| {
+                InitializeVisitorState::Initialized {
+                    initializer: init,
+                    ty,
+                    name: ident.name,
+                }
+            });
         }
 
         walk_local(self, l);
@@ -226,7 +221,7 @@ impl<'a, 'tcx> Visitor<'tcx> for InitializeVisitor<'a, 'tcx> {
                             InitializeVisitorState::DontWarn
                         }
                     },
-                    ExprKind::AddrOf(BorrowKind::Ref, mutability, _) if mutability == Mutability::Mut => {
+                    ExprKind::AddrOf(BorrowKind::Ref, Mutability::Mut, _) => {
                         self.state = InitializeVisitorState::DontWarn;
                     },
                     _ => (),
@@ -258,68 +253,13 @@ fn is_conditional(expr: &Expr<'_>) -> bool {
     matches!(expr.kind, ExprKind::If(..) | ExprKind::Match(..))
 }
 
-#[derive(PartialEq, Eq)]
-pub(super) enum Nesting {
-    Unknown,     // no nesting detected yet
-    RuledOut,    // the iterator is initialized or assigned within scope
-    LookFurther, // no nesting detected, no further walk required
-}
-
-use self::Nesting::{LookFurther, RuledOut, Unknown};
-
-pub(super) struct LoopNestVisitor {
-    pub(super) hir_id: HirId,
-    pub(super) iterator: HirId,
-    pub(super) nesting: Nesting,
-}
-
-impl<'tcx> Visitor<'tcx> for LoopNestVisitor {
-    fn visit_stmt(&mut self, stmt: &'tcx Stmt<'_>) {
-        if stmt.hir_id == self.hir_id {
-            self.nesting = LookFurther;
-        } else if self.nesting == Unknown {
-            walk_stmt(self, stmt);
-        }
-    }
-
-    fn visit_expr(&mut self, expr: &'tcx Expr<'_>) {
-        if self.nesting != Unknown {
-            return;
-        }
-        if expr.hir_id == self.hir_id {
-            self.nesting = LookFurther;
-            return;
-        }
-        match expr.kind {
-            ExprKind::Assign(path, _, _) | ExprKind::AssignOp(_, path, _) => {
-                if path_to_local_id(path, self.iterator) {
-                    self.nesting = RuledOut;
-                }
-            },
-            _ => walk_expr(self, expr),
-        }
-    }
-
-    fn visit_pat(&mut self, pat: &'tcx Pat<'_>) {
-        if self.nesting != Unknown {
-            return;
-        }
-        if let PatKind::Binding(_, id, ..) = pat.kind {
-            if id == self.iterator {
-                self.nesting = RuledOut;
-                return;
-            }
-        }
-        walk_pat(self, pat);
-    }
-}
-
 /// If `arg` was the argument to a `for` loop, return the "cleanest" way of writing the
 /// actual `Iterator` that the loop uses.
 pub(super) fn make_iterator_snippet(cx: &LateContext<'_>, arg: &Expr<'_>, applic_ref: &mut Applicability) -> String {
-    let impls_iterator = cx.tcx.get_diagnostic_item(sym::Iterator).map_or(false, |id| {
-        implements_trait(cx, cx.typeck_results().expr_ty(arg), id, &[])
-    });
+    let impls_iterator = cx
+        .tcx
+        .get_diagnostic_item(sym::Iterator)
+        .is_some_and(|id| implements_trait(cx, cx.typeck_results().expr_ty(arg), id, &[]));
     if impls_iterator {
         format!(
             "{}",

@@ -1,12 +1,11 @@
-use crate::fmt;
 use crate::io::prelude::*;
-use crate::io::{BorrowedBuf, ErrorKind, IoSlice, IoSliceMut};
+use crate::io::{BorrowedBuf, IoSlice, IoSliceMut};
 use crate::mem::MaybeUninit;
 use crate::net::test::{next_test_ip4, next_test_ip6};
 use crate::net::*;
 use crate::sync::mpsc::channel;
-use crate::thread;
 use crate::time::{Duration, Instant};
+use crate::{fmt, thread};
 
 fn each_ip(f: &mut dyn FnMut(SocketAddr)) {
     f(next_test_ip4());
@@ -47,6 +46,18 @@ fn connect_error() {
 }
 
 #[test]
+#[cfg_attr(target_env = "sgx", ignore)] // FIXME: https://github.com/fortanix/rust-sgx/issues/31
+fn connect_timeout_error() {
+    let socket_addr = next_test_ip4();
+    let result = TcpStream::connect_timeout(&socket_addr, Duration::MAX);
+    assert!(!matches!(result, Err(e) if e.kind() == ErrorKind::TimedOut));
+
+    let _listener = TcpListener::bind(&socket_addr).unwrap();
+    assert!(TcpStream::connect_timeout(&socket_addr, Duration::MAX).is_ok());
+}
+
+#[test]
+#[cfg_attr(target_os = "wasi", ignore)] // no threads
 fn listen_localhost() {
     let socket_addr = next_test_ip4();
     let listener = t!(TcpListener::bind(&socket_addr));
@@ -63,6 +74,7 @@ fn listen_localhost() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore)] // no threads
 fn connect_loopback() {
     each_ip(&mut |addr| {
         let acceptor = t!(TcpListener::bind(&addr));
@@ -84,6 +96,7 @@ fn connect_loopback() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore)] // no threads
 fn smoke_test() {
     each_ip(&mut |addr| {
         let acceptor = t!(TcpListener::bind(&addr));
@@ -104,6 +117,7 @@ fn smoke_test() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore)] // no threads
 fn read_eof() {
     each_ip(&mut |addr| {
         let acceptor = t!(TcpListener::bind(&addr));
@@ -123,6 +137,7 @@ fn read_eof() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore)] // no threads
 fn write_close() {
     each_ip(&mut |addr| {
         let acceptor = t!(TcpListener::bind(&addr));
@@ -151,6 +166,7 @@ fn write_close() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore)] // no threads
 fn multiple_connect_serial() {
     each_ip(&mut |addr| {
         let max = 10;
@@ -173,6 +189,7 @@ fn multiple_connect_serial() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore)] // no threads
 fn multiple_connect_interleaved_greedy_schedule() {
     const MAX: usize = 10;
     each_ip(&mut |addr| {
@@ -210,6 +227,7 @@ fn multiple_connect_interleaved_greedy_schedule() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore)] // no threads
 fn multiple_connect_interleaved_lazy_schedule() {
     const MAX: usize = 10;
     each_ip(&mut |addr| {
@@ -245,6 +263,7 @@ fn multiple_connect_interleaved_lazy_schedule() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore)] // no threads
 fn socket_and_peer_name() {
     each_ip(&mut |addr| {
         let listener = t!(TcpListener::bind(&addr));
@@ -260,6 +279,7 @@ fn socket_and_peer_name() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore)] // no threads
 fn partial_read() {
     each_ip(&mut |addr| {
         let (tx, rx) = channel();
@@ -281,6 +301,7 @@ fn partial_read() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore)] // no threads
 fn read_buf() {
     each_ip(&mut |addr| {
         let srv = t!(TcpListener::bind(&addr));
@@ -290,7 +311,7 @@ fn read_buf() {
         });
 
         let mut s = t!(srv.accept()).0;
-        let mut buf: [MaybeUninit<u8>; 128] = MaybeUninit::uninit_array();
+        let mut buf: [MaybeUninit<u8>; 128] = [MaybeUninit::uninit(); 128];
         let mut buf = BorrowedBuf::from(buf.as_mut_slice());
         t!(s.read_buf(buf.unfilled()));
         assert_eq!(buf.filled(), &[1, 2, 3, 4]);
@@ -379,6 +400,7 @@ fn double_bind() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore)] // no threads
 fn tcp_clone_smoke() {
     each_ip(&mut |addr| {
         let acceptor = t!(TcpListener::bind(&addr));
@@ -410,6 +432,7 @@ fn tcp_clone_smoke() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore)] // no threads
 fn tcp_clone_two_read() {
     each_ip(&mut |addr| {
         let acceptor = t!(TcpListener::bind(&addr));
@@ -444,6 +467,7 @@ fn tcp_clone_two_read() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore)] // no threads
 fn tcp_clone_two_write() {
     each_ip(&mut |addr| {
         let acceptor = t!(TcpListener::bind(&addr));
@@ -473,6 +497,7 @@ fn tcp_clone_two_write() {
 #[test]
 // FIXME: https://github.com/fortanix/rust-sgx/issues/110
 #[cfg_attr(target_env = "sgx", ignore)]
+#[cfg_attr(target_os = "wasi", ignore)] // no threads
 fn shutdown_smoke() {
     each_ip(&mut |addr| {
         let a = t!(TcpListener::bind(&addr));
@@ -495,6 +520,7 @@ fn shutdown_smoke() {
 #[test]
 // FIXME: https://github.com/fortanix/rust-sgx/issues/110
 #[cfg_attr(target_env = "sgx", ignore)]
+#[cfg_attr(target_os = "wasi", ignore)] // no threads
 fn close_readwrite_smoke() {
     each_ip(&mut |addr| {
         let a = t!(TcpListener::bind(&addr));
@@ -533,34 +559,39 @@ fn close_readwrite_smoke() {
 }
 
 #[test]
+// FIXME: https://github.com/fortanix/rust-sgx/issues/110
 #[cfg_attr(target_env = "sgx", ignore)]
+// On windows, shutdown will not wake up blocking I/O operations.
+#[cfg_attr(windows, ignore)]
+#[cfg_attr(target_os = "wasi", ignore)] // no threads
 fn close_read_wakes_up() {
     each_ip(&mut |addr| {
-        let a = t!(TcpListener::bind(&addr));
-        let (tx1, rx) = channel::<()>();
+        let listener = t!(TcpListener::bind(&addr));
         let _t = thread::spawn(move || {
-            let _s = t!(a.accept());
-            let _ = rx.recv();
+            let (stream, _) = t!(listener.accept());
+            stream
         });
 
-        let s = t!(TcpStream::connect(&addr));
-        let s2 = t!(s.try_clone());
-        let (tx, rx) = channel();
-        let _t = thread::spawn(move || {
-            let mut s2 = s2;
-            assert_eq!(t!(s2.read(&mut [0])), 0);
-            tx.send(()).unwrap();
-        });
-        // this should wake up the child thread
-        t!(s.shutdown(Shutdown::Read));
+        let mut stream = t!(TcpStream::connect(&addr));
+        let stream2 = t!(stream.try_clone());
 
-        // this test will never finish if the child doesn't wake up
-        rx.recv().unwrap();
-        drop(tx1);
+        let _t = thread::spawn(move || {
+            let stream2 = stream2;
+
+            // to make it more likely that `read` happens before `shutdown`
+            thread::sleep(Duration::from_millis(1000));
+
+            // this should wake up the reader up
+            t!(stream2.shutdown(Shutdown::Read));
+        });
+
+        // this `read` should get interrupted by `shutdown`
+        assert_eq!(t!(stream.read(&mut [0])), 0);
     })
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore)] // no threads
 fn clone_while_reading() {
     each_ip(&mut |addr| {
         let accept = t!(TcpListener::bind(&addr));
@@ -601,6 +632,7 @@ fn clone_while_reading() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore)] // no threads
 fn clone_accept_smoke() {
     each_ip(&mut |addr| {
         let a = t!(TcpListener::bind(&addr));
@@ -619,6 +651,7 @@ fn clone_accept_smoke() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore)] // no threads
 fn clone_accept_concurrent() {
     each_ip(&mut |addr| {
         let a = t!(TcpListener::bind(&addr));
@@ -657,10 +690,10 @@ fn debug() {
         addr.to_string()
     }
 
+    #[cfg(any(unix, target_os = "wasi"))]
+    use crate::os::fd::AsRawFd;
     #[cfg(target_env = "sgx")]
     use crate::os::fortanix_sgx::io::AsRawFd;
-    #[cfg(unix)]
-    use crate::os::unix::io::AsRawFd;
     #[cfg(not(windows))]
     fn render_inner(addr: &dyn AsRawFd) -> impl fmt::Debug {
         addr.as_raw_fd()
@@ -701,6 +734,7 @@ fn debug() {
     ignore
 )]
 #[cfg_attr(target_env = "sgx", ignore)] // FIXME: https://github.com/fortanix/rust-sgx/issues/31
+#[cfg_attr(target_os = "wasi", ignore)] // timeout not supported
 #[test]
 fn timeouts() {
     let addr = next_test_ip4();
@@ -729,6 +763,7 @@ fn timeouts() {
 
 #[test]
 #[cfg_attr(target_env = "sgx", ignore)] // FIXME: https://github.com/fortanix/rust-sgx/issues/31
+#[cfg_attr(target_os = "wasi", ignore)] // timeout not supported
 fn test_read_timeout() {
     let addr = next_test_ip4();
     let listener = t!(TcpListener::bind(&addr));
@@ -750,6 +785,7 @@ fn test_read_timeout() {
 
 #[test]
 #[cfg_attr(target_env = "sgx", ignore)] // FIXME: https://github.com/fortanix/rust-sgx/issues/31
+#[cfg_attr(target_os = "wasi", ignore)] // timeout not supported
 fn test_read_with_timeout() {
     let addr = next_test_ip4();
     let listener = t!(TcpListener::bind(&addr));
@@ -797,6 +833,7 @@ fn test_timeout_zero_duration() {
 
 #[test]
 #[cfg_attr(target_env = "sgx", ignore)]
+#[cfg_attr(target_os = "wasi", ignore)] // linger not supported
 fn linger() {
     let addr = next_test_ip4();
     let _listener = t!(TcpListener::bind(&addr));
@@ -866,6 +903,7 @@ fn set_nonblocking() {
 
 #[test]
 #[cfg_attr(target_env = "sgx", ignore)] // FIXME: https://github.com/fortanix/rust-sgx/issues/31
+#[cfg_attr(target_os = "wasi", ignore)] // no threads
 fn peek() {
     each_ip(&mut |addr| {
         let (txdone, rxdone) = channel();

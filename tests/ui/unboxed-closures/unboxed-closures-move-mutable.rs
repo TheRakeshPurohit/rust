@@ -1,5 +1,4 @@
-// run-pass
-// pretty-expanded FIXME #23616
+//@ run-pass
 
 #![deny(unused_mut)]
 #![allow(unused_must_use)]

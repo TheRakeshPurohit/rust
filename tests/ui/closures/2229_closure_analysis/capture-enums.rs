@@ -1,4 +1,4 @@
-// edition:2021
+//@ edition:2021
 
 #![feature(rustc_attrs)]
 
@@ -16,18 +16,19 @@ fn multi_variant_enum() {
     let c = #[rustc_capture_analysis]
     //~^ ERROR: attributes on expressions are experimental
     //~| NOTE: see issue #15701 <https://github.com/rust-lang/rust/issues/15701>
+    //~| NOTE: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
     || {
     //~^ First Pass analysis includes:
     //~| Min Capture analysis includes:
         if let Info::Point(_, _, str) = point {
-            //~^ NOTE: Capturing point[] -> ImmBorrow
+            //~^ NOTE: Capturing point[] -> Immutable
             //~| NOTE: Capturing point[(2, 0)] -> ByValue
             //~| NOTE: Min Capture point[] -> ByValue
             println!("{}", str);
         }
 
         if let Info::Meta(_, v) = meta {
-            //~^ NOTE: Capturing meta[] -> ImmBorrow
+            //~^ NOTE: Capturing meta[] -> Immutable
             //~| NOTE: Capturing meta[(1, 1)] -> ByValue
             //~| NOTE: Min Capture meta[] -> ByValue
             println!("{:?}", v);
@@ -47,6 +48,7 @@ fn single_variant_enum() {
     let c = #[rustc_capture_analysis]
     //~^ ERROR: attributes on expressions are experimental
     //~| NOTE: see issue #15701 <https://github.com/rust-lang/rust/issues/15701>
+    //~| NOTE: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
     || {
     //~^ First Pass analysis includes:
     //~| Min Capture analysis includes:

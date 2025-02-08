@@ -1,5 +1,5 @@
-//@run-rustfix
 //@aux-build: proc_macros.rs
+
 #![warn(clippy::single_match_else)]
 #![allow(unused, clippy::needless_return, clippy::no_effect, clippy::uninlined_format_args)]
 extern crate proc_macros;
@@ -89,7 +89,7 @@ fn main() {
 
     // lint here
     use std::convert::Infallible;
-    if let Ok(a) = Result::<i32, Infallible>::Ok(1) { println!("${:?}", a) } else {
+    if let Ok(a) = Result::<i32, &Infallible>::Ok(1) { println!("${:?}", a) } else {
         println!("else block");
         return;
     }
@@ -170,4 +170,8 @@ fn issue_10808(bar: Option<i32>) {
             }
         },
     }
+}
+
+fn irrefutable_match() -> Option<&'static ExprNode> {
+    Some(&NODE)
 }

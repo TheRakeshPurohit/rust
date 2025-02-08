@@ -9,20 +9,21 @@ use chalk_ir::{
     AdtId, DebruijnIndex, Scalar,
 };
 use hir_def::{
-    builtin_type::BuiltinType, generics::TypeOrConstParamData, ConstParamId, DefWithBodyId,
-    GenericDefId, TraitId, TypeAliasId,
+    builtin_type::BuiltinType, DefWithBodyId, GenericDefId, GenericParamId, TraitId, TypeAliasId,
 };
 use smallvec::SmallVec;
 
 use crate::{
-    consteval::unknown_const_as_generic, db::HirDatabase, infer::unify::InferenceTable, primitive,
-    to_assoc_type_id, to_chalk_trait_id, utils::generics, Binders, BoundVar, CallableSig,
-    GenericArg, Interner, ProjectionTy, Substitution, TraitRef, Ty, TyDefId, TyExt, TyKind,
+    consteval::unknown_const_as_generic, db::HirDatabase, error_lifetime, generics::generics,
+    infer::unify::InferenceTable, primitive, to_assoc_type_id, to_chalk_trait_id, Binders,
+    BoundVar, CallableSig, GenericArg, GenericArgData, Interner, ProjectionTy, Substitution,
+    TraitRef, Ty, TyDefId, TyExt, TyKind,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParamKind {
     Type,
+    Lifetime,
     Const(Ty),
 }
 
@@ -62,7 +63,14 @@ impl<D> TyBuilder<D> {
     }
 
     fn build_internal(self) -> (D, Substitution) {
-        assert_eq!(self.vec.len(), self.param_kinds.len(), "{:?}", &self.param_kinds);
+        assert_eq!(
+            self.vec.len(),
+            self.param_kinds.len(),
+            "{} args received, {} expected ({:?})",
+            self.vec.len(),
+            self.param_kinds.len(),
+            &self.param_kinds
+        );
         for (a, e) in self.vec.iter().zip(self.param_kinds.iter()) {
             self.assert_match_kind(a, e);
         }
@@ -73,15 +81,19 @@ impl<D> TyBuilder<D> {
         (self.data, subst)
     }
 
+    pub fn build_into_subst(self) -> Substitution {
+        self.build_internal().1
+    }
+
     pub fn push(mut self, arg: impl CastTo<GenericArg>) -> Self {
         assert!(self.remaining() > 0);
         let arg = arg.cast(Interner);
         let expected_kind = &self.param_kinds[self.vec.len()];
 
         let arg_kind = match arg.data(Interner) {
-            chalk_ir::GenericArgData::Ty(_) => ParamKind::Type,
-            chalk_ir::GenericArgData::Lifetime(_) => panic!("Got lifetime in TyBuilder::push"),
-            chalk_ir::GenericArgData::Const(c) => {
+            GenericArgData::Ty(_) => ParamKind::Type,
+            GenericArgData::Lifetime(_) => panic!("Got lifetime in TyBuilder::push"),
+            GenericArgData::Const(c) => {
                 let c = c.data(Interner);
                 ParamKind::Const(c.ty.clone())
             }
@@ -106,6 +118,9 @@ impl<D> TyBuilder<D> {
             ParamKind::Const(ty) => {
                 BoundVar::new(debruijn, idx).to_const(Interner, ty.clone()).cast(Interner)
             }
+            ParamKind::Lifetime => {
+                BoundVar::new(debruijn, idx).to_lifetime(Interner).cast(Interner)
+            }
         });
         this.vec.extend(filler.take(this.remaining()).casted(Interner));
         assert_eq!(this.remaining(), 0);
@@ -118,16 +133,19 @@ impl<D> TyBuilder<D> {
         let filler = this.param_kinds[this.vec.len()..].iter().map(|x| match x {
             ParamKind::Type => TyKind::Error.intern(Interner).cast(Interner),
             ParamKind::Const(ty) => unknown_const_as_generic(ty.clone()),
+            ParamKind::Lifetime => error_lifetime().cast(Interner),
         });
         this.vec.extend(filler.casted(Interner));
         assert_eq!(this.remaining(), 0);
         this
     }
 
+    #[tracing::instrument(skip_all)]
     pub(crate) fn fill_with_inference_vars(self, table: &mut InferenceTable<'_>) -> Self {
         self.fill(|x| match x {
             ParamKind::Type => table.new_type_var().cast(Interner),
             ParamKind::Const(ty) => table.new_const_var(ty.clone()).cast(Interner),
+            ParamKind::Lifetime => table.new_lifetime_var().cast(Interner),
         })
     }
 
@@ -139,8 +157,9 @@ impl<D> TyBuilder<D> {
 
     fn assert_match_kind(&self, a: &chalk_ir::GenericArg<Interner>, e: &ParamKind) {
         match (a.data(Interner), e) {
-            (chalk_ir::GenericArgData::Ty(_), ParamKind::Type)
-            | (chalk_ir::GenericArgData::Const(_), ParamKind::Const(_)) => (),
+            (GenericArgData::Ty(_), ParamKind::Type)
+            | (GenericArgData::Const(_), ParamKind::Const(_))
+            | (GenericArgData::Lifetime(_), ParamKind::Lifetime) => (),
             _ => panic!("Mismatched kinds: {a:?}, {:?}, {:?}", self.vec, self.param_kinds),
         }
     }
@@ -199,14 +218,16 @@ impl TyBuilder<()> {
         Substitution::from_iter(
             Interner,
             params.iter_id().map(|id| match id {
-                either::Either::Left(_) => TyKind::Error.intern(Interner).cast(Interner),
-                either::Either::Right(id) => {
+                GenericParamId::TypeParamId(_) => TyKind::Error.intern(Interner).cast(Interner),
+                GenericParamId::ConstParamId(id) => {
                     unknown_const_as_generic(db.const_param_ty(id)).cast(Interner)
                 }
+                GenericParamId::LifetimeParamId(_) => error_lifetime().cast(Interner),
             }),
         )
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn subst_for_def(
         db: &dyn HirDatabase,
         def: impl Into<GenericDefId>,
@@ -216,31 +237,32 @@ impl TyBuilder<()> {
         assert!(generics.parent_generics().is_some() == parent_subst.is_some());
         let params = generics
             .iter_self()
-            .map(|(id, data)| match data {
-                TypeOrConstParamData::TypeParamData(_) => ParamKind::Type,
-                TypeOrConstParamData::ConstParamData(_) => {
-                    ParamKind::Const(db.const_param_ty(ConstParamId::from_unchecked(id)))
-                }
+            .map(|(id, _data)| match id {
+                GenericParamId::TypeParamId(_) => ParamKind::Type,
+                GenericParamId::ConstParamId(id) => ParamKind::Const(db.const_param_ty(id)),
+                GenericParamId::LifetimeParamId(_) => ParamKind::Lifetime,
             })
             .collect();
         TyBuilder::new((), params, parent_subst)
     }
 
-    /// Creates a `TyBuilder` to build `Substitution` for a generator defined in `parent`.
+    /// Creates a `TyBuilder` to build `Substitution` for a coroutine defined in `parent`.
     ///
-    /// A generator's substitution consists of:
-    /// - resume type of generator
-    /// - yield type of generator ([`Generator::Yield`](std::ops::Generator::Yield))
-    /// - return type of generator ([`Generator::Return`](std::ops::Generator::Return))
+    /// A coroutine's substitution consists of:
+    /// - resume type of coroutine
+    /// - yield type of coroutine ([`Coroutine::Yield`](std::ops::Coroutine::Yield))
+    /// - return type of coroutine ([`Coroutine::Return`](std::ops::Coroutine::Return))
     /// - generic parameters in scope on `parent`
+    ///
     /// in this order.
     ///
     /// This method prepopulates the builder with placeholder substitution of `parent`, so you
     /// should only push exactly 3 `GenericArg`s before building.
-    pub fn subst_for_generator(db: &dyn HirDatabase, parent: DefWithBodyId) -> TyBuilder<()> {
-        let parent_subst =
-            parent.as_generic_def_id().map(|p| generics(db.upcast(), p).placeholder_subst(db));
-        // These represent resume type, yield type, and return type of generator.
+    pub fn subst_for_coroutine(db: &dyn HirDatabase, parent: DefWithBodyId) -> TyBuilder<()> {
+        let parent_subst = parent
+            .as_generic_def_id(db.upcast())
+            .map(|p| generics(db.upcast(), p).placeholder_subst(db));
+        // These represent resume type, yield type, and return type of coroutine.
         let params = std::iter::repeat(ParamKind::Type).take(3).collect();
         TyBuilder::new((), params, parent_subst)
     }
@@ -252,7 +274,7 @@ impl TyBuilder<()> {
     ) -> Substitution {
         let sig_ty = sig_ty.cast(Interner);
         let self_subst = iter::once(&sig_ty);
-        let Some(parent) = parent.as_generic_def_id() else {
+        let Some(parent) = parent.as_generic_def_id(db.upcast()) else {
             return Substitution::from_iter(Interner, self_subst);
         };
         Substitution::from_iter(
@@ -282,8 +304,8 @@ impl TyBuilder<hir_def::AdtId> {
     ) -> Self {
         // Note that we're building ADT, so we never have parent generic parameters.
         let defaults = db.generic_defaults(self.data.into());
-        let dummy_ty = TyKind::Error.intern(Interner).cast(Interner);
-        for default_ty in defaults.iter().skip(self.vec.len()) {
+
+        for default_ty in &defaults[self.vec.len()..] {
             // NOTE(skip_binders): we only check if the arg type is error type.
             if let Some(x) = default_ty.skip_binders().ty(Interner) {
                 if x.is_unknown() {
@@ -292,13 +314,16 @@ impl TyBuilder<hir_def::AdtId> {
                 }
             }
             // Each default can only depend on the previous parameters.
-            // FIXME: we don't handle const generics here.
             let subst_so_far = Substitution::from_iter(
                 Interner,
                 self.vec
                     .iter()
                     .cloned()
-                    .chain(iter::repeat(dummy_ty.clone()))
+                    .chain(self.param_kinds[self.vec.len()..].iter().map(|it| match it {
+                        ParamKind::Type => TyKind::Error.intern(Interner).cast(Interner),
+                        ParamKind::Lifetime => error_lifetime().cast(Interner),
+                        ParamKind::Const(ty) => unknown_const_as_generic(ty.clone()),
+                    }))
                     .take(self.param_kinds.len()),
             );
             self.vec.push(default_ty.clone().substitute(Interner, &subst_so_far).cast(Interner));

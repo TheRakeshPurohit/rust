@@ -1,8 +1,8 @@
-// run-pass
+//@ run-pass
 #![allow(unused_imports)]
 #![allow(deprecated)]
 
-// ignore-android since the dynamic linker sets a SIGPIPE handler (to do
+//@ ignore-android since the dynamic linker sets a SIGPIPE handler (to do
 // a crash report) so inheritance is moot on the entire platform
 
 // libstd ignores SIGPIPE, and other libraries may set signal masks.
@@ -13,14 +13,14 @@
 // (instead of running forever), and that it does not print an error
 // message about a broken pipe.
 
-// ignore-emscripten no threads support
-// ignore-vxworks no 'sh'
-// ignore-fuchsia no 'sh'
+//@ ignore-vxworks no 'sh'
+//@ ignore-fuchsia no 'sh'
+//@ needs-threads
+//@ only-unix SIGPIPE is a unix feature
 
 use std::process;
 use std::thread;
 
-#[cfg(unix)]
 fn main() {
     // Just in case `yes` doesn't check for EPIPE...
     thread::spawn(|| {
@@ -34,9 +34,4 @@ fn main() {
         .unwrap();
     assert!(output.status.success());
     assert!(output.stderr.len() == 0);
-}
-
-#[cfg(not(unix))]
-fn main() {
-    // Not worried about signal masks on other platforms
 }

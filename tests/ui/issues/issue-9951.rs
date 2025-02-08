@@ -1,10 +1,9 @@
-// run-pass
-// pretty-expanded FIXME #23616
+//@ run-pass
 
 #![allow(unused_variables)]
 
 trait Bar {
-  fn noop(&self);
+  fn noop(&self); //~ WARN method `noop` is never used
 }
 impl Bar for u8 {
   fn noop(&self) {}

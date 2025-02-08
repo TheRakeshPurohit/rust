@@ -1,13 +1,16 @@
-//@run-rustfix
 #![warn(clippy::redundant_closure, clippy::redundant_closure_for_method_calls)]
 #![allow(unused)]
 #![allow(
     clippy::needless_borrow,
+    clippy::needless_option_as_deref,
     clippy::needless_pass_by_value,
     clippy::no_effect,
     clippy::option_map_unit_fn,
     clippy::redundant_closure_call,
-    clippy::uninlined_format_args
+    clippy::uninlined_format_args,
+    clippy::useless_vec,
+    clippy::unnecessary_map_on_constructor,
+    clippy::needless_lifetimes
 )]
 
 use std::path::{Path, PathBuf};
@@ -46,6 +49,12 @@ fn main() {
 
     // issue #7224
     let _: Option<Vec<u32>> = Some(0).map(|_| vec![]);
+
+    // issue #10684
+    fn test<T>(x: impl Fn(usize, usize) -> T) -> T {
+        x(1, 2)
+    }
+    test(|start, end| start..=end);
 }
 
 trait TestTrait {
@@ -106,6 +115,11 @@ fn test_redundant_closures_containing_method_calls() {
     {
         t.iter().filter(|x| x.trait_foo_ref());
         t.iter().map(|x| x.trait_foo_ref());
+    }
+
+    fn issue14096() {
+        let x = Some("42");
+        let _ = x.map(|x| x.parse::<i16>());
     }
 }
 
@@ -324,7 +338,7 @@ impl dyn TestTrait + '_ {
 }
 
 // https://github.com/rust-lang/rust-clippy/issues/7746
-fn angle_brackets_and_substs() {
+fn angle_brackets_and_args() {
     let array_opt: Option<&[u8; 3]> = Some(&[4, 8, 7]);
     array_opt.map(|a| a.as_slice());
 
@@ -337,4 +351,157 @@ fn angle_brackets_and_substs() {
     let test_struct = TestStruct { some_ref: &487 };
     let dyn_opt: Option<&dyn TestTrait> = Some(&test_struct);
     dyn_opt.map(|d| d.method_on_dyn());
+}
+
+// https://github.com/rust-lang/rust-clippy/issues/12199
+fn track_caller_fp() {
+    struct S;
+    impl S {
+        #[track_caller]
+        fn add_location(self) {}
+    }
+
+    #[track_caller]
+    fn add_location() {}
+
+    fn foo(_: fn()) {}
+    fn foo2(_: fn(S)) {}
+    foo(|| add_location());
+    foo2(|s| s.add_location());
+}
+
+fn _late_bound_to_early_bound_regions() {
+    struct Foo<'a>(&'a u32);
+    impl<'a> Foo<'a> {
+        fn f(x: &'a u32) -> Self {
+            Foo(x)
+        }
+    }
+    fn f(f: impl for<'a> Fn(&'a u32) -> Foo<'a>) -> Foo<'static> {
+        f(&0)
+    }
+
+    let _ = f(|x| Foo::f(x));
+
+    struct Bar;
+    impl<'a> From<&'a u32> for Bar {
+        fn from(x: &'a u32) -> Bar {
+            Bar
+        }
+    }
+    fn f2(f: impl for<'a> Fn(&'a u32) -> Bar) -> Bar {
+        f(&0)
+    }
+
+    let _ = f2(|x| <Bar>::from(x));
+
+    struct Baz<'a>(&'a u32);
+    fn f3(f: impl Fn(&u32) -> Baz<'_>) -> Baz<'static> {
+        f(&0)
+    }
+
+    let _ = f3(|x| Baz(x));
+}
+
+fn _mixed_late_bound_and_early_bound_regions() {
+    fn f<T>(t: T, f: impl Fn(T, &u32) -> u32) -> u32 {
+        f(t, &0)
+    }
+    fn f2<'a, T: 'a>(_: &'a T, y: &u32) -> u32 {
+        *y
+    }
+    let _ = f(&0, |x, y| f2(x, y));
+}
+
+fn _closure_with_types() {
+    fn f<T>(x: T) -> T {
+        x
+    }
+    fn f2<T: Default>(f: impl Fn(T) -> T) -> T {
+        f(T::default())
+    }
+
+    let _ = f2(|x: u32| f(x));
+    let _ = f2(|x| -> u32 { f(x) });
+}
+
+/// https://github.com/rust-lang/rust-clippy/issues/10854
+/// This is to verify that redundant_closure_for_method_calls resolves suggested paths to relative.
+mod issue_10854 {
+    pub mod test_mod {
+        pub struct Test;
+
+        impl Test {
+            pub fn method(self) -> i32 {
+                0
+            }
+        }
+
+        pub fn calls_test(test: Option<Test>) -> Option<i32> {
+            test.map(|t| t.method())
+        }
+
+        pub fn calls_outer(test: Option<super::Outer>) -> Option<i32> {
+            test.map(|t| t.method())
+        }
+    }
+
+    pub struct Outer;
+
+    impl Outer {
+        pub fn method(self) -> i32 {
+            0
+        }
+    }
+
+    pub fn calls_into_mod(test: Option<test_mod::Test>) -> Option<i32> {
+        test.map(|t| t.method())
+    }
+
+    mod a {
+        pub mod b {
+            pub mod c {
+                pub fn extreme_nesting(test: Option<super::super::super::d::Test>) -> Option<i32> {
+                    test.map(|t| t.method())
+                }
+            }
+        }
+    }
+
+    mod d {
+        pub struct Test;
+
+        impl Test {
+            pub fn method(self) -> i32 {
+                0
+            }
+        }
+    }
+}
+
+mod issue_12853 {
+    fn f_by_value<F: Fn(u32)>(f: F) {
+        let x = Box::new(|| None.map(|x| f(x)));
+        x();
+    }
+    fn f_by_ref<F: Fn(u32)>(f: &F) {
+        let x = Box::new(|| None.map(|x| f(x)));
+        x();
+    }
+}
+
+mod issue_13073 {
+    fn get_default() -> Option<&'static str> {
+        Some("foo")
+    }
+
+    pub fn foo() {
+        // shouldn't lint
+        let bind: Option<String> = None;
+        let _field = bind.as_deref().or_else(|| get_default()).unwrap();
+        let bind: Option<&'static str> = None;
+        let _field = bind.as_deref().or_else(|| get_default()).unwrap();
+        // should lint
+        let _field = bind.or_else(|| get_default()).unwrap();
+    }
 }

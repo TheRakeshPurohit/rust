@@ -2,10 +2,9 @@
 // The possibility of wrapping results in an additional branch when dropping boxed slices
 // in some situations, see https://github.com/rust-lang/rust/issues/96497#issuecomment-1112865218
 
-// compile-flags: -O
-// min-llvm-version: 15.0
+//@ compile-flags: -O
 
-#![crate_type="lib"]
+#![crate_type = "lib"]
 
 // CHECK-LABEL: @simple_size_of_nowrap
 #[no_mangle]

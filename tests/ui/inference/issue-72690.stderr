@@ -2,11 +2,11 @@ error[E0283]: type annotations needed
   --> $DIR/issue-72690.rs:7:5
    |
 LL |     String::from("x".as_ref());
-   |     ^^^^^^^^^^^^ cannot infer type for reference `&_`
+   |     ^^^^^^ cannot infer type for reference `&_`
    |
    = note: multiple `impl`s satisfying `String: From<&_>` found in the `alloc` crate:
-           - impl<> From<&String> for String;
-           - impl<> From<&str> for String;
+           - impl From<&String> for String;
+           - impl From<&str> for String;
 
 error[E0283]: type annotations needed
   --> $DIR/issue-72690.rs:7:22
@@ -15,6 +15,7 @@ LL |     String::from("x".as_ref());
    |                      ^^^^^^
    |
    = note: multiple `impl`s satisfying `str: AsRef<_>` found in the following crates: `core`, `std`:
+           - impl AsRef<ByteStr> for str;
            - impl AsRef<OsStr> for str;
            - impl AsRef<Path> for str;
            - impl AsRef<[u8]> for str;
@@ -24,16 +25,15 @@ help: try using a fully qualified path to specify the expected types
 LL |     String::from(<str as AsRef<T>>::as_ref("x"));
    |                  ++++++++++++++++++++++++++   ~
 
-error[E0282]: type annotations needed
-  --> $DIR/issue-72690.rs:12:6
+error[E0283]: type annotations needed
+  --> $DIR/issue-72690.rs:12:9
    |
 LL |     |x| String::from("x".as_ref());
-   |      ^
+   |         ^^^^^^ cannot infer type for reference `&_`
    |
-help: consider giving this closure parameter an explicit type
-   |
-LL |     |x: /* Type */| String::from("x".as_ref());
-   |       ++++++++++++
+   = note: multiple `impl`s satisfying `String: From<&_>` found in the `alloc` crate:
+           - impl From<&String> for String;
+           - impl From<&str> for String;
 
 error[E0283]: type annotations needed
   --> $DIR/issue-72690.rs:12:26
@@ -42,6 +42,7 @@ LL |     |x| String::from("x".as_ref());
    |                          ^^^^^^
    |
    = note: multiple `impl`s satisfying `str: AsRef<_>` found in the following crates: `core`, `std`:
+           - impl AsRef<ByteStr> for str;
            - impl AsRef<OsStr> for str;
            - impl AsRef<Path> for str;
            - impl AsRef<[u8]> for str;
@@ -51,13 +52,14 @@ help: try using a fully qualified path to specify the expected types
 LL |     |x| String::from(<str as AsRef<T>>::as_ref("x"));
    |                      ++++++++++++++++++++++++++   ~
 
-error[E0283]: type annotations needed for `&T`
+error[E0283]: type annotations needed for `&_`
   --> $DIR/issue-72690.rs:17:9
    |
 LL |     let _ = "x".as_ref();
    |         ^       ------ type must be known at this point
    |
    = note: multiple `impl`s satisfying `str: AsRef<_>` found in the following crates: `core`, `std`:
+           - impl AsRef<ByteStr> for str;
            - impl AsRef<OsStr> for str;
            - impl AsRef<Path> for str;
            - impl AsRef<[u8]> for str;
@@ -71,11 +73,11 @@ error[E0283]: type annotations needed
   --> $DIR/issue-72690.rs:21:5
    |
 LL |     String::from("x".as_ref());
-   |     ^^^^^^^^^^^^ cannot infer type for reference `&_`
+   |     ^^^^^^ cannot infer type for reference `&_`
    |
    = note: multiple `impl`s satisfying `String: From<&_>` found in the `alloc` crate:
-           - impl<> From<&String> for String;
-           - impl<> From<&str> for String;
+           - impl From<&String> for String;
+           - impl From<&str> for String;
 
 error[E0283]: type annotations needed
   --> $DIR/issue-72690.rs:21:22
@@ -84,6 +86,7 @@ LL |     String::from("x".as_ref());
    |                      ^^^^^^
    |
    = note: multiple `impl`s satisfying `str: AsRef<_>` found in the following crates: `core`, `std`:
+           - impl AsRef<ByteStr> for str;
            - impl AsRef<OsStr> for str;
            - impl AsRef<Path> for str;
            - impl AsRef<[u8]> for str;
@@ -97,11 +100,11 @@ error[E0283]: type annotations needed
   --> $DIR/issue-72690.rs:28:5
    |
 LL |     String::from("x".as_ref());
-   |     ^^^^^^^^^^^^ cannot infer type for reference `&_`
+   |     ^^^^^^ cannot infer type for reference `&_`
    |
    = note: multiple `impl`s satisfying `String: From<&_>` found in the `alloc` crate:
-           - impl<> From<&String> for String;
-           - impl<> From<&str> for String;
+           - impl From<&String> for String;
+           - impl From<&str> for String;
 
 error[E0283]: type annotations needed
   --> $DIR/issue-72690.rs:28:22
@@ -110,6 +113,7 @@ LL |     String::from("x".as_ref());
    |                      ^^^^^^
    |
    = note: multiple `impl`s satisfying `str: AsRef<_>` found in the following crates: `core`, `std`:
+           - impl AsRef<ByteStr> for str;
            - impl AsRef<OsStr> for str;
            - impl AsRef<Path> for str;
            - impl AsRef<[u8]> for str;
@@ -123,11 +127,11 @@ error[E0283]: type annotations needed
   --> $DIR/issue-72690.rs:37:5
    |
 LL |     String::from("x".as_ref());
-   |     ^^^^^^^^^^^^ cannot infer type for reference `&_`
+   |     ^^^^^^ cannot infer type for reference `&_`
    |
    = note: multiple `impl`s satisfying `String: From<&_>` found in the `alloc` crate:
-           - impl<> From<&String> for String;
-           - impl<> From<&str> for String;
+           - impl From<&String> for String;
+           - impl From<&str> for String;
 
 error[E0283]: type annotations needed
   --> $DIR/issue-72690.rs:37:22
@@ -136,6 +140,7 @@ LL |     String::from("x".as_ref());
    |                      ^^^^^^
    |
    = note: multiple `impl`s satisfying `str: AsRef<_>` found in the following crates: `core`, `std`:
+           - impl AsRef<ByteStr> for str;
            - impl AsRef<OsStr> for str;
            - impl AsRef<Path> for str;
            - impl AsRef<[u8]> for str;
@@ -149,11 +154,11 @@ error[E0283]: type annotations needed
   --> $DIR/issue-72690.rs:46:5
    |
 LL |     String::from("x".as_ref());
-   |     ^^^^^^^^^^^^ cannot infer type for reference `&_`
+   |     ^^^^^^ cannot infer type for reference `&_`
    |
    = note: multiple `impl`s satisfying `String: From<&_>` found in the `alloc` crate:
-           - impl<> From<&String> for String;
-           - impl<> From<&str> for String;
+           - impl From<&String> for String;
+           - impl From<&str> for String;
 
 error[E0283]: type annotations needed
   --> $DIR/issue-72690.rs:46:22
@@ -162,6 +167,7 @@ LL |     String::from("x".as_ref());
    |                      ^^^^^^
    |
    = note: multiple `impl`s satisfying `str: AsRef<_>` found in the following crates: `core`, `std`:
+           - impl AsRef<ByteStr> for str;
            - impl AsRef<OsStr> for str;
            - impl AsRef<Path> for str;
            - impl AsRef<[u8]> for str;
@@ -175,11 +181,11 @@ error[E0283]: type annotations needed
   --> $DIR/issue-72690.rs:53:5
    |
 LL |     String::from("x".as_ref());
-   |     ^^^^^^^^^^^^ cannot infer type for reference `&_`
+   |     ^^^^^^ cannot infer type for reference `&_`
    |
    = note: multiple `impl`s satisfying `String: From<&_>` found in the `alloc` crate:
-           - impl<> From<&String> for String;
-           - impl<> From<&str> for String;
+           - impl From<&String> for String;
+           - impl From<&str> for String;
 
 error[E0283]: type annotations needed
   --> $DIR/issue-72690.rs:53:22
@@ -188,6 +194,7 @@ LL |     String::from("x".as_ref());
    |                      ^^^^^^
    |
    = note: multiple `impl`s satisfying `str: AsRef<_>` found in the following crates: `core`, `std`:
+           - impl AsRef<ByteStr> for str;
            - impl AsRef<OsStr> for str;
            - impl AsRef<Path> for str;
            - impl AsRef<[u8]> for str;
@@ -201,11 +208,11 @@ error[E0283]: type annotations needed
   --> $DIR/issue-72690.rs:62:5
    |
 LL |     String::from("x".as_ref());
-   |     ^^^^^^^^^^^^ cannot infer type for reference `&_`
+   |     ^^^^^^ cannot infer type for reference `&_`
    |
    = note: multiple `impl`s satisfying `String: From<&_>` found in the `alloc` crate:
-           - impl<> From<&String> for String;
-           - impl<> From<&str> for String;
+           - impl From<&String> for String;
+           - impl From<&str> for String;
 
 error[E0283]: type annotations needed
   --> $DIR/issue-72690.rs:62:22
@@ -214,6 +221,7 @@ LL |     String::from("x".as_ref());
    |                      ^^^^^^
    |
    = note: multiple `impl`s satisfying `str: AsRef<_>` found in the following crates: `core`, `std`:
+           - impl AsRef<ByteStr> for str;
            - impl AsRef<OsStr> for str;
            - impl AsRef<Path> for str;
            - impl AsRef<[u8]> for str;
@@ -225,5 +233,4 @@ LL |     String::from(<str as AsRef<T>>::as_ref("x"));
 
 error: aborting due to 17 previous errors
 
-Some errors have detailed explanations: E0282, E0283.
-For more information about an error, try `rustc --explain E0282`.
+For more information about this error, try `rustc --explain E0283`.

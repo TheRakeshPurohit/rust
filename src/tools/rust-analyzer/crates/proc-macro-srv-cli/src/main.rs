@@ -1,51 +1,34 @@
 //! A standalone binary for `proc-macro-srv`.
 //! Driver for proc macro server
-use std::io;
+#![cfg_attr(feature = "in-rust-tree", feature(rustc_private))]
+#![allow(clippy::print_stderr)]
+
+#[cfg(feature = "in-rust-tree")]
+extern crate rustc_driver as _;
+
+#[cfg(any(feature = "sysroot-abi", rust_analyzer))]
+mod main_loop;
+#[cfg(any(feature = "sysroot-abi", rust_analyzer))]
+use main_loop::run;
 
 fn main() -> std::io::Result<()> {
     let v = std::env::var("RUST_ANALYZER_INTERNALS_DO_NOT_USE");
-    match v.as_deref() {
-        Ok("this is unstable") => {
-            // very well, if you must
-        }
-        _ => {
-            eprintln!("If you're rust-analyzer, you can use this tool by exporting RUST_ANALYZER_INTERNALS_DO_NOT_USE='this is unstable'.");
-            eprintln!("If not, you probably shouldn't use this tool. But do what you want: I'm an error message, not a cop.");
-            std::process::exit(122);
-        }
+    if v.is_err() {
+        eprintln!("This is an IDE implementation detail, you can use this tool by exporting RUST_ANALYZER_INTERNALS_DO_NOT_USE.");
+        eprintln!(
+            "Note that this tool's API is highly unstable and may break without prior notice"
+        );
+        std::process::exit(122);
     }
 
     run()
 }
 
-#[cfg(not(feature = "sysroot-abi"))]
-fn run() -> io::Result<()> {
-    panic!("proc-macro-srv-cli requires the `sysroot-abi` feature to be enabled");
-}
-
-#[cfg(feature = "sysroot-abi")]
-fn run() -> io::Result<()> {
-    use proc_macro_api::msg::{self, Message};
-
-    let read_request = |buf: &mut String| msg::Request::read(&mut io::stdin().lock(), buf);
-
-    let write_response = |msg: msg::Response| msg.write(&mut io::stdout().lock());
-
-    let mut srv = proc_macro_srv::ProcMacroSrv::default();
-    let mut buf = String::new();
-
-    while let Some(req) = read_request(&mut buf)? {
-        let res = match req {
-            msg::Request::ListMacros { dylib_path } => {
-                msg::Response::ListMacros(srv.list_macros(&dylib_path))
-            }
-            msg::Request::ExpandMacro(task) => msg::Response::ExpandMacro(srv.expand(task)),
-            msg::Request::ApiVersionCheck {} => {
-                msg::Response::ApiVersionCheck(proc_macro_api::msg::CURRENT_API_VERSION)
-            }
-        };
-        write_response(res)?
-    }
-
-    Ok(())
+#[cfg(not(any(feature = "sysroot-abi", rust_analyzer)))]
+fn run() -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "proc-macro-srv-cli needs to be compiled with the `sysroot-abi` feature to function"
+            .to_owned(),
+    ))
 }

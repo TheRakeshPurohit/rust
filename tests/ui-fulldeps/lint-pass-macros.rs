@@ -1,11 +1,11 @@
-// compile-flags: -Z unstable-options
-// check-pass
+//@ compile-flags: -Z unstable-options
+//@ check-pass
 
 #![feature(rustc_private)]
 
 extern crate rustc_session;
 
-use rustc_session::lint::{LintArray, LintPass};
+use rustc_session::lint::{LintPass, LintVec};
 use rustc_session::{declare_lint, declare_lint_pass, impl_lint_pass};
 
 declare_lint! {

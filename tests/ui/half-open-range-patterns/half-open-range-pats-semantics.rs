@@ -1,11 +1,11 @@
-// run-pass
+//@ run-pass
 
 // Test half-open range patterns against their expression equivalents
 // via `.contains(...)` and make sure the dynamic semantics match.
 
-#![feature(exclusive_range_pattern)]
-#![allow(illegal_floating_point_literal_pattern)]
 #![allow(unreachable_patterns)]
+#![feature(f128)]
+#![feature(f16)]
 
 macro_rules! yes {
     ($scrutinee:expr, $($t:tt)+) => {
@@ -41,6 +41,16 @@ fn range_to_inclusive() {
     assert!(yes!('a', ..='a'));
     assert!(!yes!('b', ..='a'));
 
+    // f16; `..=X`
+    // FIXME(f16_f128): remove gate when ABI issues are resolved
+    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+    {
+        assert!(yes!(f16::NEG_INFINITY, ..=f16::NEG_INFINITY));
+        assert!(yes!(f16::NEG_INFINITY, ..=1.0f16));
+        assert!(yes!(1.5f16, ..=1.5f16));
+        assert!(!yes!(1.6f16, ..=-1.5f16));
+    }
+
     // f32; `..=X`
     assert!(yes!(f32::NEG_INFINITY, ..=f32::NEG_INFINITY));
     assert!(yes!(f32::NEG_INFINITY, ..=1.0f32));
@@ -52,6 +62,16 @@ fn range_to_inclusive() {
     assert!(yes!(f64::NEG_INFINITY, ..=1.0f64));
     assert!(yes!(1.5f64, ..=1.5f64));
     assert!(!yes!(1.6f64, ..=-1.5f64));
+
+    // f128; `..=X`
+    // FIXME(f16_f128): remove gate when ABI issues are resolved
+    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+    {
+        assert!(yes!(f128::NEG_INFINITY, ..=f128::NEG_INFINITY));
+        assert!(yes!(f128::NEG_INFINITY, ..=1.0f128));
+        assert!(yes!(1.5f128, ..=1.5f128));
+        assert!(!yes!(1.6f128, ..=-1.5f128));
+    }
 }
 
 fn range_to() {
@@ -85,6 +105,17 @@ fn range_to() {
     assert!(!yes!('a', ..'a'));
     assert!(!yes!('b', ..'a'));
 
+    // f16; `..X`
+    // FIXME(f16_f128): remove gate when ABI issues are resolved
+    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+    {
+        assert!(yes!(f16::NEG_INFINITY, ..1.0f16));
+        assert!(!yes!(1.5f16, ..1.5f16));
+        const E16: f16 = 1.5f16 + f16::EPSILON;
+        assert!(yes!(1.5f16, ..E16));
+        assert!(!yes!(1.6f16, ..1.5f16));
+    }
+
     // f32; `..X`
     assert!(yes!(f32::NEG_INFINITY, ..1.0f32));
     assert!(!yes!(1.5f32, ..1.5f32));
@@ -98,6 +129,17 @@ fn range_to() {
     const E64: f64 = 1.5f64 + f64::EPSILON;
     assert!(yes!(1.5f64, ..E64));
     assert!(!yes!(1.6f64, ..1.5f64));
+
+    // f128; `..X`
+    // FIXME(f16_f128): remove gate when ABI issues are resolved
+    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+    {
+        assert!(yes!(f128::NEG_INFINITY, ..1.0f128));
+        assert!(!yes!(1.5f128, ..1.5f128));
+        const E128: f128 = 1.5f128 + f128::EPSILON;
+        assert!(yes!(1.5f128, ..E128));
+        assert!(!yes!(1.6f128, ..1.5f128));
+    }
 }
 
 fn range_from() {
@@ -131,6 +173,20 @@ fn range_from() {
     assert!(!yes!('a', 'b'..));
     assert!(yes!(core::char::MAX, core::char::MAX..));
 
+    // f16; `X..`
+    // FIXME(f16_f128): remove gate when ABI issues are resolved
+    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+    {
+        assert!(yes!(f16::NEG_INFINITY, f16::NEG_INFINITY..));
+        assert!(yes!(f16::INFINITY, f16::NEG_INFINITY..));
+        assert!(!yes!(f16::NEG_INFINITY, 1.0f16..));
+        assert!(yes!(f16::INFINITY, 1.0f16..));
+        assert!(!yes!(1.0f16 - f16::EPSILON, 1.0f16..));
+        assert!(yes!(1.0f16, 1.0f16..));
+        assert!(yes!(f16::INFINITY, 1.0f16..));
+        assert!(yes!(f16::INFINITY, f16::INFINITY..));
+    }
+
     // f32; `X..`
     assert!(yes!(f32::NEG_INFINITY, f32::NEG_INFINITY..));
     assert!(yes!(f32::INFINITY, f32::NEG_INFINITY..));
@@ -150,6 +206,20 @@ fn range_from() {
     assert!(yes!(1.0f64, 1.0f64..));
     assert!(yes!(f64::INFINITY, 1.0f64..));
     assert!(yes!(f64::INFINITY, f64::INFINITY..));
+
+    // f128; `X..`
+    // FIXME(f16_f128): remove gate when ABI issues are resolved
+    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+    {
+        assert!(yes!(f128::NEG_INFINITY, f128::NEG_INFINITY..));
+        assert!(yes!(f128::INFINITY, f128::NEG_INFINITY..));
+        assert!(!yes!(f128::NEG_INFINITY, 1.0f128..));
+        assert!(yes!(f128::INFINITY, 1.0f128..));
+        assert!(!yes!(1.0f128 - f128::EPSILON, 1.0f128..));
+        assert!(yes!(1.0f128, 1.0f128..));
+        assert!(yes!(f128::INFINITY, 1.0f128..));
+        assert!(yes!(f128::INFINITY, f128::INFINITY..));
+    }
 }
 
 fn main() {

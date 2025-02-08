@@ -1,11 +1,13 @@
+use rustc_data_structures::fx::FxIndexMap;
+use rustc_errors::ErrorGuaranteed;
+use rustc_hir::def_id::{DefId, DefIdMap};
+use rustc_macros::{HashStable, TyDecodable, TyEncodable};
+use rustc_span::sym;
+
 use crate::error::StrictCoherenceNeedsNegativeCoherence;
 use crate::ty::fast_reject::SimplifiedType;
 use crate::ty::visit::TypeVisitableExt;
 use crate::ty::{self, TyCtxt};
-use rustc_data_structures::fx::FxIndexMap;
-use rustc_errors::ErrorGuaranteed;
-use rustc_hir::def_id::{DefId, DefIdMap};
-use rustc_span::symbol::sym;
 
 /// A per-trait graph of impls in specialization order. At the moment, this
 /// graph forms a tree rooted with the trait itself, with all other nodes
@@ -30,20 +32,18 @@ pub struct Graph {
 
     /// The "root" impls are found by looking up the trait's def_id.
     pub children: DefIdMap<Children>,
-
-    /// Whether an error was emitted while constructing the graph.
-    pub has_errored: Option<ErrorGuaranteed>,
 }
 
 impl Graph {
     pub fn new() -> Graph {
-        Graph { parent: Default::default(), children: Default::default(), has_errored: None }
+        Graph { parent: Default::default(), children: Default::default() }
     }
 
     /// The parent of a given impl, which is the `DefId` of the trait when the
     /// impl is a "specialization root".
+    #[track_caller]
     pub fn parent(&self, child: DefId) -> DefId {
-        *self.parent.get(&child).unwrap_or_else(|| panic!("Failed to get parent for {:?}", child))
+        *self.parent.get(&child).unwrap_or_else(|| panic!("Failed to get parent for {child:?}"))
     }
 }
 
@@ -61,7 +61,7 @@ pub enum OverlapMode {
 
 impl OverlapMode {
     pub fn get(tcx: TyCtxt<'_>, trait_id: DefId) -> OverlapMode {
-        let with_negative_coherence = tcx.features().with_negative_coherence;
+        let with_negative_coherence = tcx.features().with_negative_coherence();
         let strict_coherence = tcx.has_attr(trait_id, sym::rustc_strict_coherence);
 
         if with_negative_coherence {
@@ -72,11 +72,11 @@ impl OverlapMode {
                     .as_local()
                     .into_iter()
                     .flat_map(|local_def_id| {
-                        tcx.hir().attrs(tcx.hir().local_def_id_to_hir_id(local_def_id))
+                        tcx.hir().attrs(tcx.local_def_id_to_hir_id(local_def_id))
                     })
                     .find(|attr| attr.has_name(sym::rustc_strict_coherence))
                     .map(|attr| attr.span);
-                tcx.sess.emit_err(StrictCoherenceNeedsNegativeCoherence {
+                tcx.dcx().emit_err(StrictCoherenceNeedsNegativeCoherence {
                     span: tcx.def_span(trait_id),
                     attr_span,
                 });
@@ -255,11 +255,9 @@ pub fn ancestors(
     trait_def_id: DefId,
     start_from_impl: DefId,
 ) -> Result<Ancestors<'_>, ErrorGuaranteed> {
-    let specialization_graph = tcx.specialization_graph_of(trait_def_id);
+    let specialization_graph = tcx.specialization_graph_of(trait_def_id)?;
 
-    if let Some(reported) = specialization_graph.has_errored {
-        Err(reported)
-    } else if let Err(reported) = tcx.type_of(start_from_impl).subst_identity().error_reported() {
+    if let Err(reported) = tcx.type_of(start_from_impl).instantiate_identity().error_reported() {
         Err(reported)
     } else {
         Ok(Ancestors {

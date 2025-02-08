@@ -1,24 +1,23 @@
 // Test that the correct module flags are emitted with different control-flow protection flags.
 
-// revisions: undefined none branch return full
-// needs-llvm-components: x86
-// [undefined] compile-flags:
-// [none] compile-flags: -Z cf-protection=none
-// [branch] compile-flags: -Z cf-protection=branch
-// [return] compile-flags: -Z cf-protection=return
-// [full] compile-flags: -Z cf-protection=full
-// compile-flags: --target x86_64-unknown-linux-gnu
+//@ revisions: undefined none branch return full
+//@ needs-llvm-components: x86
+//@ [undefined] compile-flags:
+//@ [none] compile-flags: -Z cf-protection=none
+//@ [branch] compile-flags: -Z cf-protection=branch
+//@ [return] compile-flags: -Z cf-protection=return
+//@ [full] compile-flags: -Z cf-protection=full
+//@ compile-flags: --target x86_64-unknown-linux-gnu
 
 #![crate_type = "lib"]
 #![feature(no_core, lang_items)]
 #![no_core]
 
-#[lang="sized"]
-trait Sized { }
+#[lang = "sized"]
+trait Sized {}
 
 // A basic test function.
-pub fn test() {
-}
+pub fn test() {}
 
 // undefined-NOT: !"cf-protection-branch"
 // undefined-NOT: !"cf-protection-return"

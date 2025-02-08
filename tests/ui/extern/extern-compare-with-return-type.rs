@@ -1,7 +1,8 @@
-// run-pass
+//@ run-pass
 
 // Tests that we can compare various kinds of extern fn signatures.
 #![allow(non_camel_case_types)]
+#![allow(unpredictable_function_pointer_comparisons)]
 
 // `dbg!()` differentiates these functions to ensure they won't be merged.
 extern "C" fn voidret1() { dbg!() }

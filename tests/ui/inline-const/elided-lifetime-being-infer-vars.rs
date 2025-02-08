@@ -1,6 +1,4 @@
-// check-pass
-
-#![feature(inline_const)]
+//@ check-pass
 
 fn main() {
     let _my_usize = const {

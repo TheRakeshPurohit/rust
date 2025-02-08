@@ -5,23 +5,23 @@ mod no_generics {
 
     type B = Ty<'static>;
     //~^ ERROR struct takes 0 lifetime arguments but 1 lifetime argument
-    //~| HELP remove these generics
+    //~| HELP remove the unnecessary generics
 
     type C = Ty<'static, usize>;
     //~^ ERROR struct takes 0 lifetime arguments but 1 lifetime argument
     //~| ERROR struct takes 0 generic arguments but 1 generic argument
-    //~| HELP remove this lifetime argument
-    //~| HELP remove this generic argument
+    //~| HELP remove the lifetime argument
+    //~| HELP remove the unnecessary generic argument
 
     type D = Ty<'static, usize, { 0 }>;
     //~^ ERROR struct takes 0 lifetime arguments but 1 lifetime argument
     //~| ERROR struct takes 0 generic arguments but 2 generic arguments
-    //~| HELP remove this lifetime argument
-    //~| HELP remove these generic arguments
+    //~| HELP remove the lifetime argument
+    //~| HELP remove the unnecessary generic arguments
 }
 
 mod type_and_type {
-    struct Ty<A, B>;
+    struct Ty<A, B>(A, B);
 
     type A = Ty;
     //~^ ERROR missing generics for struct `type_and_type::Ty`
@@ -35,7 +35,7 @@ mod type_and_type {
 
     type D = Ty<usize, String, char>;
     //~^ ERROR struct takes 2 generic arguments but 3 generic arguments
-    //~| HELP remove this
+    //~| HELP remove the
 
     type E = Ty<>;
     //~^ ERROR struct takes 2 generic arguments but 0 generic arguments were supplied
@@ -43,7 +43,7 @@ mod type_and_type {
 }
 
 mod lifetime_and_type {
-    struct Ty<'a, T>;
+    struct Ty<'a, T>(&'a T);
 
     type A = Ty;
     //~^ ERROR missing generics for struct
@@ -70,12 +70,12 @@ mod lifetime_and_type {
     type F = Ty<'static, usize, 'static, usize>;
     //~^ ERROR struct takes 1 lifetime argument but 2 lifetime arguments
     //~| ERROR struct takes 1 generic argument but 2 generic arguments
-    //~| HELP remove this lifetime argument
-    //~| HELP remove this generic argument
+    //~| HELP remove the lifetime argument
+    //~| HELP remove the unnecessary generic argument
 }
 
 mod type_and_type_and_type {
-    struct Ty<A, B, C = &'static str>;
+    struct Ty<A, B, C = &'static str>(A, B, C);
 
     type A = Ty;
     //~^ ERROR missing generics for struct `type_and_type_and_type::Ty`
@@ -317,13 +317,13 @@ mod stdlib {
 
         type C = HashMap<'static>;
         //~^ ERROR struct takes 0 lifetime arguments but 1 lifetime argument
-        //~| HELP remove these generics
+        //~| HELP remove the
         //~| ERROR struct takes at least 2
         //~| HELP add missing
 
         type D = HashMap<usize, String, char, f64>;
         //~^ ERROR struct takes at most 3
-        //~| HELP remove this
+        //~| HELP remove the
 
         type E = HashMap<>;
         //~^ ERROR struct takes at least 2 generic arguments but 0 generic arguments
@@ -341,7 +341,7 @@ mod stdlib {
 
         type C = Result<'static>;
         //~^ ERROR enum takes 0 lifetime arguments but 1 lifetime argument
-        //~| HELP remove these generics
+        //~| HELP remove the unnecessary generics
         //~| ERROR enum takes 2 generic arguments but 0 generic arguments
         //~| HELP add missing
 

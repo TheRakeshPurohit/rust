@@ -1,11 +1,11 @@
-use clippy_utils::diagnostics::span_lint_and_note;
-use clippy_utils::get_parent_node;
+use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::is_must_use_func_call;
 use clippy_utils::ty::{is_copy, is_must_use_ty, is_type_lang_item};
 use rustc_hir::{Arm, Expr, ExprKind, LangItem, Node};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::sym;
+use std::borrow::Cow;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -16,7 +16,7 @@ declare_clippy_lint! {
     /// have been intended.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// struct Foo;
     /// let x = Foo;
     /// std::mem::drop(x);
@@ -36,7 +36,7 @@ declare_clippy_lint! {
     /// have been intended.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// struct Foo;
     /// let x = Foo;
     /// std::mem::forget(x);
@@ -47,6 +47,28 @@ declare_clippy_lint! {
     "call to `std::mem::forget` with a value which does not implement `Drop`"
 }
 
+declare_clippy_lint! {
+    /// ### What it does
+    /// Checks for usage of `std::mem::forget(t)` where `t` is
+    /// `Drop` or has a field that implements `Drop`.
+    ///
+    /// ### Why restrict this?
+    /// `std::mem::forget(t)` prevents `t` from running its destructor, possibly causing leaks.
+    /// It is not possible to detect all means of creating leaks, but it may be desirable to
+    /// prohibit the simple ones.
+    ///
+    /// ### Example
+    /// ```no_run
+    /// # use std::mem;
+    /// # use std::rc::Rc;
+    /// mem::forget(Rc::new(55))
+    /// ```
+    #[clippy::version = "pre 1.29.0"]
+    pub MEM_FORGET,
+    restriction,
+    "`mem::forget` usage on `Drop` types, likely to cause memory leaks"
+}
+
 const DROP_NON_DROP_SUMMARY: &str = "call to `std::mem::drop` with a value that does not implement `Drop`. \
                                  Dropping such a type only extends its contained lifetimes";
 const FORGET_NON_DROP_SUMMARY: &str = "call to `std::mem::forget` with a value that does not implement `Drop`. \
@@ -55,6 +77,7 @@ const FORGET_NON_DROP_SUMMARY: &str = "call to `std::mem::forget` with a value t
 declare_lint_pass!(DropForgetRef => [
     DROP_NON_DROP,
     FORGET_NON_DROP,
+    MEM_FORGET,
 ]);
 
 impl<'tcx> LateLintPass<'tcx> for DropForgetRef {
@@ -67,35 +90,50 @@ impl<'tcx> LateLintPass<'tcx> for DropForgetRef {
             let arg_ty = cx.typeck_results().expr_ty(arg);
             let is_copy = is_copy(cx, arg_ty);
             let drop_is_single_call_in_arm = is_single_call_in_arm(cx, arg, expr);
-            let (lint, msg) = match fn_name {
-                // early return for uplifted lints: dropping_references, dropping_copy_types, forgetting_references, forgetting_copy_types
+            let (lint, msg, note_span) = match fn_name {
+                // early return for uplifted lints: dropping_references, dropping_copy_types, forgetting_references,
+                // forgetting_copy_types
                 sym::mem_drop if arg_ty.is_ref() && !drop_is_single_call_in_arm => return,
                 sym::mem_forget if arg_ty.is_ref() => return,
                 sym::mem_drop if is_copy && !drop_is_single_call_in_arm => return,
                 sym::mem_forget if is_copy => return,
                 sym::mem_drop if is_type_lang_item(cx, arg_ty, LangItem::ManuallyDrop) => return,
                 sym::mem_drop
-                    if !(arg_ty.needs_drop(cx.tcx, cx.param_env)
+                    if !(arg_ty.needs_drop(cx.tcx, cx.typing_env())
                         || is_must_use_func_call(cx, arg)
                         || is_must_use_ty(cx, arg_ty)
-                        || drop_is_single_call_in_arm
-                        ) =>
+                        || drop_is_single_call_in_arm) =>
                 {
-                    (DROP_NON_DROP, DROP_NON_DROP_SUMMARY)
+                    (DROP_NON_DROP, DROP_NON_DROP_SUMMARY.into(), Some(arg.span))
                 },
-                sym::mem_forget if !arg_ty.needs_drop(cx.tcx, cx.param_env) => {
-                    (FORGET_NON_DROP, FORGET_NON_DROP_SUMMARY)
+                sym::mem_forget => {
+                    if arg_ty.needs_drop(cx.tcx, cx.typing_env()) {
+                        (
+                            MEM_FORGET,
+                            Cow::Owned(format!(
+                                "usage of `mem::forget` on {}",
+                                if arg_ty.ty_adt_def().is_some_and(|def| def.has_dtor(cx.tcx)) {
+                                    "`Drop` type"
+                                } else {
+                                    "type with `Drop` fields"
+                                }
+                            )),
+                            None,
+                        )
+                    } else {
+                        (FORGET_NON_DROP, FORGET_NON_DROP_SUMMARY.into(), Some(arg.span))
+                    }
                 },
                 _ => return,
             };
-            span_lint_and_note(
-                cx,
-                lint,
-                expr.span,
-                msg,
-                Some(arg.span),
-                &format!("argument has type `{arg_ty}`"),
-            );
+            span_lint_and_then(cx, lint, expr.span, msg, |diag| {
+                let note = format!("argument has type `{arg_ty}`");
+                if let Some(span) = note_span {
+                    diag.span_note(span, note);
+                } else {
+                    diag.note(note);
+                }
+            });
         }
     }
 }
@@ -107,8 +145,7 @@ impl<'tcx> LateLintPass<'tcx> for DropForgetRef {
 // }
 fn is_single_call_in_arm<'tcx>(cx: &LateContext<'tcx>, arg: &'tcx Expr<'_>, drop_expr: &'tcx Expr<'_>) -> bool {
     if matches!(arg.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
-        let parent_node = get_parent_node(cx.tcx, drop_expr.hir_id);
-        if let Some(Node::Arm(Arm { body, .. })) = &parent_node {
+        if let Node::Arm(Arm { body, .. }) = cx.tcx.parent_hir_node(drop_expr.hir_id) {
             return body.hir_id == drop_expr.hir_id;
         }
     }

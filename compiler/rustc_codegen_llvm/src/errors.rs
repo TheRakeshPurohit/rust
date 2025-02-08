@@ -1,14 +1,12 @@
-use std::borrow::Cow;
 use std::ffi::CString;
 use std::path::Path;
 
-use crate::fluent_generated as fluent;
 use rustc_data_structures::small_c_str::SmallCStr;
-use rustc_errors::{
-    DiagnosticBuilder, EmissionGuarantee, ErrorGuaranteed, Handler, IntoDiagnostic,
-};
+use rustc_errors::{Diag, DiagCtxtHandle, Diagnostic, EmissionGuarantee, Level};
 use rustc_macros::{Diagnostic, Subdiagnostic};
 use rustc_span::Span;
+
+use crate::fluent_generated as fluent;
 
 #[derive(Diagnostic)]
 #[diag(codegen_llvm_unknown_ctarget_feature_prefix)]
@@ -26,19 +24,29 @@ pub(crate) struct UnknownCTargetFeature<'a> {
     pub rust_feature: PossibleFeature<'a>,
 }
 
+#[derive(Diagnostic)]
+#[diag(codegen_llvm_unstable_ctarget_feature)]
+#[note]
+pub(crate) struct UnstableCTargetFeature<'a> {
+    pub feature: &'a str,
+}
+
+#[derive(Diagnostic)]
+#[diag(codegen_llvm_forbidden_ctarget_feature)]
+#[note]
+#[note(codegen_llvm_forbidden_ctarget_feature_issue)]
+pub(crate) struct ForbiddenCTargetFeature<'a> {
+    pub feature: &'a str,
+    pub enabled: &'a str,
+    pub reason: &'a str,
+}
+
 #[derive(Subdiagnostic)]
 pub(crate) enum PossibleFeature<'a> {
     #[help(codegen_llvm_possible_feature)]
     Some { rust_feature: &'a str },
     #[help(codegen_llvm_consider_filing_feature_request)]
     None,
-}
-
-#[derive(Diagnostic)]
-#[diag(codegen_llvm_error_creating_import_library)]
-pub(crate) struct ErrorCreatingImportLibrary<'a> {
-    pub lib_name: &'a str,
-    pub error: String,
 }
 
 #[derive(Diagnostic)]
@@ -66,67 +74,26 @@ pub(crate) struct InvalidMinimumAlignmentTooLarge {
 pub(crate) struct SanitizerMemtagRequiresMte;
 
 #[derive(Diagnostic)]
-#[diag(codegen_llvm_error_writing_def_file)]
-pub(crate) struct ErrorWritingDEFFile {
-    pub error: std::io::Error,
-}
-
-#[derive(Diagnostic)]
-#[diag(codegen_llvm_error_calling_dlltool)]
-pub(crate) struct ErrorCallingDllTool<'a> {
-    pub dlltool_path: Cow<'a, str>,
-    pub error: std::io::Error,
-}
-
-#[derive(Diagnostic)]
-#[diag(codegen_llvm_dlltool_fail_import_library)]
-pub(crate) struct DlltoolFailImportLibrary<'a> {
-    pub stdout: Cow<'a, str>,
-    pub stderr: Cow<'a, str>,
-}
-
-#[derive(Diagnostic)]
 #[diag(codegen_llvm_dynamic_linking_with_lto)]
 #[note]
 pub(crate) struct DynamicLinkingWithLTO;
 
 pub(crate) struct ParseTargetMachineConfig<'a>(pub LlvmError<'a>);
 
-impl<EM: EmissionGuarantee> IntoDiagnostic<'_, EM> for ParseTargetMachineConfig<'_> {
-    fn into_diagnostic(self, sess: &'_ Handler) -> DiagnosticBuilder<'_, EM> {
-        let diag: DiagnosticBuilder<'_, EM> = self.0.into_diagnostic(sess);
-        let (message, _) = diag.styled_message().first().expect("`LlvmError` with no message");
-        let message = sess.eagerly_translate_to_string(message.clone(), diag.args());
-
-        let mut diag = sess.struct_diagnostic(fluent::codegen_llvm_parse_target_machine_config);
-        diag.set_arg("error", message);
-        diag
+impl<G: EmissionGuarantee> Diagnostic<'_, G> for ParseTargetMachineConfig<'_> {
+    fn into_diag(self, dcx: DiagCtxtHandle<'_>, level: Level) -> Diag<'_, G> {
+        let diag: Diag<'_, G> = self.0.into_diag(dcx, level);
+        let (message, _) = diag.messages.first().expect("`LlvmError` with no message");
+        let message = dcx.eagerly_translate_to_string(message.clone(), diag.args.iter());
+        Diag::new(dcx, level, fluent::codegen_llvm_parse_target_machine_config)
+            .with_arg("error", message)
     }
 }
 
-pub(crate) struct TargetFeatureDisableOrEnable<'a> {
-    pub features: &'a [&'a str],
-    pub span: Option<Span>,
-    pub missing_features: Option<MissingFeatures>,
-}
-
-#[derive(Subdiagnostic)]
-#[help(codegen_llvm_missing_features)]
-pub(crate) struct MissingFeatures;
-
-impl IntoDiagnostic<'_, ErrorGuaranteed> for TargetFeatureDisableOrEnable<'_> {
-    fn into_diagnostic(self, sess: &'_ Handler) -> DiagnosticBuilder<'_, ErrorGuaranteed> {
-        let mut diag = sess.struct_err(fluent::codegen_llvm_target_feature_disable_or_enable);
-        if let Some(span) = self.span {
-            diag.set_span(span);
-        };
-        if let Some(missing_features) = self.missing_features {
-            diag.subdiagnostic(missing_features);
-        }
-        diag.set_arg("features", self.features.join(", "));
-        diag
-    }
-}
+#[derive(Diagnostic)]
+#[diag(codegen_llvm_autodiff_without_lto)]
+#[note]
+pub(crate) struct AutoDiffWithoutLTO;
 
 #[derive(Diagnostic)]
 #[diag(codegen_llvm_lto_disallowed)]
@@ -135,6 +102,10 @@ pub(crate) struct LtoDisallowed;
 #[derive(Diagnostic)]
 #[diag(codegen_llvm_lto_dylib)]
 pub(crate) struct LtoDylib;
+
+#[derive(Diagnostic)]
+#[diag(codegen_llvm_lto_proc_macro)]
+pub(crate) struct LtoProcMacro;
 
 #[derive(Diagnostic)]
 #[diag(codegen_llvm_lto_bitcode_from_rlib)]
@@ -166,12 +137,14 @@ pub enum LlvmError<'a> {
     PrepareThinLtoModule,
     #[diag(codegen_llvm_parse_bitcode)]
     ParseBitcode,
+    #[diag(codegen_llvm_prepare_autodiff)]
+    PrepareAutoDiff { src: String, target: String, error: String },
 }
 
 pub(crate) struct WithLlvmError<'a>(pub LlvmError<'a>, pub String);
 
-impl<EM: EmissionGuarantee> IntoDiagnostic<'_, EM> for WithLlvmError<'_> {
-    fn into_diagnostic(self, sess: &'_ Handler) -> DiagnosticBuilder<'_, EM> {
+impl<G: EmissionGuarantee> Diagnostic<'_, G> for WithLlvmError<'_> {
+    fn into_diag(self, dcx: DiagCtxtHandle<'_>, level: Level) -> Diag<'_, G> {
         use LlvmError::*;
         let msg_with_llvm_err = match &self.0 {
             WriteOutput { .. } => fluent::codegen_llvm_write_output_with_llvm_err,
@@ -187,11 +160,12 @@ impl<EM: EmissionGuarantee> IntoDiagnostic<'_, EM> for WithLlvmError<'_> {
             }
             PrepareThinLtoModule => fluent::codegen_llvm_prepare_thin_lto_module_with_llvm_err,
             ParseBitcode => fluent::codegen_llvm_parse_bitcode_with_llvm_err,
+            PrepareAutoDiff { .. } => fluent::codegen_llvm_prepare_autodiff_with_llvm_err,
         };
-        let mut diag = self.0.into_diagnostic(sess);
-        diag.set_primary_message(msg_with_llvm_err);
-        diag.set_arg("llvm_err", self.1);
-        diag
+        self.0
+            .into_diag(dcx, level)
+            .with_primary_message(msg_with_llvm_err)
+            .with_arg("llvm_err", self.1)
     }
 }
 
@@ -223,4 +197,25 @@ pub(crate) struct WriteBytecode<'a> {
 #[diag(codegen_llvm_copy_bitcode)]
 pub(crate) struct CopyBitcode {
     pub err: std::io::Error,
+}
+
+#[derive(Diagnostic)]
+#[diag(codegen_llvm_unknown_debuginfo_compression)]
+pub(crate) struct UnknownCompression {
+    pub algorithm: &'static str,
+}
+
+#[derive(Diagnostic)]
+#[diag(codegen_llvm_mismatch_data_layout)]
+pub(crate) struct MismatchedDataLayout<'a> {
+    pub rustc_target: &'a str,
+    pub rustc_layout: &'a str,
+    pub llvm_target: &'a str,
+    pub llvm_layout: &'a str,
+}
+
+#[derive(Diagnostic)]
+#[diag(codegen_llvm_fixed_x18_invalid_arch)]
+pub(crate) struct FixedX18InvalidArch<'a> {
+    pub arch: &'a str,
 }

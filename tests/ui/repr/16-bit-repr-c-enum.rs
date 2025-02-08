@@ -1,14 +1,14 @@
-// build-pass
-// revisions: avr msp430
+//@ build-pass
+//@ revisions: avr msp430
 //
-// [avr] needs-llvm-components: avr
-// [avr] compile-flags: --target=avr-unknown-gnu-atmega328 --crate-type=rlib
-// [msp430] needs-llvm-components: msp430
-// [msp430] compile-flags: --target=msp430-none-elf --crate-type=rlib
-#![feature(no_core, lang_items, intrinsics, staged_api)]
+//@ [avr] needs-llvm-components: avr
+//@ [avr] compile-flags: --target=avr-unknown-gnu-atmega328 --crate-type=rlib
+//@ [msp430] needs-llvm-components: msp430
+//@ [msp430] compile-flags: --target=msp430-none-elf --crate-type=rlib
+#![feature(no_core, lang_items, intrinsics, staged_api, rustc_attrs)]
 #![no_core]
 #![crate_type = "lib"]
-#![stable(feature = "", since = "")]
+#![stable(feature = "intrinsics_for_test", since = "3.3.3")]
 #![allow(dead_code)]
 
 // Test that the repr(C) attribute doesn't break compilation
@@ -21,11 +21,12 @@ enum Foo {
     Bar,
 }
 
-extern "rust-intrinsic" {
-    #[stable(feature = "", since = "")]
-    #[rustc_const_stable(feature = "", since = "")]
-    #[rustc_safe_intrinsic]
-    fn size_of<T>() -> usize;
+#[stable(feature = "intrinsics_for_test", since = "3.3.3")]
+#[rustc_const_stable(feature = "intrinsics_for_test", since = "3.3.3")]
+#[rustc_intrinsic]
+#[rustc_intrinsic_must_be_overridden]
+const fn size_of<T>() -> usize {
+    loop {}
 }
 
 #[lang="sized"]

@@ -1,7 +1,8 @@
 [package]
 name = "proc-macro-srv"
 version = "0.0.0"
-description = "TBD"
+repository.workspace = true
+description = "Proc-macro server for rust-analyzer."
 
 authors.workspace = true
 edition.workspace = true
@@ -12,27 +13,30 @@ rust-version.workspace = true
 doctest = false
 
 [dependencies]
-object = { version = "0.30.2", default-features = false, features = [
-    "std",
-    "read_core",
-    "elf",
-    "macho",
-    "pe",
-] }
-libloading = "0.7.3"
-memmap2 = "0.5.4"
+object.workspace = true
+libc.workspace = true
+libloading.workspace = true
+memmap2.workspace = true
 
 stdx.workspace = true
 tt.workspace = true
-mbe.workspace = true
+syntax-bridge.workspace = true
 paths.workspace = true
-proc-macro-api.workspace = true
+# span = {workspace = true, default-features = false} does not work
+span = { path = "../span", version = "0.0.0", default-features = false}
+intern.workspace = true
+
+ra-ap-rustc_lexer.workspace = true
 
 [dev-dependencies]
-expect-test = "1.4.0"
+expect-test.workspace = true
 
 # used as proc macro test targets
-proc-macro-test.workspace = true
+proc-macro-test.path = "./proc-macro-test"
 
 [features]
 sysroot-abi = []
+in-rust-tree = ["syntax-bridge/in-rust-tree", "tt/in-rust-tree", "sysroot-abi"]
+
+[lints]
+workspace = true

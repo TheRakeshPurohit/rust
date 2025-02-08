@@ -1,6 +1,4 @@
-// only-x86_64
-
-#![feature(asm_const)]
+//@ only-x86_64
 
 use std::arch::asm;
 

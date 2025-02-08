@@ -1,6 +1,4 @@
-// build-pass
-
-#![feature(inline_const)]
+//@ build-pass
 
 use std::cell::Cell;
 

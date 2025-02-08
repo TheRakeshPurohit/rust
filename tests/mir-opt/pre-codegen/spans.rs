@@ -1,8 +1,8 @@
+// skip-filecheck
 // Test that the comments we emit in MIR opts are accurate.
 //
 // EMIT_MIR_FOR_EACH_PANIC_STRATEGY
-// compile-flags: -Zmir-include-spans
-// ignore-wasm32
+//@ compile-flags: -Zmir-include-spans -C debuginfo=full
 
 #![crate_type = "lib"]
 

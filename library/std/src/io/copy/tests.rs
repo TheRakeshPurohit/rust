@@ -1,4 +1,6 @@
 use crate::cmp::{max, min};
+use crate::collections::VecDeque;
+use crate::io;
 use crate::io::*;
 
 #[test]
@@ -19,7 +21,7 @@ struct ShortReader {
 
 impl Read for ShortReader {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        let bytes = min(self.cap, self.read_size);
+        let bytes = min(self.cap, self.read_size).min(buf.len());
         self.cap -= bytes;
         self.observed_buffer = max(self.observed_buffer, buf.len());
         Ok(bytes)
@@ -78,16 +80,53 @@ fn copy_specializes_bufreader() {
     );
 }
 
+#[test]
+fn copy_specializes_to_vec() {
+    let cap = DEFAULT_BUF_SIZE * 10;
+    let mut source = ShortReader { cap, observed_buffer: 0, read_size: DEFAULT_BUF_SIZE };
+    let mut sink = Vec::new();
+    let copied = io::copy(&mut source, &mut sink).unwrap();
+    assert_eq!(cap as u64, copied);
+    assert_eq!(sink.len() as u64, copied);
+    assert!(
+        source.observed_buffer > DEFAULT_BUF_SIZE,
+        "expected a large buffer to be provided to the reader, got {}",
+        source.observed_buffer
+    );
+}
+
+#[test]
+fn copy_specializes_from_vecdeque() {
+    let mut source = VecDeque::with_capacity(100 * 1024);
+    for _ in 0..20 * 1024 {
+        source.push_front(0);
+    }
+    for _ in 0..20 * 1024 {
+        source.push_back(0);
+    }
+    let mut sink = WriteObserver { observed_buffer: 0 };
+    assert_eq!(40 * 1024u64, io::copy(&mut source, &mut sink).unwrap());
+    assert_eq!(20 * 1024, sink.observed_buffer);
+}
+
+#[test]
+fn copy_specializes_from_slice() {
+    let mut source = [1; 60 * 1024].as_slice();
+    let mut sink = WriteObserver { observed_buffer: 0 };
+    assert_eq!(60 * 1024u64, io::copy(&mut source, &mut sink).unwrap());
+    assert_eq!(60 * 1024, sink.observed_buffer);
+}
+
 #[cfg(unix)]
 mod io_benches {
-    use crate::fs::File;
-    use crate::fs::OpenOptions;
-    use crate::io::prelude::*;
-    use crate::io::BufReader;
-
     use test::Bencher;
 
+    use crate::fs::{File, OpenOptions};
+    use crate::io::BufReader;
+    use crate::io::prelude::*;
+
     #[bench]
+    #[cfg_attr(target_os = "emscripten", ignore)] // no /dev
     fn bench_copy_buf_reader(b: &mut Bencher) {
         let mut file_in = File::open("/dev/zero").expect("opening /dev/zero failed");
         // use dyn to avoid specializations unrelated to readbuf

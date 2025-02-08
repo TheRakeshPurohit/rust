@@ -1,10 +1,10 @@
-// run-pass
+//@ run-pass
 
 #![allow(unused_must_use)]
 /*
-  This is about the simplest program that can successfully send a
-  message.
- */
+ This is about the simplest program that can successfully send a
+ message.
+*/
 
 use std::sync::mpsc::channel;
 

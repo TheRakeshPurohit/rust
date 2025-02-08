@@ -1,6 +1,6 @@
-// aux-build:attr-stmt-expr.rs
-// aux-build:test-macros.rs
-// compile-flags: -Z span-debug
+//@ proc-macro: attr-stmt-expr.rs
+//@ proc-macro: test-macros.rs
+//@ compile-flags: -Z span-debug
 
 #![feature(proc_macro_hygiene)]
 #![feature(rustc_attrs)]

@@ -1,16 +1,12 @@
-// run-pass
-// aux-build:extern-crosscrate-source.rs
-// ignore-wasm32-bare no libc to test ffi with
-
-#![feature(rustc_private)]
+//@ run-pass
+//@ aux-build:extern-crosscrate-source.rs
 
 extern crate externcallback;
-extern crate libc;
 
-fn fact(n: libc::uintptr_t) -> libc::uintptr_t {
+fn fact(n: u64) -> u64 {
     unsafe {
-        println!("n = {}", n);
-        externcallback::rustrt::rust_dbg_call(externcallback::cb, n)
+        println!("n = {:?}", n);
+        externcallback::rust_dbg_call(externcallback::cb, n)
     }
 }
 

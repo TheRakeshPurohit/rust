@@ -1,4 +1,4 @@
-// aux-build:unstable_generic_param.rs
+//@ aux-build:unstable_generic_param.rs
 #![feature(unstable_default6)]
 
 extern crate unstable_generic_param;
@@ -13,15 +13,15 @@ impl Trait1 for S {
 
 struct S;
 
-impl Trait1<usize> for S { //~ ERROR use of unstable library feature 'unstable_default'
+impl Trait1<usize> for S { //~ ERROR use of unstable library feature `unstable_default`
     fn foo() -> usize { 0 }
 }
 
-impl Trait1<isize> for S { //~ ERROR use of unstable library feature 'unstable_default'
+impl Trait1<isize> for S { //~ ERROR use of unstable library feature `unstable_default`
     fn foo() -> isize { 0 }
 }
 
-impl Trait2<usize> for S { //~ ERROR use of unstable library feature 'unstable_default'
+impl Trait2<usize> for S { //~ ERROR use of unstable library feature `unstable_default`
     fn foo() -> usize { 0 }
 }
 

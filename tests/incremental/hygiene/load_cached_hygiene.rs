@@ -1,6 +1,6 @@
-// revisions:rpass1 rpass2
-// compile-flags: -Z query-dep-graph
-// aux-build:cached_hygiene.rs
+//@ revisions:rpass1 rpass2
+//@ compile-flags: -Z query-dep-graph
+//@ aux-build:cached_hygiene.rs
 
 // This tests the following scenario
 // 1. A foreign crate is compiled with incremental compilation.

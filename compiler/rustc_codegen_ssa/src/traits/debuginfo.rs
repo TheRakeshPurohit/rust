@@ -1,18 +1,19 @@
-use super::BackendTypes;
-use crate::mir::debuginfo::{FunctionDebugContext, VariableKind};
-use rustc_middle::mir;
-use rustc_middle::ty::{Instance, PolyExistentialTraitRef, Ty};
-use rustc_span::{SourceFile, Span, Symbol};
-use rustc_target::abi::call::FnAbi;
-use rustc_target::abi::Size;
-
 use std::ops::Range;
 
-pub trait DebugInfoMethods<'tcx>: BackendTypes {
+use rustc_abi::Size;
+use rustc_middle::mir;
+use rustc_middle::ty::{ExistentialTraitRef, Instance, Ty};
+use rustc_span::{SourceFile, Span, Symbol};
+use rustc_target::callconv::FnAbi;
+
+use super::BackendTypes;
+use crate::mir::debuginfo::{FunctionDebugContext, VariableKind};
+
+pub trait DebugInfoCodegenMethods<'tcx>: BackendTypes {
     fn create_vtable_debuginfo(
         &self,
         ty: Ty<'tcx>,
-        trait_ref: Option<PolyExistentialTraitRef<'tcx>>,
+        trait_ref: Option<ExistentialTraitRef<'tcx>>,
         vtable: Self::Value,
     );
 
@@ -26,7 +27,7 @@ pub trait DebugInfoMethods<'tcx>: BackendTypes {
         fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
         llfn: Self::Function,
         mir: &mir::Body<'tcx>,
-    ) -> Option<FunctionDebugContext<Self::DIScope, Self::DILocation>>;
+    ) -> Option<FunctionDebugContext<'tcx, Self::DIScope, Self::DILocation>>;
 
     // FIXME(eddyb) find a common convention for all of the debuginfo-related
     // names (choose between `dbg`, `debug`, `debuginfo`, `debug_info` etc.).
@@ -79,6 +80,8 @@ pub trait DebugInfoBuilderMethods: BackendTypes {
         fragment: Option<Range<Size>>,
     );
     fn set_dbg_loc(&mut self, dbg_loc: Self::DILocation);
+    fn clear_dbg_loc(&mut self);
+    fn get_dbg_loc(&self) -> Option<Self::DILocation>;
     fn insert_reference_to_gdb_debug_scripts_section_global(&mut self);
     fn set_var_name(&mut self, value: Self::Value, name: &str);
 }

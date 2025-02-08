@@ -1,4 +1,4 @@
-// check-fail
+//@ check-fail
 
 #![feature(cfg_target_compact)]
 
@@ -13,5 +13,9 @@ fn two() {}
 #[cfg(target(os = "linux", pointer(width = "64")))]
 //~^ ERROR invalid predicate `target_pointer`
 fn three() {}
+
+#[cfg(target(true))]
+//~^ ERROR `cfg` predicate key must be an identifier
+fn four() {}
 
 fn main() {}

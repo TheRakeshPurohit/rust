@@ -1,9 +1,9 @@
-// run-pass
+//@ run-pass
 #![allow(unused_must_use)]
-// ignore-emscripten no threads support
+//@ needs-threads
 
-use std::thread;
 use std::sync::mpsc::channel;
+use std::thread;
 
 pub fn main() {
     let (tx, rx) = channel::<usize>();

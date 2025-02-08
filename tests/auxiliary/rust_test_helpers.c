@@ -27,10 +27,10 @@ rust_dbg_extern_identity_u8(char u) {
     return u;
 }
 
-typedef void *(*dbg_callback)(void*);
+typedef uint64_t (*dbg_callback)(uint64_t);
 
-void *
-rust_dbg_call(dbg_callback cb, void *data) {
+uint64_t
+rust_dbg_call(dbg_callback cb, uint64_t data) {
     return cb(data);
 }
 
@@ -115,6 +115,30 @@ struct TwoDoubles {
 
 struct TwoDoubles
 rust_dbg_extern_identity_TwoDoubles(struct TwoDoubles u) {
+    return u;
+}
+
+struct FiveU16s {
+    uint16_t one;
+    uint16_t two;
+    uint16_t three;
+    uint16_t four;
+    uint16_t five;
+};
+
+struct FiveU16s
+rust_dbg_extern_return_FiveU16s() {
+    struct FiveU16s s;
+    s.one = 10;
+    s.two = 20;
+    s.three = 30;
+    s.four = 40;
+    s.five = 50;
+    return s;
+}
+
+struct FiveU16s
+rust_dbg_extern_identity_FiveU16s(struct FiveU16s u) {
     return u;
 }
 

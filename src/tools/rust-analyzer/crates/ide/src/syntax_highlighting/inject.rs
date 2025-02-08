@@ -3,11 +3,12 @@
 use std::mem;
 
 use either::Either;
-use hir::{InFile, Semantics};
+use hir::{sym, HirFileId, InFile, Semantics};
 use ide_db::{
-    active_parameter::ActiveParameter, base_db::FileId, defs::Definition, rust_doc::is_rust_fence,
-    SymbolKind,
+    active_parameter::ActiveParameter, defs::Definition, documentation::docs_with_rangemap,
+    rust_doc::is_rust_fence, SymbolKind,
 };
+use span::EditionedFileId;
 use syntax::{
     ast::{self, AstNode, IsString, QuoteOffsets},
     AstToken, NodeOrToken, SyntaxNode, TextRange, TextSize,
@@ -27,10 +28,17 @@ pub(super) fn ra_fixture(
     expanded: &ast::String,
 ) -> Option<()> {
     let active_parameter = ActiveParameter::at_token(sema, expanded.syntax().clone())?;
-    if !active_parameter.ident().map_or(false, |name| name.text().starts_with("ra_fixture")) {
+    let has_rust_fixture_attr = active_parameter.attrs().is_some_and(|attrs| {
+        attrs.filter_map(|attr| attr.as_simple_path()).any(|path| {
+            path.segments()
+                .zip(["rust_analyzer", "rust_fixture"])
+                .all(|(seg, name)| seg.name_ref().map_or(false, |nr| nr.text() == name))
+        })
+    });
+    if !has_rust_fixture_attr {
         return None;
     }
-    let value = literal.value()?;
+    let value = literal.value().ok()?;
 
     if let Some(range) = literal.open_quote_text_range() {
         hl.add(HlRange { range, highlight: HlTag::StringLiteral.into(), binding_hash: None })
@@ -108,17 +116,17 @@ pub(super) fn doc_comment(
     hl: &mut Highlights,
     sema: &Semantics<'_, RootDatabase>,
     config: HighlightConfig,
-    src_file_id: FileId,
+    src_file_id: EditionedFileId,
     node: &SyntaxNode,
 ) {
     let (attributes, def) = match doc_attributes(sema, node) {
         Some(it) => it,
         None => return,
     };
-    let src_file_id = src_file_id.into();
+    let src_file_id: HirFileId = src_file_id.into();
 
     // Extract intra-doc links and emit highlights for them.
-    if let Some((docs, doc_mapping)) = attributes.docs_with_rangemap(sema.db) {
+    if let Some((docs, doc_mapping)) = docs_with_rangemap(sema.db, &attributes) {
         extract_definitions_from_docs(&docs)
             .into_iter()
             .filter_map(|(range, link, ns)| {
@@ -153,7 +161,7 @@ pub(super) fn doc_comment(
     let mut new_comments = Vec::new();
     let mut string;
 
-    for attr in attributes.by_key("doc").attrs() {
+    for attr in attributes.by_key(&sym::doc).attrs() {
         let InFile { file_id, value: src } = attrs_source_map.source_of(attr);
         if file_id != src_file_id {
             continue;
@@ -271,16 +279,14 @@ fn find_doc_string_in_attr(attr: &hir::Attr, it: &ast::Attr) -> Option<ast::Stri
         // #[cfg_attr(..., doc = "", ...)]
         None => {
             // We gotta hunt the string token manually here
-            let text = attr.string_value()?;
+            let text = attr.string_value()?.as_str();
             // FIXME: We just pick the first string literal that has the same text as the doc attribute
             // This means technically we might highlight the wrong one
             it.syntax()
                 .descendants_with_tokens()
                 .filter_map(NodeOrToken::into_token)
                 .filter_map(ast::String::cast)
-                .find(|string| {
-                    string.text().get(1..string.text().len() - 1).map_or(false, |it| it == text)
-                })
+                .find(|string| string.text().get(1..string.text().len() - 1) == Some(text))
         }
         _ => None,
     }
@@ -288,7 +294,9 @@ fn find_doc_string_in_attr(attr: &hir::Attr, it: &ast::Attr) -> Option<ast::Stri
 
 fn module_def_to_hl_tag(def: Definition) -> HlTag {
     let symbol = match def {
-        Definition::Module(_) => SymbolKind::Module,
+        Definition::Module(_) | Definition::Crate(_) | Definition::ExternCrateDecl(_) => {
+            SymbolKind::Module
+        }
         Definition::Function(_) => SymbolKind::Function,
         Definition::Adt(hir::Adt::Struct(_)) => SymbolKind::Struct,
         Definition::Adt(hir::Adt::Enum(_)) => SymbolKind::Enum,
@@ -299,9 +307,10 @@ fn module_def_to_hl_tag(def: Definition) -> HlTag {
         Definition::Trait(_) => SymbolKind::Trait,
         Definition::TraitAlias(_) => SymbolKind::TraitAlias,
         Definition::TypeAlias(_) => SymbolKind::TypeAlias,
+        Definition::BuiltinLifetime(_) => SymbolKind::LifetimeParam,
         Definition::BuiltinType(_) => return HlTag::BuiltinType,
         Definition::Macro(_) => SymbolKind::Macro,
-        Definition::Field(_) => SymbolKind::Field,
+        Definition::Field(_) | Definition::TupleField(_) => SymbolKind::Field,
         Definition::SelfType(_) => SymbolKind::Impl,
         Definition::Local(_) => SymbolKind::Local,
         Definition::GenericParam(gp) => match gp {
@@ -313,6 +322,8 @@ fn module_def_to_hl_tag(def: Definition) -> HlTag {
         Definition::BuiltinAttr(_) => SymbolKind::BuiltinAttr,
         Definition::ToolModule(_) => SymbolKind::ToolModule,
         Definition::DeriveHelper(_) => SymbolKind::DeriveHelper,
+        Definition::InlineAsmRegOrRegClass(_) => SymbolKind::InlineAsmRegOrRegClass,
+        Definition::InlineAsmOperand(_) => SymbolKind::Local,
     };
     HlTag::Symbol(symbol)
 }

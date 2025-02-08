@@ -3,8 +3,11 @@
 // is correctly accepted by NLL but was incorrectly rejected by
 // Polonius because of these missing `killed` facts.
 
-// check-pass
-// compile-flags: -Z polonius
+//@ ignore-compare-mode-polonius (explicit revisions)
+//@ revisions: polonius_next polonius
+//@ check-pass
+//@ [polonius_next] compile-flags: -Z polonius=next
+//@ [polonius] compile-flags: -Z polonius
 
 use std::{io, mem};
 use std::io::Read;

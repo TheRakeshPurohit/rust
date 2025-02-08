@@ -1,12 +1,10 @@
-// revisions: WIN LIN
-// [WIN] only-windows
-// [LIN] only-linux
-// assembly-output: emit-asm
-// compile-flags: --crate-type=lib -O -C llvm-args=-x86-asm-syntax=intel
-// min-llvm-version: 14
-// only-x86_64
-// ignore-sgx
-// ignore-debug
+//@ revisions: WIN LIN
+//@ [WIN] only-windows
+//@ [LIN] only-linux
+//@ assembly-output: emit-asm
+//@ compile-flags: --crate-type=lib -O -C llvm-args=-x86-asm-syntax=intel
+//@ only-x86_64
+//@ ignore-sgx
 
 #![feature(str_internals)]
 

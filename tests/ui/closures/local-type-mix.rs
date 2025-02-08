@@ -1,7 +1,5 @@
 // Check that using the parameter name in its type does not ICE.
-// edition:2018
-
-#![feature(async_closure)]
+//@ edition:2018
 
 fn main() {
     let _ = |x: x| x; //~ ERROR expected type

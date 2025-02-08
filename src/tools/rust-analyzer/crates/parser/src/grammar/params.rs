@@ -7,14 +7,11 @@ use super::*;
 // fn b(x: i32) {}
 // fn c(x: i32, ) {}
 // fn d(x: i32, y: ()) {}
+
+// test_err empty_param_slot
+// fn f(y: i32, ,t: i32) {}
 pub(super) fn param_list_fn_def(p: &mut Parser<'_>) {
     list_(p, Flavor::FnDef);
-}
-
-// test param_list_opt_patterns
-// fn foo<F: FnMut(&mut Foo<'a>)>(){}
-pub(super) fn param_list_fn_trait(p: &mut Parser<'_>) {
-    list_(p, Flavor::FnTrait);
 }
 
 pub(super) fn param_list_fn_ptr(p: &mut Parser<'_>) {
@@ -25,10 +22,9 @@ pub(super) fn param_list_closure(p: &mut Parser<'_>) {
     list_(p, Flavor::Closure);
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Flavor {
-    FnDef,   // Includes trait fn params; omitted param idents are not supported
-    FnTrait, // Params for `Fn(...)`/`FnMut(...)`/`FnOnce(...)` annotations
+    FnDef, // Includes trait fn params; omitted param idents are not supported
     FnPointer,
     Closure,
 }
@@ -38,7 +34,7 @@ fn list_(p: &mut Parser<'_>, flavor: Flavor) {
 
     let (bra, ket) = match flavor {
         Closure => (T![|], T![|]),
-        FnDef | FnTrait | FnPointer => (T!['('], T![')']),
+        FnDef | FnPointer => (T!['('], T![')']),
     };
 
     let list_marker = p.start();
@@ -71,17 +67,18 @@ fn list_(p: &mut Parser<'_>, flavor: Flavor) {
         if !p.at_ts(PARAM_FIRST.union(ATTRIBUTE_FIRST)) {
             p.error("expected value parameter");
             m.abandon(p);
+            if p.eat(T![,]) {
+                continue;
+            }
             break;
         }
         param(p, m, flavor);
-        if !p.at(T![,]) {
+        if !p.eat(T![,]) {
             if p.at_ts(PARAM_FIRST.union(ATTRIBUTE_FIRST)) {
                 p.error("expected `,`");
             } else {
                 break;
             }
-        } else {
-            p.bump(T![,]);
         }
     }
 
@@ -114,11 +111,6 @@ fn param(p: &mut Parser<'_>, m: Marker, flavor: Flavor) {
                     p.error("missing type for function parameter");
                 }
             }
-        }
-        // test value_parameters_no_patterns
-        // type F = Box<Fn(i32, &i32, &i32, ())>;
-        Flavor::FnTrait => {
-            types::type_(p);
         }
         // test fn_pointer_param_ident_path
         // type Foo = fn(Bar::Baz);

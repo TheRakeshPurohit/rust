@@ -1,11 +1,14 @@
-use super::*;
-use crate::testing::crash_test::{CrashTestDummy, Panic};
-use crate::vec::Vec;
+// FIXME(static_mut_refs): Do not allow `static_mut_refs` lint
+#![allow(static_mut_refs)]
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::thread;
 
 use rand::RngCore;
+
+use super::*;
+use crate::testing::crash_test::{CrashTestDummy, Panic};
+use crate::vec::Vec;
 
 #[test]
 fn test_basic() {
@@ -55,7 +58,7 @@ fn list_from<T: Clone>(v: &[T]) -> LinkedList<T> {
     v.iter().cloned().collect()
 }
 
-pub fn check_links<T>(list: &LinkedList<T>) {
+fn check_links<T>(list: &LinkedList<T>) {
     unsafe {
         let mut len = 0;
         let mut last_ptr: Option<&Node<T>> = None;
@@ -693,10 +696,9 @@ fn test_cursor_mut_insert() {
     cursor.splice_after(p);
     cursor.splice_before(q);
     check_links(&m);
-    assert_eq!(
-        m.iter().cloned().collect::<Vec<_>>(),
-        &[200, 201, 202, 203, 1, 100, 101, 102, 103, 8, 2, 3, 4, 5, 6]
-    );
+    assert_eq!(m.iter().cloned().collect::<Vec<_>>(), &[
+        200, 201, 202, 203, 1, 100, 101, 102, 103, 8, 2, 3, 4, 5, 6
+    ]);
     let mut cursor = m.cursor_front_mut();
     cursor.move_prev();
     let tmp = cursor.split_before();
@@ -913,10 +915,9 @@ fn extract_if_complex() {
         assert_eq!(removed, vec![2, 4, 6, 18, 20, 22, 24, 26, 34, 36]);
 
         assert_eq!(list.len(), 14);
-        assert_eq!(
-            list.into_iter().collect::<Vec<_>>(),
-            vec![1, 7, 9, 11, 13, 15, 17, 27, 29, 31, 33, 35, 37, 39]
-        );
+        assert_eq!(list.into_iter().collect::<Vec<_>>(), vec![
+            1, 7, 9, 11, 13, 15, 17, 27, 29, 31, 33, 35, 37, 39
+        ]);
     }
 
     {
@@ -931,10 +932,9 @@ fn extract_if_complex() {
         assert_eq!(removed, vec![2, 4, 6, 18, 20, 22, 24, 26, 34, 36]);
 
         assert_eq!(list.len(), 13);
-        assert_eq!(
-            list.into_iter().collect::<Vec<_>>(),
-            vec![7, 9, 11, 13, 15, 17, 27, 29, 31, 33, 35, 37, 39]
-        );
+        assert_eq!(list.into_iter().collect::<Vec<_>>(), vec![
+            7, 9, 11, 13, 15, 17, 27, 29, 31, 33, 35, 37, 39
+        ]);
     }
 
     {
@@ -949,10 +949,9 @@ fn extract_if_complex() {
         assert_eq!(removed, vec![2, 4, 6, 18, 20, 22, 24, 26, 34, 36]);
 
         assert_eq!(list.len(), 11);
-        assert_eq!(
-            list.into_iter().collect::<Vec<_>>(),
-            vec![7, 9, 11, 13, 15, 17, 27, 29, 31, 33, 35]
-        );
+        assert_eq!(list.into_iter().collect::<Vec<_>>(), vec![
+            7, 9, 11, 13, 15, 17, 27, 29, 31, 33, 35
+        ]);
     }
 
     {
@@ -1163,4 +1162,41 @@ fn test_drop_panic() {
     catch_unwind(move || drop(q)).ok();
 
     assert_eq!(unsafe { DROPS }, 8);
+}
+
+#[test]
+fn test_allocator() {
+    use core::alloc::{AllocError, Allocator, Layout};
+    use core::cell::Cell;
+
+    struct A {
+        has_allocated: Cell<bool>,
+        has_deallocated: Cell<bool>,
+    }
+
+    unsafe impl Allocator for A {
+        fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+            assert!(!self.has_allocated.get());
+            self.has_allocated.set(true);
+
+            Global.allocate(layout)
+        }
+
+        unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+            assert!(!self.has_deallocated.get());
+            self.has_deallocated.set(true);
+
+            unsafe { Global.deallocate(ptr, layout) }
+        }
+    }
+
+    let alloc = &A { has_allocated: Cell::new(false), has_deallocated: Cell::new(false) };
+    {
+        let mut list = LinkedList::new_in(alloc);
+        list.push_back(5u32);
+        list.remove(0);
+    }
+
+    assert!(alloc.has_allocated.get());
+    assert!(alloc.has_deallocated.get());
 }

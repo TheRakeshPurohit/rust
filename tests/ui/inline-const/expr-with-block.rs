@@ -1,5 +1,5 @@
-// check-pass
-#![feature(inline_const)]
+//@ check-pass
+
 fn main() {
     match true {
         true => const {}

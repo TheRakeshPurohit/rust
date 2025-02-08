@@ -1,7 +1,6 @@
-//@compile-flags: -Zmir-opt-level=0 -Zmiri-disable-weak-memory-emulation -Zmiri-preemption-rate=0 -Zmiri-disable-stacked-borrows
-
-// Note: mir-opt-level set to 0 to prevent the read of stack_var in thread 1
-// from being optimized away and preventing the detection of the data-race.
+//@compile-flags: -Zmiri-disable-weak-memory-emulation -Zmiri-preemption-rate=0 -Zmiri-disable-stacked-borrows
+// Avoid accidental synchronization via address reuse inside `thread::spawn`.
+//@compile-flags: -Zmiri-address-reuse-cross-thread-rate=0
 
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -43,7 +42,7 @@ pub fn main() {
 
             sleep(Duration::from_millis(200));
 
-            stack_var //~ ERROR: Data race detected between (1) Write on thread `<unnamed>` and (2) Read on thread `<unnamed>`
+            stack_var //~ ERROR: Data race detected between (1) non-atomic write on thread `unnamed-2` and (2) non-atomic read on thread `unnamed-1`
         });
 
         let j2 = spawn(move || {

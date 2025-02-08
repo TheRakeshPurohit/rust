@@ -1,17 +1,17 @@
-#![deny(rustc::untranslatable_diagnostic)]
-#![deny(rustc::diagnostic_outside_of_impl)]
-use crate::path_utils::allow_two_phase_borrow;
-use crate::place_ext::PlaceExt;
-use crate::BorrowIndex;
-use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
-use rustc_index::bit_set::BitSet;
-use rustc_middle::mir::traversal;
-use rustc_middle::mir::visit::{MutatingUseContext, NonUseContext, PlaceContext, Visitor};
-use rustc_middle::mir::{self, Body, Local, Location};
-use rustc_middle::ty::{RegionVid, TyCtxt};
-use rustc_mir_dataflow::move_paths::MoveData;
 use std::fmt;
 use std::ops::Index;
+
+use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
+use rustc_index::bit_set::DenseBitSet;
+use rustc_middle::mir::visit::{MutatingUseContext, NonUseContext, PlaceContext, Visitor};
+use rustc_middle::mir::{self, Body, Local, Location, traversal};
+use rustc_middle::span_bug;
+use rustc_middle::ty::{RegionVid, TyCtxt};
+use rustc_mir_dataflow::move_paths::MoveData;
+use tracing::debug;
+
+use crate::BorrowIndex;
+use crate::place_ext::PlaceExt;
 
 pub struct BorrowSet<'tcx> {
     /// The fundamental map relating bitvector indexes to the borrows
@@ -19,18 +19,37 @@ pub struct BorrowSet<'tcx> {
     /// by the `Location` of the assignment statement in which it
     /// appears on the right hand side. Thus the location is the map
     /// key, and its position in the map corresponds to `BorrowIndex`.
-    pub location_map: FxIndexMap<Location, BorrowData<'tcx>>,
+    pub(crate) location_map: FxIndexMap<Location, BorrowData<'tcx>>,
 
     /// Locations which activate borrows.
     /// NOTE: a given location may activate more than one borrow in the future
     /// when more general two-phase borrow support is introduced, but for now we
     /// only need to store one borrow index.
-    pub activation_map: FxIndexMap<Location, Vec<BorrowIndex>>,
+    pub(crate) activation_map: FxIndexMap<Location, Vec<BorrowIndex>>,
 
     /// Map from local to all the borrows on that local.
-    pub local_map: FxIndexMap<mir::Local, FxIndexSet<BorrowIndex>>,
+    pub(crate) local_map: FxIndexMap<mir::Local, FxIndexSet<BorrowIndex>>,
 
-    pub locals_state_at_exit: LocalsStateAtExit,
+    pub(crate) locals_state_at_exit: LocalsStateAtExit,
+}
+
+// These methods are public to support borrowck consumers.
+impl<'tcx> BorrowSet<'tcx> {
+    pub fn location_map(&self) -> &FxIndexMap<Location, BorrowData<'tcx>> {
+        &self.location_map
+    }
+
+    pub fn activation_map(&self) -> &FxIndexMap<Location, Vec<BorrowIndex>> {
+        &self.activation_map
+    }
+
+    pub fn local_map(&self) -> &FxIndexMap<mir::Local, FxIndexSet<BorrowIndex>> {
+        &self.local_map
+    }
+
+    pub fn locals_state_at_exit(&self) -> &LocalsStateAtExit {
+        &self.locals_state_at_exit
+    }
 }
 
 impl<'tcx> Index<BorrowIndex> for BorrowSet<'tcx> {
@@ -54,26 +73,57 @@ pub enum TwoPhaseActivation {
 pub struct BorrowData<'tcx> {
     /// Location where the borrow reservation starts.
     /// In many cases, this will be equal to the activation location but not always.
-    pub reserve_location: Location,
+    pub(crate) reserve_location: Location,
     /// Location where the borrow is activated.
-    pub activation_location: TwoPhaseActivation,
+    pub(crate) activation_location: TwoPhaseActivation,
     /// What kind of borrow this is
-    pub kind: mir::BorrowKind,
+    pub(crate) kind: mir::BorrowKind,
     /// The region for which this borrow is live
-    pub region: RegionVid,
+    pub(crate) region: RegionVid,
     /// Place from which we are borrowing
-    pub borrowed_place: mir::Place<'tcx>,
+    pub(crate) borrowed_place: mir::Place<'tcx>,
     /// Place to which the borrow was stored
-    pub assigned_place: mir::Place<'tcx>,
+    pub(crate) assigned_place: mir::Place<'tcx>,
+}
+
+// These methods are public to support borrowck consumers.
+impl<'tcx> BorrowData<'tcx> {
+    pub fn reserve_location(&self) -> Location {
+        self.reserve_location
+    }
+
+    pub fn activation_location(&self) -> TwoPhaseActivation {
+        self.activation_location
+    }
+
+    pub fn kind(&self) -> mir::BorrowKind {
+        self.kind
+    }
+
+    pub fn region(&self) -> RegionVid {
+        self.region
+    }
+
+    pub fn borrowed_place(&self) -> mir::Place<'tcx> {
+        self.borrowed_place
+    }
+
+    pub fn assigned_place(&self) -> mir::Place<'tcx> {
+        self.assigned_place
+    }
 }
 
 impl<'tcx> fmt::Display for BorrowData<'tcx> {
     fn fmt(&self, w: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kind = match self.kind {
             mir::BorrowKind::Shared => "",
-            mir::BorrowKind::Shallow => "shallow ",
-            mir::BorrowKind::Unique => "uniq ",
-            mir::BorrowKind::Mut { .. } => "mut ",
+            mir::BorrowKind::Fake(mir::FakeBorrowKind::Deep) => "fake ",
+            mir::BorrowKind::Fake(mir::FakeBorrowKind::Shallow) => "fake shallow ",
+            mir::BorrowKind::Mut { kind: mir::MutBorrowKind::ClosureCapture } => "uniq ",
+            // FIXME: differentiate `TwoPhaseBorrow`
+            mir::BorrowKind::Mut {
+                kind: mir::MutBorrowKind::Default | mir::MutBorrowKind::TwoPhaseBorrow,
+            } => "mut ",
         };
         write!(w, "&{:?} {}{:?}", self.region, kind, self.borrowed_place)
     }
@@ -81,7 +131,7 @@ impl<'tcx> fmt::Display for BorrowData<'tcx> {
 
 pub enum LocalsStateAtExit {
     AllAreInvalidated,
-    SomeAreInvalidated { has_storage_dead_or_moved: BitSet<Local> },
+    SomeAreInvalidated { has_storage_dead_or_moved: DenseBitSet<Local> },
 }
 
 impl LocalsStateAtExit {
@@ -90,7 +140,7 @@ impl LocalsStateAtExit {
         body: &Body<'tcx>,
         move_data: &MoveData<'tcx>,
     ) -> Self {
-        struct HasStorageDead(BitSet<Local>);
+        struct HasStorageDead(DenseBitSet<Local>);
 
         impl<'tcx> Visitor<'tcx> for HasStorageDead {
             fn visit_local(&mut self, local: Local, ctx: PlaceContext, _: Location) {
@@ -103,13 +153,12 @@ impl LocalsStateAtExit {
         if locals_are_invalidated_at_exit {
             LocalsStateAtExit::AllAreInvalidated
         } else {
-            let mut has_storage_dead = HasStorageDead(BitSet::new_empty(body.local_decls.len()));
-            has_storage_dead.visit_body(&body);
+            let mut has_storage_dead =
+                HasStorageDead(DenseBitSet::new_empty(body.local_decls.len()));
+            has_storage_dead.visit_body(body);
             let mut has_storage_dead_or_moved = has_storage_dead.0;
             for move_out in &move_data.moves {
-                if let Some(index) = move_data.base_local(move_out.path) {
-                    has_storage_dead_or_moved.insert(index);
-                }
+                has_storage_dead_or_moved.insert(move_data.base_local(move_out.path));
             }
             LocalsStateAtExit::SomeAreInvalidated { has_storage_dead_or_moved }
         }
@@ -125,7 +174,7 @@ impl<'tcx> BorrowSet<'tcx> {
     ) -> Self {
         let mut visitor = GatherBorrows {
             tcx,
-            body: &body,
+            body,
             location_map: Default::default(),
             activation_map: Default::default(),
             local_map: Default::default(),
@@ -137,7 +186,7 @@ impl<'tcx> BorrowSet<'tcx> {
             ),
         };
 
-        for (block, block_data) in traversal::preorder(&body) {
+        for (block, block_data) in traversal::preorder(body) {
             visitor.visit_basic_block_data(block, block_data);
         }
 
@@ -153,12 +202,12 @@ impl<'tcx> BorrowSet<'tcx> {
         self.activation_map.get(&location).map_or(&[], |activations| &activations[..])
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.location_map.len()
     }
 
     pub(crate) fn indices(&self) -> impl Iterator<Item = BorrowIndex> {
-        BorrowIndex::from_usize(0)..BorrowIndex::from_usize(self.len())
+        BorrowIndex::ZERO..BorrowIndex::from_usize(self.len())
     }
 
     pub(crate) fn iter_enumerated(&self) -> impl Iterator<Item = (BorrowIndex, &BorrowData<'tcx>)> {
@@ -301,7 +350,7 @@ impl<'a, 'tcx> GatherBorrows<'a, 'tcx> {
             start_location, assigned_place, borrow_index,
         );
 
-        if !allow_two_phase_borrow(kind) {
+        if !kind.allows_two_phase_borrow() {
             debug!("  -> {:?}", start_location);
             return;
         }

@@ -1,4 +1,3 @@
-//@run-rustfix
 #![warn(clippy::needless_match)]
 #![allow(clippy::manual_map)]
 #![allow(dead_code)]
@@ -288,6 +287,67 @@ mod issue9084 {
             _ => e,
         };
     }
+}
+
+fn a() -> Option<()> {
+    Some(())
+}
+fn b() -> Option<()> {
+    Some(())
+}
+fn c() -> Option<()> {
+    Some(())
+}
+
+#[allow(clippy::ifs_same_cond)]
+pub fn issue13574() -> Option<()> {
+    // Do not lint.
+    // The right hand of all these arms are different functions.
+    let _ = {
+        if let Some(a) = a() {
+            Some(a)
+        } else if let Some(b) = b() {
+            Some(b)
+        } else if let Some(c) = c() {
+            Some(c)
+        } else {
+            None
+        }
+    };
+
+    const A: Option<()> = Some(());
+    const B: Option<()> = Some(());
+    const C: Option<()> = Some(());
+    const D: Option<()> = Some(());
+
+    let _ = {
+        if let Some(num) = A {
+            Some(num)
+        } else if let Some(num) = B {
+            Some(num)
+        } else if let Some(num) = C {
+            Some(num)
+        } else if let Some(num) = D {
+            Some(num)
+        } else {
+            None
+        }
+    };
+
+    // Same const, should lint
+    let _ = {
+        if let Some(num) = A {
+            Some(num)
+        } else if let Some(num) = A {
+            Some(num)
+        } else if let Some(num) = A {
+            Some(num)
+        } else {
+            None
+        }
+    };
+
+    None
 }
 
 fn main() {}

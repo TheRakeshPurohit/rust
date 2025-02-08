@@ -1,4 +1,5 @@
-// check-pass
+//@ revisions: compat no-compat
+//@[no-compat] compile-flags: -Zno-implied-bounds-compat
 
 #![allow(unreachable_code, unused)]
 
@@ -33,4 +34,5 @@ struct StateContext<'a, TFsm: Fsm> {
 fn main() {
     let mut builder: FsmBuilder<usize> = todo!();
     builder.state().on_entry(|_| {});
+    //~^ ERROR the trait bound `usize: Fsm` is not satisfied
 }

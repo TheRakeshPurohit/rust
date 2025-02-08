@@ -1,6 +1,4 @@
-// check-pass
-
-#![feature(raw_ref_op)]
+//@ check-pass
 
 const A: *const i32 = &raw const *&2;
 static B: () = { &raw const *&2; };

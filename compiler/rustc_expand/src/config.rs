@@ -1,29 +1,32 @@
 //! Conditional compilation stripping.
 
-use crate::errors::{
-    FeatureIncludedInEdition, FeatureNotAllowed, FeatureRemoved, FeatureRemovedReason, InvalidCfg,
-    MalformedFeatureAttribute, MalformedFeatureAttributeHelp, RemoveExprNotSupported,
-};
 use rustc_ast::ptr::P;
 use rustc_ast::token::{Delimiter, Token, TokenKind};
-use rustc_ast::tokenstream::{AttrTokenStream, AttrTokenTree};
-use rustc_ast::tokenstream::{DelimSpan, Spacing};
-use rustc_ast::tokenstream::{LazyAttrTokenStream, TokenTree};
-use rustc_ast::NodeId;
-use rustc_ast::{self as ast, AttrStyle, Attribute, HasAttrs, HasTokens, MetaItem};
-use rustc_attr as attr;
-use rustc_data_structures::flat_map_in_place::FlatMapInPlace;
-use rustc_data_structures::fx::FxHashMap;
-use rustc_feature::{Feature, Features, State as FeatureState};
-use rustc_feature::{
-    ACCEPTED_FEATURES, ACTIVE_FEATURES, REMOVED_FEATURES, STABLE_REMOVED_FEATURES,
+use rustc_ast::tokenstream::{
+    AttrTokenStream, AttrTokenTree, LazyAttrTokenStream, Spacing, TokenTree,
 };
+use rustc_ast::{
+    self as ast, AttrStyle, Attribute, HasAttrs, HasTokens, MetaItem, MetaItemInner, NodeId,
+};
+use rustc_attr_parsing as attr;
+use rustc_data_structures::flat_map_in_place::FlatMapInPlace;
+use rustc_feature::{
+    ACCEPTED_LANG_FEATURES, AttributeSafety, EnabledLangFeature, EnabledLibFeature, Features,
+    REMOVED_LANG_FEATURES, UNSTABLE_LANG_FEATURES,
+};
+use rustc_lint_defs::BuiltinLintDiag;
 use rustc_parse::validate_attr;
-use rustc_session::parse::feature_err;
 use rustc_session::Session;
-use rustc_span::edition::{Edition, ALL_EDITIONS};
-use rustc_span::symbol::{sym, Symbol};
-use rustc_span::{Span, DUMMY_SP};
+use rustc_session::parse::feature_err;
+use rustc_span::{STDLIB_STABLE_CRATES, Span, Symbol, sym};
+use thin_vec::ThinVec;
+use tracing::instrument;
+
+use crate::errors::{
+    CrateNameInCfgAttr, CrateTypeInCfgAttr, FeatureNotAllowed, FeatureRemoved,
+    FeatureRemovedReason, InvalidCfg, MalformedFeatureAttribute, MalformedFeatureAttributeHelp,
+    RemoveExprNotSupported,
+};
 
 /// A folder that strips out items that do not belong in the current configuration.
 pub struct StripUnconfigured<'a> {
@@ -36,89 +39,26 @@ pub struct StripUnconfigured<'a> {
     pub lint_node_id: NodeId,
 }
 
-pub fn features(sess: &Session, krate_attrs: &[Attribute]) -> Features {
-    fn feature_removed(sess: &Session, span: Span, reason: Option<&str>) {
-        sess.emit_err(FeatureRemoved {
-            span,
-            reason: reason.map(|reason| FeatureRemovedReason { reason }),
-        });
-    }
-
-    fn active_features_up_to(edition: Edition) -> impl Iterator<Item = &'static Feature> {
-        ACTIVE_FEATURES.iter().filter(move |feature| {
-            if let Some(feature_edition) = feature.edition {
-                feature_edition <= edition
-            } else {
-                false
-            }
-        })
+pub fn features(sess: &Session, krate_attrs: &[Attribute], crate_name: Symbol) -> Features {
+    fn feature_list(attr: &Attribute) -> ThinVec<ast::MetaItemInner> {
+        if attr.has_name(sym::feature)
+            && let Some(list) = attr.meta_item_list()
+        {
+            list
+        } else {
+            ThinVec::new()
+        }
     }
 
     let mut features = Features::default();
-    let mut edition_enabled_features = FxHashMap::default();
-    let crate_edition = sess.edition();
 
-    for &edition in ALL_EDITIONS {
-        if edition <= crate_edition {
-            // The `crate_edition` implies its respective umbrella feature-gate
-            // (i.e., `#![feature(rust_20XX_preview)]` isn't needed on edition 20XX).
-            edition_enabled_features.insert(edition.feature_name(), edition);
-        }
-    }
-
-    for feature in active_features_up_to(crate_edition) {
-        feature.set(&mut features, DUMMY_SP);
-        edition_enabled_features.insert(feature.name, crate_edition);
-    }
-
-    // Process the edition umbrella feature-gates first, to ensure
-    // `edition_enabled_features` is completed before it's queried.
+    // Process all features enabled in the code.
     for attr in krate_attrs {
-        if !attr.has_name(sym::feature) {
-            continue;
-        }
-
-        let Some(list) = attr.meta_item_list() else {
-            continue;
-        };
-
-        for mi in list {
-            if !mi.is_word() {
-                continue;
-            }
-
-            let name = mi.name_or_empty();
-
-            let edition = ALL_EDITIONS.iter().find(|e| name == e.feature_name()).copied();
-            if let Some(edition) = edition {
-                if edition <= crate_edition {
-                    continue;
-                }
-
-                for feature in active_features_up_to(edition) {
-                    // FIXME(Manishearth) there is currently no way to set
-                    // lib features by edition
-                    feature.set(&mut features, DUMMY_SP);
-                    edition_enabled_features.insert(feature.name, edition);
-                }
-            }
-        }
-    }
-
-    for attr in krate_attrs {
-        if !attr.has_name(sym::feature) {
-            continue;
-        }
-
-        let Some(list) = attr.meta_item_list() else {
-            continue;
-        };
-
-        for mi in list {
+        for mi in feature_list(attr) {
             let name = match mi.ident() {
                 Some(ident) if mi.is_word() => ident.name,
                 Some(ident) => {
-                    sess.emit_err(MalformedFeatureAttribute {
+                    sess.dcx().emit_err(MalformedFeatureAttribute {
                         span: mi.span(),
                         help: MalformedFeatureAttributeHelp::Suggestion {
                             span: mi.span(),
@@ -128,7 +68,7 @@ pub fn features(sess: &Session, krate_attrs: &[Attribute]) -> Features {
                     continue;
                 }
                 None => {
-                    sess.emit_err(MalformedFeatureAttribute {
+                    sess.dcx().emit_err(MalformedFeatureAttribute {
                         span: mi.span(),
                         help: MalformedFeatureAttributeHelp::Label { span: mi.span() },
                     });
@@ -136,54 +76,63 @@ pub fn features(sess: &Session, krate_attrs: &[Attribute]) -> Features {
                 }
             };
 
-            if let Some(&edition) = edition_enabled_features.get(&name) {
-                sess.emit_warning(FeatureIncludedInEdition {
+            // If the enabled feature has been removed, issue an error.
+            if let Some(f) = REMOVED_LANG_FEATURES.iter().find(|f| name == f.feature.name) {
+                sess.dcx().emit_err(FeatureRemoved {
                     span: mi.span(),
-                    feature: name,
-                    edition,
+                    reason: f.reason.map(|reason| FeatureRemovedReason { reason }),
                 });
                 continue;
             }
 
-            if ALL_EDITIONS.iter().any(|e| name == e.feature_name()) {
-                // Handled in the separate loop above.
+            // If the enabled feature is stable, record it.
+            if let Some(f) = ACCEPTED_LANG_FEATURES.iter().find(|f| name == f.name) {
+                features.set_enabled_lang_feature(EnabledLangFeature {
+                    gate_name: name,
+                    attr_sp: mi.span(),
+                    stable_since: Some(Symbol::intern(f.since)),
+                });
                 continue;
             }
 
-            let removed = REMOVED_FEATURES.iter().find(|f| name == f.name);
-            let stable_removed = STABLE_REMOVED_FEATURES.iter().find(|f| name == f.name);
-            if let Some(Feature { state, .. }) = removed.or(stable_removed) {
-                if let FeatureState::Removed { reason } | FeatureState::Stabilized { reason } =
-                    state
-                {
-                    feature_removed(sess, mi.span(), *reason);
-                    continue;
-                }
-            }
-
-            if let Some(Feature { since, .. }) = ACCEPTED_FEATURES.iter().find(|f| name == f.name) {
-                let since = Some(Symbol::intern(since));
-                features.declared_lang_features.push((name, mi.span(), since));
-                features.active_features.insert(name);
-                continue;
-            }
-
+            // If `-Z allow-features` is used and the enabled feature is
+            // unstable and not also listed as one of the allowed features,
+            // issue an error.
             if let Some(allowed) = sess.opts.unstable_opts.allow_features.as_ref() {
                 if allowed.iter().all(|f| name.as_str() != f) {
-                    sess.emit_err(FeatureNotAllowed { span: mi.span(), name });
+                    sess.dcx().emit_err(FeatureNotAllowed { span: mi.span(), name });
                     continue;
                 }
             }
 
-            if let Some(f) = ACTIVE_FEATURES.iter().find(|f| name == f.name) {
-                f.set(&mut features, mi.span());
-                features.declared_lang_features.push((name, mi.span(), None));
-                features.active_features.insert(name);
+            // If the enabled feature is unstable, record it.
+            if UNSTABLE_LANG_FEATURES.iter().find(|f| name == f.name).is_some() {
+                // When the ICE comes a standard library crate, there's a chance that the person
+                // hitting the ICE may be using -Zbuild-std or similar with an untested target.
+                // The bug is probably in the standard library and not the compiler in that case,
+                // but that doesn't really matter - we want a bug report.
+                if features.internal(name) && !STDLIB_STABLE_CRATES.contains(&crate_name) {
+                    sess.using_internal_features.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+
+                features.set_enabled_lang_feature(EnabledLangFeature {
+                    gate_name: name,
+                    attr_sp: mi.span(),
+                    stable_since: None,
+                });
                 continue;
             }
 
-            features.declared_lib_features.push((name, mi.span()));
-            features.active_features.insert(name);
+            // Otherwise, the feature is unknown. Enable it as a lib feature.
+            // It will be checked later whether the feature really exists.
+            features
+                .set_enabled_lib_feature(EnabledLibFeature { gate_name: name, attr_sp: mi.span() });
+
+            // Similar to above, detect internal lib features to suppress
+            // the ICE message that asks for a report.
+            if features.internal(name) && !STDLIB_STABLE_CRATES.contains(&crate_name) {
+                sess.using_internal_features.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
 
@@ -239,9 +188,9 @@ impl<'a> StripUnconfigured<'a> {
     fn configure_tokens(&self, stream: &AttrTokenStream) -> AttrTokenStream {
         fn can_skip(stream: &AttrTokenStream) -> bool {
             stream.0.iter().all(|tree| match tree {
-                AttrTokenTree::Attributes(_) => false,
+                AttrTokenTree::AttrsTarget(_) => false,
                 AttrTokenTree::Token(..) => true,
-                AttrTokenTree::Delimited(_, _, inner) => can_skip(inner),
+                AttrTokenTree::Delimited(.., inner) => can_skip(inner),
             })
         }
 
@@ -252,33 +201,45 @@ impl<'a> StripUnconfigured<'a> {
         let trees: Vec<_> = stream
             .0
             .iter()
-            .flat_map(|tree| match tree.clone() {
-                AttrTokenTree::Attributes(mut data) => {
-                    data.attrs.flat_map_in_place(|attr| self.process_cfg_attr(&attr));
+            .filter_map(|tree| match tree.clone() {
+                AttrTokenTree::AttrsTarget(mut target) => {
+                    // Expand any `cfg_attr` attributes.
+                    target.attrs.flat_map_in_place(|attr| self.process_cfg_attr(&attr));
 
-                    if self.in_cfg(&data.attrs) {
-                        data.tokens = LazyAttrTokenStream::new(
-                            self.configure_tokens(&data.tokens.to_attr_token_stream()),
+                    if self.in_cfg(&target.attrs) {
+                        target.tokens = LazyAttrTokenStream::new(
+                            self.configure_tokens(&target.tokens.to_attr_token_stream()),
                         );
-                        Some(AttrTokenTree::Attributes(data)).into_iter()
+                        Some(AttrTokenTree::AttrsTarget(target))
                     } else {
-                        None.into_iter()
+                        // Remove the target if there's a `cfg` attribute and
+                        // the condition isn't satisfied.
+                        None
                     }
                 }
-                AttrTokenTree::Delimited(sp, delim, mut inner) => {
+                AttrTokenTree::Delimited(sp, spacing, delim, mut inner) => {
                     inner = self.configure_tokens(&inner);
-                    Some(AttrTokenTree::Delimited(sp, delim, inner))
-                        .into_iter()
+                    Some(AttrTokenTree::Delimited(sp, spacing, delim, inner))
                 }
-                AttrTokenTree::Token(ref token, _) if let TokenKind::Interpolated(nt) = &token.kind => {
-                    panic!(
-                        "Nonterminal should have been flattened at {:?}: {:?}",
-                        token.span, nt
-                    );
+                AttrTokenTree::Token(
+                    Token {
+                        kind:
+                            TokenKind::NtIdent(..)
+                            | TokenKind::NtLifetime(..)
+                            | TokenKind::Interpolated(..),
+                        ..
+                    },
+                    _,
+                ) => {
+                    panic!("Nonterminal should have been flattened: {:?}", tree);
                 }
-                AttrTokenTree::Token(token, spacing) => {
-                    Some(AttrTokenTree::Token(token, spacing)).into_iter()
+                AttrTokenTree::Token(
+                    Token { kind: TokenKind::OpenDelim(_) | TokenKind::CloseDelim(_), .. },
+                    _,
+                ) => {
+                    panic!("Should be `AttrTokenTree::Delimited`, not delim tokens: {:?}", tree);
                 }
+                AttrTokenTree::Token(token, spacing) => Some(AttrTokenTree::Token(token, spacing)),
             })
             .collect();
         AttrTokenStream::new(trees)
@@ -311,28 +272,26 @@ impl<'a> StripUnconfigured<'a> {
     /// Gives a compiler warning when the `cfg_attr` contains no attributes and
     /// is in the original source file. Gives a compiler error if the syntax of
     /// the attribute is incorrect.
-    pub(crate) fn expand_cfg_attr(&self, attr: &Attribute, recursive: bool) -> Vec<Attribute> {
+    pub(crate) fn expand_cfg_attr(&self, cfg_attr: &Attribute, recursive: bool) -> Vec<Attribute> {
+        validate_attr::check_attribute_safety(&self.sess.psess, AttributeSafety::Normal, &cfg_attr);
+
         let Some((cfg_predicate, expanded_attrs)) =
-            rustc_parse::parse_cfg_attr(attr, &self.sess.parse_sess) else {
-                return vec![];
-            };
+            rustc_parse::parse_cfg_attr(cfg_attr, &self.sess.psess)
+        else {
+            return vec![];
+        };
 
         // Lint on zero attributes in source.
         if expanded_attrs.is_empty() {
-            self.sess.parse_sess.buffer_lint(
+            self.sess.psess.buffer_lint(
                 rustc_lint_defs::builtin::UNUSED_ATTRIBUTES,
-                attr.span,
+                cfg_attr.span,
                 ast::CRATE_NODE_ID,
-                "`#[cfg_attr]` does not expand to any attributes",
+                BuiltinLintDiag::CfgAttrNoAttributes,
             );
         }
 
-        if !attr::cfg_matches(
-            &cfg_predicate,
-            &self.sess.parse_sess,
-            self.lint_node_id,
-            self.features,
-        ) {
+        if !attr::cfg_matches(&cfg_predicate, &self.sess, self.lint_node_id, self.features) {
             return vec![];
         }
 
@@ -342,76 +301,75 @@ impl<'a> StripUnconfigured<'a> {
             //  `#[cfg_attr(false, cfg_attr(true, some_attr))]`.
             expanded_attrs
                 .into_iter()
-                .flat_map(|item| self.process_cfg_attr(&self.expand_cfg_attr_item(attr, item)))
+                .flat_map(|item| self.process_cfg_attr(&self.expand_cfg_attr_item(cfg_attr, item)))
                 .collect()
         } else {
-            expanded_attrs.into_iter().map(|item| self.expand_cfg_attr_item(attr, item)).collect()
+            expanded_attrs
+                .into_iter()
+                .map(|item| self.expand_cfg_attr_item(cfg_attr, item))
+                .collect()
         }
     }
 
     fn expand_cfg_attr_item(
         &self,
-        attr: &Attribute,
+        cfg_attr: &Attribute,
         (item, item_span): (ast::AttrItem, Span),
     ) -> Attribute {
-        let orig_tokens = attr.tokens();
+        // Convert `#[cfg_attr(pred, attr)]` to `#[attr]`.
 
-        // We are taking an attribute of the form `#[cfg_attr(pred, attr)]`
-        // and producing an attribute of the form `#[attr]`. We
-        // have captured tokens for `attr` itself, but we need to
-        // synthesize tokens for the wrapper `#` and `[]`, which
-        // we do below.
-
-        // Use the `#` in `#[cfg_attr(pred, attr)]` as the `#` token
-        // for `attr` when we expand it to `#[attr]`
-        let mut orig_trees = orig_tokens.into_trees();
-        let TokenTree::Token(pound_token @ Token { kind: TokenKind::Pound, .. }, _) = orig_trees.next().unwrap() else {
-            panic!("Bad tokens for attribute {:?}", attr);
+        // Use the `#` from `#[cfg_attr(pred, attr)]` in the result `#[attr]`.
+        let mut orig_trees = cfg_attr.token_trees().into_iter();
+        let Some(TokenTree::Token(pound_token @ Token { kind: TokenKind::Pound, .. }, _)) =
+            orig_trees.next()
+        else {
+            panic!("Bad tokens for attribute {cfg_attr:?}");
         };
-        let pound_span = pound_token.span;
 
-        let mut trees = vec![AttrTokenTree::Token(pound_token, Spacing::Alone)];
-        if attr.style == AttrStyle::Inner {
-            // For inner attributes, we do the same thing for the `!` in `#![some_attr]`
-            let TokenTree::Token(bang_token @ Token { kind: TokenKind::Not, .. }, _) = orig_trees.next().unwrap() else {
-                panic!("Bad tokens for attribute {:?}", attr);
+        // For inner attributes, we do the same thing for the `!` in `#![attr]`.
+        let mut trees = if cfg_attr.style == AttrStyle::Inner {
+            let Some(TokenTree::Token(bang_token @ Token { kind: TokenKind::Not, .. }, _)) =
+                orig_trees.next()
+            else {
+                panic!("Bad tokens for attribute {cfg_attr:?}");
             };
-            trees.push(AttrTokenTree::Token(bang_token, Spacing::Alone));
-        }
-        // We don't really have a good span to use for the synthesized `[]`
-        // in `#[attr]`, so just use the span of the `#` token.
-        let bracket_group = AttrTokenTree::Delimited(
-            DelimSpan::from_single(pound_span),
+            vec![
+                AttrTokenTree::Token(pound_token, Spacing::Joint),
+                AttrTokenTree::Token(bang_token, Spacing::JointHidden),
+            ]
+        } else {
+            vec![AttrTokenTree::Token(pound_token, Spacing::JointHidden)]
+        };
+
+        // And the same thing for the `[`/`]` delimiters in `#[attr]`.
+        let Some(TokenTree::Delimited(delim_span, delim_spacing, Delimiter::Bracket, _)) =
+            orig_trees.next()
+        else {
+            panic!("Bad tokens for attribute {cfg_attr:?}");
+        };
+        trees.push(AttrTokenTree::Delimited(
+            delim_span,
+            delim_spacing,
             Delimiter::Bracket,
             item.tokens
                 .as_ref()
-                .unwrap_or_else(|| panic!("Missing tokens for {:?}", item))
+                .unwrap_or_else(|| panic!("Missing tokens for {item:?}"))
                 .to_attr_token_stream(),
-        );
-        trees.push(bracket_group);
+        ));
+
         let tokens = Some(LazyAttrTokenStream::new(AttrTokenStream::new(trees)));
-        let attr = attr::mk_attr_from_item(
-            &self.sess.parse_sess.attr_id_generator,
+        let attr = ast::attr::mk_attr_from_item(
+            &self.sess.psess.attr_id_generator,
             item,
             tokens,
-            attr.style,
+            cfg_attr.style,
             item_span,
         );
         if attr.has_name(sym::crate_type) {
-            self.sess.parse_sess.buffer_lint(
-                rustc_lint_defs::builtin::DEPRECATED_CFG_ATTR_CRATE_TYPE_NAME,
-                attr.span,
-                ast::CRATE_NODE_ID,
-                "`crate_type` within an `#![cfg_attr] attribute is deprecated`",
-            );
+            self.sess.dcx().emit_err(CrateTypeInCfgAttr { span: attr.span });
         }
         if attr.has_name(sym::crate_name) {
-            self.sess.parse_sess.buffer_lint(
-                rustc_lint_defs::builtin::DEPRECATED_CFG_ATTR_CRATE_TYPE_NAME,
-                attr.span,
-                ast::CRATE_NODE_ID,
-                "`crate_name` within an `#![cfg_attr] attribute is deprecated`",
-            );
+            self.sess.dcx().emit_err(CrateNameInCfgAttr { span: attr.span });
         }
         attr
     }
@@ -422,21 +380,19 @@ impl<'a> StripUnconfigured<'a> {
     }
 
     pub(crate) fn cfg_true(&self, attr: &Attribute) -> (bool, Option<MetaItem>) {
-        let meta_item = match validate_attr::parse_meta(&self.sess.parse_sess, attr) {
+        let meta_item = match validate_attr::parse_meta(&self.sess.psess, attr) {
             Ok(meta_item) => meta_item,
-            Err(mut err) => {
+            Err(err) => {
                 err.emit();
                 return (true, None);
             }
         };
+
+        validate_attr::deny_builtin_meta_unsafety(&self.sess.psess, &meta_item);
+
         (
-            parse_cfg(&meta_item, &self.sess).map_or(true, |meta_item| {
-                attr::cfg_matches(
-                    &meta_item,
-                    &self.sess.parse_sess,
-                    self.lint_node_id,
-                    self.features,
-                )
+            parse_cfg(&meta_item, self.sess).is_none_or(|meta_item| {
+                attr::cfg_matches(meta_item, &self.sess, self.lint_node_id, self.features)
             }),
             Some(meta_item),
         )
@@ -445,16 +401,22 @@ impl<'a> StripUnconfigured<'a> {
     /// If attributes are not allowed on expressions, emit an error for `attr`
     #[instrument(level = "trace", skip(self))]
     pub(crate) fn maybe_emit_expr_attr_err(&self, attr: &Attribute) {
-        if !self.features.map_or(true, |features| features.stmt_expr_attributes) {
+        if self.features.is_some_and(|features| !features.stmt_expr_attributes())
+            && !attr.span.allows_unstable(sym::stmt_expr_attributes)
+        {
             let mut err = feature_err(
-                &self.sess.parse_sess,
+                &self.sess,
                 sym::stmt_expr_attributes,
                 attr.span,
-                "attributes on expressions are experimental",
+                crate::fluent_generated::expand_attributes_on_expressions_experimental,
             );
 
             if attr.is_doc_comment() {
-                err.help("`///` is for documentation comments. For a plain comment, use `//`.");
+                err.help(if attr.style == AttrStyle::Outer {
+                    crate::fluent_generated::expand_help_outer_doc
+                } else {
+                    crate::fluent_generated::expand_help_inner_doc
+                });
             }
 
             err.emit();
@@ -477,7 +439,7 @@ impl<'a> StripUnconfigured<'a> {
         // N.B., this is intentionally not part of the visit_expr() function
         //     in order for filter_map_expr() to be able to avoid this check
         if let Some(attr) = expr.attrs().iter().find(|a| is_cfg(a)) {
-            self.sess.emit_err(RemoveExprNotSupported { span: attr.span });
+            self.sess.dcx().emit_err(RemoveExprNotSupported { span: attr.span });
         }
 
         self.process_cfg_attrs(expr);
@@ -485,25 +447,25 @@ impl<'a> StripUnconfigured<'a> {
     }
 }
 
-pub fn parse_cfg<'a>(meta_item: &'a MetaItem, sess: &Session) -> Option<&'a MetaItem> {
+pub fn parse_cfg<'a>(meta_item: &'a MetaItem, sess: &Session) -> Option<&'a MetaItemInner> {
     let span = meta_item.span;
     match meta_item.meta_item_list() {
         None => {
-            sess.emit_err(InvalidCfg::NotFollowedByParens { span });
+            sess.dcx().emit_err(InvalidCfg::NotFollowedByParens { span });
             None
         }
         Some([]) => {
-            sess.emit_err(InvalidCfg::NoPredicate { span });
+            sess.dcx().emit_err(InvalidCfg::NoPredicate { span });
             None
         }
         Some([_, .., l]) => {
-            sess.emit_err(InvalidCfg::MultiplePredicates { span: l.span() });
+            sess.dcx().emit_err(InvalidCfg::MultiplePredicates { span: l.span() });
             None
         }
-        Some([single]) => match single.meta_item() {
+        Some([single]) => match single.meta_item_or_bool() {
             Some(meta_item) => Some(meta_item),
             None => {
-                sess.emit_err(InvalidCfg::PredicateLiteral { span: single.span() });
+                sess.dcx().emit_err(InvalidCfg::PredicateLiteral { span: single.span() });
                 None
             }
         },

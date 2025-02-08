@@ -1,29 +1,48 @@
 use clippy_utils::diagnostics::span_lint_and_then;
-use clippy_utils::get_parent_node;
 use clippy_utils::source::snippet_with_context;
 use clippy_utils::visitors::{for_each_local_assignment, for_each_value_source};
 use core::ops::ControlFlow;
 use rustc_errors::Applicability;
 use rustc_hir::def::{DefKind, Res};
-use rustc_hir::{Expr, ExprKind, HirId, HirIdSet, Local, MatchSource, Node, PatKind, QPath, TyKind};
+use rustc_hir::intravisit::{Visitor, walk_body};
+use rustc_hir::{Expr, ExprKind, HirId, HirIdSet, LetStmt, MatchSource, Node, PatKind, QPath, TyKind};
 use rustc_lint::{LateContext, LintContext};
-use rustc_middle::lint::in_external_macro;
 use rustc_middle::ty;
 
 use super::LET_UNIT_VALUE;
 
-pub(super) fn check<'tcx>(cx: &LateContext<'tcx>, local: &'tcx Local<'_>) {
+pub(super) fn check<'tcx>(cx: &LateContext<'tcx>, local: &'tcx LetStmt<'_>) {
+    // skip `let () = { ... }`
+    if let PatKind::Tuple(fields, ..) = local.pat.kind
+        && fields.is_empty()
+    {
+        return;
+    }
+
     if let Some(init) = local.init
         && !local.pat.span.from_expansion()
-        && !in_external_macro(cx.sess(), local.span)
+        && !local.span.in_external_macro(cx.sess().source_map())
+        && !local.span.is_from_async_await()
         && cx.typeck_results().pat_ty(local.pat).is_unit()
     {
-        if (local.ty.map_or(false, |ty| !matches!(ty.kind, TyKind::Infer))
+        // skip `let awa = ()`
+        if let ExprKind::Tup([]) = init.kind {
+            return;
+        }
+
+        // skip `let _: () = { ... }`
+        if let Some(ty) = local.ty
+            && let TyKind::Tup([]) = ty.kind
+        {
+            return;
+        }
+
+        if (local.ty.is_some_and(|ty| !matches!(ty.kind, TyKind::Infer(())))
             || matches!(local.pat.kind, PatKind::Tuple([], ddpos) if ddpos.as_opt_usize().is_none()))
             && expr_needs_inferred_result(cx, init)
         {
             if !matches!(local.pat.kind, PatKind::Wild)
-               && !matches!(local.pat.kind, PatKind::Tuple([], ddpos) if ddpos.as_opt_usize().is_none())
+                && !matches!(local.pat.kind, PatKind::Tuple([], ddpos) if ddpos.as_opt_usize().is_none())
             {
                 span_lint_and_then(
                     cx,
@@ -33,7 +52,7 @@ pub(super) fn check<'tcx>(cx: &LateContext<'tcx>, local: &'tcx Local<'_>) {
                     |diag| {
                         diag.span_suggestion(
                             local.pat.span,
-                            "use a wild (`_`) binding",
+                            "use a wildcard binding",
                             "_",
                             Applicability::MaybeIncorrect, // snippet
                         );
@@ -42,7 +61,7 @@ pub(super) fn check<'tcx>(cx: &LateContext<'tcx>, local: &'tcx Local<'_>) {
             }
         } else {
             if let ExprKind::Match(_, _, MatchSource::AwaitDesugar) = init.kind {
-                return
+                return;
             }
 
             span_lint_and_then(
@@ -51,19 +70,68 @@ pub(super) fn check<'tcx>(cx: &LateContext<'tcx>, local: &'tcx Local<'_>) {
                 local.span,
                 "this let-binding has unit value",
                 |diag| {
+                    let mut suggestions = Vec::new();
+
+                    // Suggest omitting the `let` binding
                     if let Some(expr) = &local.init {
                         let mut app = Applicability::MachineApplicable;
                         let snip = snippet_with_context(cx, expr.span, local.span.ctxt(), "()", &mut app).0;
-                        diag.span_suggestion(
-                            local.span,
-                            "omit the `let` binding",
-                            format!("{snip};"),
-                            app,
-                        );
+                        suggestions.push((local.span, format!("{snip};")));
+                    }
+
+                    // If this is a binding pattern, we need to add suggestions to remove any usages
+                    // of the variable
+                    if let PatKind::Binding(_, binding_hir_id, ..) = local.pat.kind
+                        && let Some(body_id) = cx.enclosing_body.as_ref()
+                    {
+                        let body = cx.tcx.hir().body(*body_id);
+
+                        // Collect variable usages
+                        let mut visitor = UnitVariableCollector::new(binding_hir_id);
+                        walk_body(&mut visitor, body);
+
+                        // Add suggestions for replacing variable usages
+                        suggestions.extend(visitor.spans.into_iter().map(|span| (span, "()".to_string())));
+                    }
+
+                    // Emit appropriate diagnostic based on whether there are usages of the let binding
+                    if !suggestions.is_empty() {
+                        let message = if suggestions.len() == 1 {
+                            "omit the `let` binding"
+                        } else {
+                            "omit the `let` binding and replace variable usages with `()`"
+                        };
+                        diag.multipart_suggestion(message, suggestions, Applicability::MachineApplicable);
                     }
                 },
             );
         }
+    }
+}
+
+struct UnitVariableCollector {
+    id: HirId,
+    spans: Vec<rustc_span::Span>,
+}
+
+impl UnitVariableCollector {
+    fn new(id: HirId) -> Self {
+        Self { id, spans: vec![] }
+    }
+}
+
+/**
+ * Collect all instances where a variable is used based on its `HirId`.
+ */
+impl<'tcx> Visitor<'tcx> for UnitVariableCollector {
+    fn visit_expr(&mut self, ex: &'tcx Expr<'tcx>) -> Self::Result {
+        if let ExprKind::Path(QPath::Resolved(None, path)) = ex.kind
+            && let Res::Local(id) = path.res
+            && id == self.id
+        {
+            self.spans.push(path.span);
+        }
+        rustc_hir::intravisit::walk_expr(self, ex);
     }
 }
 
@@ -88,8 +156,8 @@ fn expr_needs_inferred_result<'tcx>(cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) -
         return false;
     }
     while let Some(id) = locals_to_check.pop() {
-        if let Some(Node::Local(l)) = get_parent_node(cx.tcx, id) {
-            if !l.ty.map_or(true, |ty| matches!(ty.kind, TyKind::Infer)) {
+        if let Node::LetStmt(l) = cx.tcx.parent_hir_node(id) {
+            if !l.ty.is_none_or(|ty| matches!(ty.kind, TyKind::Infer(()))) {
                 return false;
             }
             if let Some(e) = l.init {
@@ -138,7 +206,7 @@ fn needs_inferred_result_ty(
     let (id, receiver, args) = match e.kind {
         ExprKind::Call(
             Expr {
-                kind: ExprKind::Path(ref path),
+                kind: ExprKind::Path(path),
                 hir_id,
                 ..
             },
@@ -161,7 +229,7 @@ fn needs_inferred_result_ty(
         },
         _ => return false,
     };
-    let sig = cx.tcx.fn_sig(id).subst_identity().skip_binder();
+    let sig = cx.tcx.fn_sig(id).instantiate_identity().skip_binder();
     if let ty::Param(output_ty) = *sig.output().kind() {
         let args: Vec<&Expr<'_>> = if let Some(receiver) = receiver {
             std::iter::once(receiver).chain(args.iter()).collect()

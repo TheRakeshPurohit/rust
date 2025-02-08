@@ -1,10 +1,11 @@
 // Floating-point clamp is designed to be implementable as max+min,
 // so check to make sure that's what it's actually emitting.
 
-// assembly-output: emit-asm
-// compile-flags: --crate-type=lib -O -C llvm-args=-x86-asm-syntax=intel
-// only-x86_64
-// ignore-sgx
+//@ assembly-output: emit-asm
+// Set the base cpu explicitly, in case the default has been changed.
+//@ compile-flags: --crate-type=lib -O -C llvm-args=-x86-asm-syntax=intel -C target-cpu=x86-64
+//@ only-x86_64
+//@ ignore-sgx
 
 // CHECK-LABEL: clamp_demo:
 #[no_mangle]

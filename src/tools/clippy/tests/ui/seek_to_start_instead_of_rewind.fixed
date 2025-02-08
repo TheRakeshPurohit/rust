@@ -1,4 +1,3 @@
-//@run-rustfix
 #![allow(unused)]
 #![warn(clippy::seek_to_start_instead_of_rewind)]
 
@@ -81,6 +80,7 @@ fn main() {
         .write(true)
         .read(true)
         .create(true)
+        .truncate(true)
         .open("foo.txt")
         .unwrap();
 
@@ -105,6 +105,7 @@ fn msrv_1_54() {
         .write(true)
         .read(true)
         .create(true)
+        .truncate(true)
         .open("foo.txt")
         .unwrap();
 
@@ -125,6 +126,7 @@ fn msrv_1_55() {
         .write(true)
         .read(true)
         .create(true)
+        .truncate(true)
         .open("foo.txt")
         .unwrap();
 

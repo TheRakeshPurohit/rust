@@ -1,16 +1,15 @@
+use rustc_ast::{self as ast, MetaItem};
+use rustc_data_structures::fx::FxHashSet;
+use rustc_expand::base::{Annotatable, ExtCtxt};
+use rustc_span::{Span, sym};
+use thin_vec::{ThinVec, thin_vec};
+
 use crate::deriving::generic::ty::*;
 use crate::deriving::generic::*;
 use crate::deriving::path_std;
 
-use rustc_ast::{self as ast, MetaItem};
-use rustc_data_structures::fx::FxHashSet;
-use rustc_expand::base::{Annotatable, ExtCtxt};
-use rustc_span::symbol::sym;
-use rustc_span::Span;
-use thin_vec::{thin_vec, ThinVec};
-
-pub fn expand_deriving_eq(
-    cx: &mut ExtCtxt<'_>,
+pub(crate) fn expand_deriving_eq(
+    cx: &ExtCtxt<'_>,
     span: Span,
     mitem: &MetaItem,
     item: &Annotatable,
@@ -18,6 +17,7 @@ pub fn expand_deriving_eq(
     is_const: bool,
 ) {
     let span = cx.with_def_site_ctxt(span);
+
     let trait_def = TraitDef {
         span,
         path: path_std!(cmp::Eq),
@@ -34,7 +34,7 @@ pub fn expand_deriving_eq(
             attributes: thin_vec![
                 cx.attr_word(sym::inline, span),
                 cx.attr_nested_word(sym::doc, sym::hidden, span),
-                cx.attr_word(sym::no_coverage, span)
+                cx.attr_nested_word(sym::coverage, sym::off, span)
             ],
             fieldless_variants_strategy: FieldlessVariantsStrategy::Unify,
             combine_substructure: combine_substructure(Box::new(|a, b, c| {
@@ -44,14 +44,11 @@ pub fn expand_deriving_eq(
         associated_types: Vec::new(),
         is_const,
     };
-
-    super::inject_impl_of_structural_trait(cx, span, item, path_std!(marker::StructuralEq), push);
-
     trait_def.expand_ext(cx, mitem, item, push, true)
 }
 
 fn cs_total_eq_assert(
-    cx: &mut ExtCtxt<'_>,
+    cx: &ExtCtxt<'_>,
     trait_span: Span,
     substr: &Substructure<'_>,
 ) -> BlockOrExpr {
@@ -62,17 +59,16 @@ fn cs_total_eq_assert(
             // This basic redundancy checking only prevents duplication of
             // assertions like `AssertParamIsEq<Foo>` where the type is a
             // simple name. That's enough to get a lot of cases, though.
-            if let Some(name) = field.ty.kind.is_simple_path() && !seen_type_names.insert(name) {
+            if let Some(name) = field.ty.kind.is_simple_path()
+                && !seen_type_names.insert(name)
+            {
                 // Already produced an assertion for this type.
             } else {
                 // let _: AssertParamIsEq<FieldTy>;
-                super::assert_ty_bounds(
-                    cx,
-                    &mut stmts,
-                    field.ty.clone(),
-                    field.span,
-                    &[sym::cmp, sym::AssertParamIsEq],
-                );
+                super::assert_ty_bounds(cx, &mut stmts, field.ty.clone(), field.span, &[
+                    sym::cmp,
+                    sym::AssertParamIsEq,
+                ]);
             }
         }
     };
@@ -86,7 +82,7 @@ fn cs_total_eq_assert(
                 process_variant(&variant.data);
             }
         }
-        _ => cx.span_bug(trait_span, "unexpected substructure in `derive(Eq)`"),
+        _ => cx.dcx().span_bug(trait_span, "unexpected substructure in `derive(Eq)`"),
     }
     BlockOrExpr::new_stmts(stmts)
 }

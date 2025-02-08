@@ -1,23 +1,26 @@
 //! Calculates information used for the --show-coverage flag.
-use crate::clean;
-use crate::core::DocContext;
-use crate::html::markdown::{find_testable_code, ErrorCodes};
-use crate::passes::check_doc_test_visibility::{should_have_doc_example, Tests};
-use crate::passes::Pass;
-use crate::visit::DocVisitor;
+
+use std::collections::BTreeMap;
+use std::ops;
+
 use rustc_hir as hir;
 use rustc_lint::builtin::MISSING_DOCS;
 use rustc_middle::lint::LintLevelSource;
 use rustc_session::lint;
 use rustc_span::FileName;
 use serde::Serialize;
+use tracing::debug;
 
-use std::collections::BTreeMap;
-use std::ops;
+use crate::clean;
+use crate::core::DocContext;
+use crate::html::markdown::{ErrorCodes, find_testable_code};
+use crate::passes::Pass;
+use crate::passes::check_doc_test_visibility::{Tests, should_have_doc_example};
+use crate::visit::DocVisitor;
 
 pub(crate) const CALCULATE_DOC_COVERAGE: Pass = Pass {
     name: "calculate-doc-coverage",
-    run: calculate_doc_coverage,
+    run: Some(calculate_doc_coverage),
     description: "counts the number of items with and without documentation",
 };
 
@@ -115,7 +118,7 @@ fn limit_filename_len(filename: String) -> String {
     }
 }
 
-impl<'a, 'b> CoverageCalculator<'a, 'b> {
+impl CoverageCalculator<'_, '_> {
     fn to_json(&self) -> String {
         serde_json::to_string(
             &self
@@ -129,6 +132,7 @@ impl<'a, 'b> CoverageCalculator<'a, 'b> {
 
     fn print_results(&self) {
         let output_format = self.ctx.output_format;
+        // In this case we want to ensure that the `OutputFormat` is JSON and NOT the `DocContext`.
         if output_format.is_json() {
             println!("{}", self.to_json());
             return;
@@ -146,8 +150,10 @@ impl<'a, 'b> CoverageCalculator<'a, 'b> {
             examples_percentage: f64,
         ) {
             println!(
-                "| {:<35} | {:>10} | {:>9.1}% | {:>10} | {:>9.1}% |",
-                name, count.with_docs, percentage, count.with_examples, examples_percentage,
+                "| {name:<35} | {with_docs:>10} | {percentage:>9.1}% | {with_examples:>10} | \
+                {examples_percentage:>9.1}% |",
+                with_docs = count.with_docs,
+                with_examples = count.with_examples,
             );
         }
 
@@ -182,7 +188,7 @@ impl<'a, 'b> CoverageCalculator<'a, 'b> {
     }
 }
 
-impl<'a, 'b> DocVisitor for CoverageCalculator<'a, 'b> {
+impl DocVisitor<'_> for CoverageCalculator<'_, '_> {
     fn visit_item(&mut self, i: &clean::Item) {
         if !i.item_id.is_local() {
             // non-local items are skipped because they can be out of the users control,
@@ -190,7 +196,7 @@ impl<'a, 'b> DocVisitor for CoverageCalculator<'a, 'b> {
             return;
         }
 
-        match *i.kind {
+        match i.kind {
             clean::StrippedItem(..) => {
                 // don't count items in stripped modules
                 return;
@@ -249,7 +255,7 @@ impl<'a, 'b> DocVisitor for CoverageCalculator<'a, 'b> {
 
                 if let Some(span) = i.span(self.ctx.tcx) {
                     let filename = span.filename(self.ctx.sess());
-                    debug!("counting {:?} {:?} in {:?}", i.type_(), i.name, filename);
+                    debug!("counting {:?} {:?} in {filename:?}", i.type_(), i.name);
                     self.items.entry(filename).or_default().count_item(
                         has_docs,
                         has_doc_example,

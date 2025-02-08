@@ -1,22 +1,23 @@
-//! Code to save/load the dep-graph from files.
+//! Code to load the dep-graph from files.
 
-use crate::errors;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use rustc_data_structures::memmap::Mmap;
 use rustc_data_structures::unord::UnordMap;
-use rustc_middle::dep_graph::{SerializedDepGraph, WorkProduct, WorkProductId};
+use rustc_middle::dep_graph::{DepGraph, DepsType, SerializedDepGraph, WorkProductMap};
 use rustc_middle::query::on_disk_cache::OnDiskCache;
-use rustc_serialize::opaque::MemDecoder;
 use rustc_serialize::Decodable;
-use rustc_session::config::IncrementalStateAssertion;
+use rustc_serialize::opaque::MemDecoder;
 use rustc_session::Session;
-use std::path::{Path, PathBuf};
+use rustc_session::config::IncrementalStateAssertion;
+use tracing::{debug, warn};
 
 use super::data::*;
-use super::file_format;
 use super::fs::*;
-use super::work_product;
-
-type WorkProductMap = UnordMap<WorkProductId, WorkProduct>;
+use super::save::build_dep_graph;
+use super::{file_format, work_product};
+use crate::errors;
 
 #[derive(Debug)]
 /// Represents the result of an attempt to load incremental compilation data.
@@ -30,8 +31,6 @@ pub enum LoadResult<T> {
     DataOutOfDate,
     /// Loading the dep graph failed.
     LoadDepGraph(PathBuf, std::io::Error),
-    /// Decoding loaded incremental cache failed.
-    DecodeIncrCache(Box<dyn std::any::Any + Send>),
 }
 
 impl<T: Default> LoadResult<T> {
@@ -40,31 +39,26 @@ impl<T: Default> LoadResult<T> {
         // Check for errors when using `-Zassert-incremental-state`
         match (sess.opts.assert_incr_state, &self) {
             (Some(IncrementalStateAssertion::NotLoaded), LoadResult::Ok { .. }) => {
-                sess.emit_fatal(errors::AssertNotLoaded);
+                sess.dcx().emit_fatal(errors::AssertNotLoaded);
             }
             (
                 Some(IncrementalStateAssertion::Loaded),
-                LoadResult::LoadDepGraph(..)
-                | LoadResult::DecodeIncrCache(..)
-                | LoadResult::DataOutOfDate,
+                LoadResult::LoadDepGraph(..) | LoadResult::DataOutOfDate,
             ) => {
-                sess.emit_fatal(errors::AssertLoaded);
+                sess.dcx().emit_fatal(errors::AssertLoaded);
             }
             _ => {}
         };
 
         match self {
             LoadResult::LoadDepGraph(path, err) => {
-                sess.emit_warning(errors::LoadDepGraph { path, err });
-                Default::default()
-            }
-            LoadResult::DecodeIncrCache(err) => {
-                sess.emit_warning(errors::DecodeIncrCache { err: format!("{err:?}") });
+                sess.dcx().emit_warn(errors::LoadDepGraph { path, err });
                 Default::default()
             }
             LoadResult::DataOutOfDate => {
                 if let Err(err) = delete_all_session_dir_contents(sess) {
-                    sess.emit_err(errors::DeleteIncompatible { path: dep_graph_path(sess), err });
+                    sess.dcx()
+                        .emit_err(errors::DeleteIncompatible { path: dep_graph_path(sess), err });
                 }
                 Default::default()
             }
@@ -74,21 +68,12 @@ impl<T: Default> LoadResult<T> {
 }
 
 fn load_data(path: &Path, sess: &Session) -> LoadResult<(Mmap, usize)> {
-    load_data_no_sess(
+    match file_format::read_file(
         path,
         sess.opts.unstable_opts.incremental_info,
         sess.is_nightly_build(),
         sess.cfg_version,
-    )
-}
-
-fn load_data_no_sess(
-    path: &Path,
-    report_incremental_info: bool,
-    is_nightly_build: bool,
-    cfg_version: &'static str,
-) -> LoadResult<(Mmap, usize)> {
-    match file_format::read_file(path, report_incremental_info, is_nightly_build, cfg_version) {
+    ) {
         Ok(Some(data_and_pos)) => LoadResult::Ok { data: data_and_pos },
         Ok(None) => {
             // The file either didn't exist or was produced by an incompatible
@@ -104,47 +89,19 @@ fn delete_dirty_work_product(sess: &Session, swp: SerializedWorkProduct) {
     work_product::delete_workproduct_files(sess, &swp.work_product);
 }
 
-/// Either a result that has already be computed or a
-/// handle that will let us wait until it is computed
-/// by a background thread.
-pub enum MaybeAsync<T> {
-    Sync(T),
-    Async(std::thread::JoinHandle<T>),
-}
-
-impl<T> MaybeAsync<LoadResult<T>> {
-    /// Accesses the data returned in [`LoadResult::Ok`] in an asynchronous way if possible.
-    pub fn open(self) -> LoadResult<T> {
-        match self {
-            MaybeAsync::Sync(result) => result,
-            MaybeAsync::Async(handle) => {
-                handle.join().unwrap_or_else(|e| LoadResult::DecodeIncrCache(e))
-            }
-        }
-    }
-}
-
-/// An asynchronous type for computing the dependency graph.
-pub type DepGraphFuture = MaybeAsync<LoadResult<(SerializedDepGraph, WorkProductMap)>>;
-
-/// Launch a thread and load the dependency graph in the background.
-pub fn load_dep_graph(sess: &Session) -> DepGraphFuture {
-    // Since `sess` isn't `Sync`, we perform all accesses to `sess`
-    // before we fire the background thread.
-
+fn load_dep_graph(sess: &Session) -> LoadResult<(Arc<SerializedDepGraph>, WorkProductMap)> {
     let prof = sess.prof.clone();
 
     if sess.opts.incremental.is_none() {
         // No incremental compilation.
-        return MaybeAsync::Sync(LoadResult::Ok { data: Default::default() });
+        return LoadResult::Ok { data: Default::default() };
     }
 
     let _timer = sess.prof.generic_activity("incr_comp_prepare_load_dep_graph");
 
     // Calling `sess.incr_comp_session_dir()` will panic if `sess.opts.incremental.is_none()`.
     // Fortunately, we just checked that this isn't the case.
-    let path = dep_graph_path(&sess);
-    let report_incremental_info = sess.opts.unstable_opts.incremental_info;
+    let path = dep_graph_path(sess);
     let expected_hash = sess.opts.dep_tracking_hash(false);
 
     let mut prev_work_products = UnordMap::default();
@@ -158,7 +115,11 @@ pub fn load_dep_graph(sess: &Session) -> DepGraphFuture {
 
         if let LoadResult::Ok { data: (work_products_data, start_pos) } = load_result {
             // Decode the list of work_products
-            let mut work_product_decoder = MemDecoder::new(&work_products_data[..], start_pos);
+            let Ok(mut work_product_decoder) = MemDecoder::new(&work_products_data[..], start_pos)
+            else {
+                sess.dcx().emit_warn(errors::CorruptFile { path: &work_products_path });
+                return LoadResult::DataOutOfDate;
+            };
             let work_products: Vec<SerializedWorkProduct> =
                 Decodable::decode(&mut work_product_decoder);
 
@@ -182,40 +143,37 @@ pub fn load_dep_graph(sess: &Session) -> DepGraphFuture {
         }
     }
 
-    let is_nightly_build = sess.is_nightly_build();
-    let cfg_version = sess.cfg_version;
+    let _prof_timer = prof.generic_activity("incr_comp_load_dep_graph");
 
-    MaybeAsync::Async(std::thread::spawn(move || {
-        let _prof_timer = prof.generic_activity("incr_comp_load_dep_graph");
+    match load_data(&path, sess) {
+        LoadResult::DataOutOfDate => LoadResult::DataOutOfDate,
+        LoadResult::LoadDepGraph(path, err) => LoadResult::LoadDepGraph(path, err),
+        LoadResult::Ok { data: (bytes, start_pos) } => {
+            let Ok(mut decoder) = MemDecoder::new(&bytes, start_pos) else {
+                sess.dcx().emit_warn(errors::CorruptFile { path: &path });
+                return LoadResult::DataOutOfDate;
+            };
+            let prev_commandline_args_hash = u64::decode(&mut decoder);
 
-        match load_data_no_sess(&path, report_incremental_info, is_nightly_build, cfg_version) {
-            LoadResult::DataOutOfDate => LoadResult::DataOutOfDate,
-            LoadResult::LoadDepGraph(path, err) => LoadResult::LoadDepGraph(path, err),
-            LoadResult::DecodeIncrCache(err) => LoadResult::DecodeIncrCache(err),
-            LoadResult::Ok { data: (bytes, start_pos) } => {
-                let mut decoder = MemDecoder::new(&bytes, start_pos);
-                let prev_commandline_args_hash = u64::decode(&mut decoder);
-
-                if prev_commandline_args_hash != expected_hash {
-                    if report_incremental_info {
-                        eprintln!(
-                            "[incremental] completely ignoring cache because of \
+            if prev_commandline_args_hash != expected_hash {
+                if sess.opts.unstable_opts.incremental_info {
+                    eprintln!(
+                        "[incremental] completely ignoring cache because of \
                                     differing commandline arguments"
-                        );
-                    }
-                    // We can't reuse the cache, purge it.
-                    debug!("load_dep_graph_new: differing commandline arg hashes");
-
-                    // No need to do any further work
-                    return LoadResult::DataOutOfDate;
+                    );
                 }
+                // We can't reuse the cache, purge it.
+                debug!("load_dep_graph_new: differing commandline arg hashes");
 
-                let dep_graph = SerializedDepGraph::decode(&mut decoder);
-
-                LoadResult::Ok { data: (dep_graph, prev_work_products) }
+                // No need to do any further work
+                return LoadResult::DataOutOfDate;
             }
+
+            let dep_graph = SerializedDepGraph::decode::<DepsType>(&mut decoder);
+
+            LoadResult::Ok { data: (dep_graph, prev_work_products) }
         }
-    }))
+    }
 }
 
 /// Attempts to load the query result cache from disk
@@ -223,17 +181,49 @@ pub fn load_dep_graph(sess: &Session) -> DepGraphFuture {
 /// If we are not in incremental compilation mode, returns `None`.
 /// Otherwise, tries to load the query result cache from disk,
 /// creating an empty cache if it could not be loaded.
-pub fn load_query_result_cache(sess: &Session) -> Option<OnDiskCache<'_>> {
+pub fn load_query_result_cache(sess: &Session) -> Option<OnDiskCache> {
     if sess.opts.incremental.is_none() {
         return None;
     }
 
     let _prof_timer = sess.prof.generic_activity("incr_comp_load_query_result_cache");
 
-    match load_data(&query_cache_path(sess), sess) {
+    let path = query_cache_path(sess);
+    match load_data(&path, sess) {
         LoadResult::Ok { data: (bytes, start_pos) } => {
-            Some(OnDiskCache::new(sess, bytes, start_pos))
+            let cache = OnDiskCache::new(sess, bytes, start_pos).unwrap_or_else(|()| {
+                sess.dcx().emit_warn(errors::CorruptFile { path: &path });
+                OnDiskCache::new_empty()
+            });
+            Some(cache)
         }
-        _ => Some(OnDiskCache::new_empty(sess.source_map())),
+        _ => Some(OnDiskCache::new_empty()),
     }
+}
+
+/// Setups the dependency graph by loading an existing graph from disk and set up streaming of a
+/// new graph to an incremental session directory.
+pub fn setup_dep_graph(sess: &Session) -> DepGraph {
+    // `load_dep_graph` can only be called after `prepare_session_directory`.
+    prepare_session_directory(sess);
+
+    let res = sess.opts.build_dep_graph().then(|| load_dep_graph(sess));
+
+    if sess.opts.incremental.is_some() {
+        sess.time("incr_comp_garbage_collect_session_directories", || {
+            if let Err(e) = garbage_collect_session_directories(sess) {
+                warn!(
+                    "Error while trying to garbage collect incremental \
+                     compilation cache directory: {}",
+                    e
+                );
+            }
+        });
+    }
+
+    res.and_then(|result| {
+        let (prev_graph, prev_work_products) = result.open(sess);
+        build_dep_graph(sess, prev_graph, prev_work_products)
+    })
+    .unwrap_or_else(DepGraph::new_disabled)
 }

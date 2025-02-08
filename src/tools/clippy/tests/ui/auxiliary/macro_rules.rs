@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 //! Used to test that certain lints don't trigger in imported external macros
-
 #[macro_export]
 macro_rules! try_err {
     () => {
@@ -42,5 +41,19 @@ macro_rules! issue_10421 {
         let mut b = 2;
         a = b;
         b = a;
+    };
+}
+
+#[macro_export]
+macro_rules! macro_with_panic {
+    () => {
+        panic!()
+    };
+}
+
+#[macro_export]
+macro_rules! bad_transmute {
+    ($e:expr) => {
+        std::mem::transmute($e)
     };
 }

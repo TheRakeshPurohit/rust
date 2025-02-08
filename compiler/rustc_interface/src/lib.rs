@@ -1,34 +1,26 @@
-#![feature(box_patterns)]
+// tidy-alphabetical-start
 #![feature(decl_macro)]
-#![feature(internal_output_capture)]
-#![feature(thread_spawn_unchecked)]
-#![feature(lazy_cell)]
+#![feature(file_buffered)]
+#![feature(iter_intersperse)]
+#![feature(let_chains)]
 #![feature(try_blocks)]
-#![recursion_limit = "256"]
-#![allow(rustc::potential_query_instability)]
-#![deny(rustc::untranslatable_diagnostic)]
-#![deny(rustc::diagnostic_outside_of_impl)]
-
-#[macro_use]
-extern crate tracing;
-
-use rustc_errors::{DiagnosticMessage, SubdiagnosticMessage};
-use rustc_fluent_macro::fluent_messages;
+#![warn(unreachable_pub)]
+// tidy-alphabetical-end
 
 mod callbacks;
-mod errors;
+pub mod errors;
 pub mod interface;
-mod passes;
+pub mod passes;
 mod proc_macro_decls;
 mod queries;
 pub mod util;
 
 pub use callbacks::setup_callbacks;
-pub use interface::{run_compiler, Config};
-pub use passes::{DEFAULT_EXTERN_QUERY_PROVIDERS, DEFAULT_QUERY_PROVIDERS};
-pub use queries::Queries;
+pub use interface::{Config, run_compiler};
+pub use passes::{DEFAULT_QUERY_PROVIDERS, create_and_enter_global_ctxt, parse};
+pub use queries::Linker;
 
 #[cfg(test)]
 mod tests;
 
-fluent_messages! { "../messages.ftl" }
+rustc_fluent_macro::fluent_messages! { "../messages.ftl" }

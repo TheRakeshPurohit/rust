@@ -2,7 +2,7 @@ use ide_db::{
     assists::{AssistId, AssistKind},
     base_db::AnchoredPathBuf,
 };
-use syntax::{ast, AstNode};
+use syntax::{ast, AstNode, ToSmolStr};
 
 use crate::{
     assist_context::{AssistContext, Assists},
@@ -25,7 +25,7 @@ use crate::{
 // ```
 pub(crate) fn move_to_mod_rs(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
     let source_file = ctx.find_node_at_offset::<ast::SourceFile>()?;
-    let module = ctx.sema.to_module_def(ctx.file_id())?;
+    let module = ctx.sema.file_to_module_def(ctx.file_id())?;
     // Enable this assist if the user select all "meaningful" content in the source file
     let trimmed_selected_range = trimmed_text_range(&source_file, ctx.selection_trimmed());
     let trimmed_file_range = trimmed_text_range(&source_file, source_file.syntax().text_range());
@@ -39,9 +39,9 @@ pub(crate) fn move_to_mod_rs(acc: &mut Assists, ctx: &AssistContext<'_>) -> Opti
     }
 
     let target = source_file.syntax().text_range();
-    let module_name = module.name(ctx.db())?.display(ctx.db()).to_string();
+    let module_name = module.name(ctx.db())?.as_str().to_smolstr();
     let path = format!("./{module_name}/mod.rs");
-    let dst = AnchoredPathBuf { anchor: ctx.file_id(), path };
+    let dst = AnchoredPathBuf { anchor: ctx.file_id().into(), path };
     acc.add(
         AssistId("move_to_mod_rs", AssistKind::Refactor),
         format!("Convert {module_name}.rs to {module_name}/mod.rs"),

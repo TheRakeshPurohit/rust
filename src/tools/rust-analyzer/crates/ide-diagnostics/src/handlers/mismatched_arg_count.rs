@@ -1,9 +1,32 @@
+use either::Either;
+use hir::InFile;
+use ide_db::FileRange;
 use syntax::{
     ast::{self, HasArgList},
-    AstNode, TextRange,
+    AstNode, AstPtr,
 };
 
-use crate::{adjusted_display_range, Diagnostic, DiagnosticsContext};
+use crate::{adjusted_display_range, Diagnostic, DiagnosticCode, DiagnosticsContext};
+
+// Diagnostic: mismatched-tuple-struct-pat-arg-count
+//
+// This diagnostic is triggered if a function is invoked with an incorrect amount of arguments.
+pub(crate) fn mismatched_tuple_struct_pat_arg_count(
+    ctx: &DiagnosticsContext<'_>,
+    d: &hir::MismatchedTupleStructPatArgCount,
+) -> Diagnostic {
+    let s = if d.found == 1 { "" } else { "s" };
+    let s2 = if d.expected == 1 { "" } else { "s" };
+    let message = format!(
+        "this pattern has {} field{s}, but the corresponding tuple struct has {} field{s2}",
+        d.found, d.expected
+    );
+    Diagnostic::new(
+        DiagnosticCode::RustcHardError("E0023"),
+        message,
+        invalid_args_range(ctx, d.expr_or_pat, d.expected, d.found),
+    )
+}
 
 // Diagnostic: mismatched-arg-count
 //
@@ -14,31 +37,63 @@ pub(crate) fn mismatched_arg_count(
 ) -> Diagnostic {
     let s = if d.expected == 1 { "" } else { "s" };
     let message = format!("expected {} argument{s}, found {}", d.expected, d.found);
-    Diagnostic::new("mismatched-arg-count", message, invalid_args_range(ctx, d))
+    Diagnostic::new(
+        DiagnosticCode::RustcHardError("E0107"),
+        message,
+        invalid_args_range(ctx, d.call_expr.map(AstPtr::wrap_left), d.expected, d.found),
+    )
 }
 
-fn invalid_args_range(ctx: &DiagnosticsContext<'_>, d: &hir::MismatchedArgCount) -> TextRange {
-    adjusted_display_range::<ast::Expr>(ctx, d.call_expr.clone().map(|it| it.into()), &|expr| {
-        let arg_list = match expr {
-            ast::Expr::CallExpr(call) => call.arg_list()?,
-            ast::Expr::MethodCallExpr(call) => call.arg_list()?,
+fn invalid_args_range(
+    ctx: &DiagnosticsContext<'_>,
+    source: InFile<AstPtr<Either<ast::Expr, ast::Pat>>>,
+    expected: usize,
+    found: usize,
+) -> FileRange {
+    adjusted_display_range(ctx, source, &|expr| {
+        let (text_range, r_paren_token, expected_arg) = match expr {
+            Either::Left(ast::Expr::CallExpr(call)) => {
+                let arg_list = call.arg_list()?;
+                (
+                    arg_list.syntax().text_range(),
+                    arg_list.r_paren_token(),
+                    arg_list.args().nth(expected).map(|it| it.syntax().text_range()),
+                )
+            }
+            Either::Left(ast::Expr::MethodCallExpr(call)) => {
+                let arg_list = call.arg_list()?;
+                (
+                    arg_list.syntax().text_range(),
+                    arg_list.r_paren_token(),
+                    arg_list.args().nth(expected).map(|it| it.syntax().text_range()),
+                )
+            }
+            Either::Right(ast::Pat::TupleStructPat(pat)) => {
+                let r_paren = pat.r_paren_token()?;
+                let l_paren = pat.l_paren_token()?;
+                (
+                    l_paren.text_range().cover(r_paren.text_range()),
+                    Some(r_paren),
+                    pat.fields().nth(expected).map(|it| it.syntax().text_range()),
+                )
+            }
             _ => return None,
         };
-        if d.found < d.expected {
-            if d.found == 0 {
-                return Some(arg_list.syntax().text_range());
+        if found < expected {
+            if found == 0 {
+                return Some(text_range);
             }
-            if let Some(r_paren) = arg_list.r_paren_token() {
+            if let Some(r_paren) = r_paren_token {
                 return Some(r_paren.text_range());
             }
         }
-        if d.expected < d.found {
-            if d.expected == 0 {
-                return Some(arg_list.syntax().text_range());
+        if expected < found {
+            if expected == 0 {
+                return Some(text_range);
             }
-            let zip = arg_list.args().nth(d.expected).zip(arg_list.r_paren_token());
+            let zip = expected_arg.zip(r_paren_token);
             if let Some((arg, r_paren)) = zip {
-                return Some(arg.syntax().text_range().cover(r_paren.text_range()));
+                return Some(arg.cover(r_paren.text_range()));
             }
         }
 
@@ -72,7 +127,7 @@ fn f() { zero(); }
     fn simple_free_fn_one() {
         check_diagnostics(
             r#"
-fn one(arg: u8) {}
+fn one(_arg: u8) {}
 fn f() { one(); }
           //^^ error: expected 1 argument, found 0
 "#,
@@ -80,7 +135,7 @@ fn f() { one(); }
 
         check_diagnostics(
             r#"
-fn one(arg: u8) {}
+fn one(_arg: u8) {}
 fn f() { one(1); }
 "#,
         );
@@ -117,7 +172,7 @@ fn f() {
         check_diagnostics(
             r#"
 struct S;
-impl S { fn method(&self, arg: u8) {} }
+impl S { fn method(&self, _arg: u8) {} }
 
             fn f() {
                 S.method();
@@ -128,7 +183,7 @@ impl S { fn method(&self, arg: u8) {} }
         check_diagnostics(
             r#"
 struct S;
-impl S { fn method(&self, arg: u8) {} }
+impl S { fn method(&self, _arg: u8) {} }
 
 fn f() {
     S::method(&S, 0);
@@ -144,7 +199,7 @@ fn f() {
         // future, but we shouldn't emit an argument count diagnostic here
         check_diagnostics(
             r#"
-trait Foo { fn method(&self, arg: usize) {} }
+trait Foo { fn method(&self, _arg: usize) {} }
 
 fn f() {
     let x;
@@ -198,6 +253,75 @@ impl Foo {
     }
 }
         "#,
+        );
+    }
+
+    #[test]
+    fn rest_pat_in_macro_expansion() {
+        check_diagnostics(
+            r#"
+// issue #17292
+#![allow(dead_code)]
+
+macro_rules! replace_with_2_dots {
+    ( $( $input:tt )* ) => {
+        ..
+    };
+}
+
+macro_rules! enum_str {
+    (
+        $(
+            $variant:ident (
+                $( $tfield:ty ),*
+            )
+        )
+        ,
+        *
+    ) => {
+        enum Foo {
+            $(
+                $variant ( $( $tfield ),* ),
+            )*
+        }
+
+        impl Foo {
+            fn variant_name_as_str(&self) -> &str {
+                match self {
+                    $(
+                        Self::$variant ( replace_with_2_dots!( $( $tfield ),* ) )
+                          => "",
+                    )*
+                }
+            }
+        }
+    };
+}
+
+enum_str! {
+    TupleVariant1(i32),
+    TupleVariant2(),
+    TupleVariant3(i8,u8,i128)
+}
+"#,
+        );
+
+        check_diagnostics(
+            r#"
+#![allow(dead_code)]
+macro_rules! two_dots1 {
+    () => { .. };
+}
+
+macro_rules! two_dots2 {
+    () => { two_dots1!() };
+}
+
+fn test() {
+    let (_, _, two_dots1!()) = ((), 42);
+    let (_, two_dots2!(), _) = (1, true, 2, false, (), (), 3);
+}
+"#,
         );
     }
 
@@ -276,8 +400,8 @@ struct S;
 
 impl S {
     fn method(#[cfg(NEVER)] self) {}
-    fn method2(#[cfg(NEVER)] self, arg: u8) {}
-    fn method3(self, #[cfg(NEVER)] arg: u8) {}
+    fn method2(#[cfg(NEVER)] self, _arg: u8) {}
+    fn method3(self, #[cfg(NEVER)] _arg: u8) {}
 }
 
 extern "C" {
@@ -306,8 +430,8 @@ fn main() {
             r#"
 #[rustc_legacy_const_generics(1, 3)]
 fn mixed<const N1: &'static str, const N2: bool>(
-    a: u8,
-    b: i8,
+    _a: u8,
+    _b: i8,
 ) {}
 
 fn f() {
@@ -317,8 +441,8 @@ fn f() {
 
 #[rustc_legacy_const_generics(1, 3)]
 fn b<const N1: u8, const N2: u8>(
-    a: u8,
-    b: u8,
+    _a: u8,
+    _b: u8,
 ) {}
 
 fn g() {
@@ -330,5 +454,36 @@ fn g() {
 }
             "#,
         )
+    }
+
+    #[test]
+    fn tuple_struct_pat() {
+        check_diagnostics(
+            r#"
+struct S(u32, u32);
+fn f(
+    S(a, b, c): S,
+         // ^^ error: this pattern has 3 fields, but the corresponding tuple struct has 2 fields
+    S(): S,
+  // ^^ error: this pattern has 0 fields, but the corresponding tuple struct has 2 fields
+    S(e, f, .., g, d): S
+  //        ^^^^^^^^^ error: this pattern has 4 fields, but the corresponding tuple struct has 2 fields
+) { _ = (a, b, c, d, e, f, g); }
+"#,
+        )
+    }
+
+    #[test]
+    fn no_type_mismatches_when_arg_count_mismatch() {
+        check_diagnostics(
+            r#"
+fn foo((): (), (): ()) {
+    foo(1, 2, 3);
+           // ^^ error: expected 2 arguments, found 3
+    foo(1);
+      // ^ error: expected 2 arguments, found 1
+}
+"#,
+        );
     }
 }

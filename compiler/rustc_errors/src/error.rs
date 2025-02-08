@@ -1,10 +1,9 @@
-use rustc_error_messages::{
-    fluent_bundle::resolver::errors::{ReferenceKind, ResolverError},
-    FluentArgs, FluentError,
-};
 use std::borrow::Cow;
 use std::error::Error;
 use std::fmt;
+
+use rustc_error_messages::fluent_bundle::resolver::errors::{ReferenceKind, ResolverError};
+use rustc_error_messages::{FluentArgs, FluentError};
 
 #[derive(Debug)]
 pub enum TranslateError<'args> {
@@ -23,9 +22,11 @@ impl<'args> TranslateError<'args> {
     pub fn message(id: &'args Cow<'args, str>, args: &'args FluentArgs<'args>) -> Self {
         Self::One { id, args, kind: TranslateErrorKind::MessageMissing }
     }
+
     pub fn primary(id: &'args Cow<'args, str>, args: &'args FluentArgs<'args>) -> Self {
         Self::One { id, args, kind: TranslateErrorKind::PrimaryBundleMissing }
     }
+
     pub fn attribute(
         id: &'args Cow<'args, str>,
         args: &'args FluentArgs<'args>,
@@ -33,6 +34,7 @@ impl<'args> TranslateError<'args> {
     ) -> Self {
         Self::One { id, args, kind: TranslateErrorKind::AttributeMissing { attr } }
     }
+
     pub fn value(id: &'args Cow<'args, str>, args: &'args FluentArgs<'args>) -> Self {
         Self::One { id, args, kind: TranslateErrorKind::ValueMissing }
     }

@@ -1,7 +1,10 @@
-// run-pass
-// needs-unwind
+//@ run-pass
+//@ needs-unwind
 
 #![allow(dropping_references, dropping_copy_types)]
+
+// FIXME(static_mut_refs): this could use an atomic
+#![allow(static_mut_refs)]
 
 static mut CHECK: usize = 0;
 

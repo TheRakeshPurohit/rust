@@ -1,20 +1,21 @@
 #![feature(type_alias_impl_trait)]
 
-// check-pass
+//@ check-pass
 
-trait Foo<T> {}
+pub trait Foo<T> {}
 impl<T, U> Foo<T> for U {}
 
-type Scope = impl Foo<()>;
+mod scope {
+    pub type Scope = impl super::Foo<()>;
 
-#[allow(unused)]
-fn infer_scope() -> Scope {
-    ()
+    #[allow(unused)]
+    fn infer_scope() -> Scope {
+        ()
+    }
 }
 
 #[allow(unused)]
-fn ice() -> impl Foo<Scope>
-{
+fn ice() -> impl Foo<scope::Scope> {
     loop {}
 }
 

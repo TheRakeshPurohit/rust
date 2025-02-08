@@ -1,6 +1,6 @@
 use clippy_utils::diagnostics::span_lint_and_sugg;
 use clippy_utils::source::snippet_with_applicability;
-use clippy_utils::{is_integer_literal, SpanlessEq};
+use clippy_utils::{SpanlessEq, is_integer_literal};
 use rustc_errors::Applicability;
 use rustc_hir::{BinOpKind, Expr, ExprKind};
 use rustc_lint::LateContext;
@@ -44,7 +44,7 @@ pub(super) fn check(cx: &LateContext<'_>, expr: &Expr<'_>, recv: &Expr<'_>, arg:
             cx,
             GET_LAST_WITH_LEN,
             expr.span,
-            &format!("accessing last element with `{recv_snippet}.get({recv_snippet}.len() - 1)`"),
+            format!("accessing last element with `{recv_snippet}.get({recv_snippet}.len() - 1)`"),
             "try",
             format!("{recv_snippet}.{method}()"),
             applicability,

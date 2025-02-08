@@ -2,14 +2,13 @@
 use std::ops::Range;
 
 use rustc_data_structures::fx::FxHashSet;
+use tracing::trace;
 
-use crate::borrow_tracker::{
-    stacked_borrows::{Item, Permission},
-    AccessKind, BorTag,
-};
-use crate::ProvenanceExtra;
+use crate::borrow_tracker::stacked_borrows::{Item, Permission};
+use crate::borrow_tracker::{AccessKind, BorTag};
+use crate::{InterpResult, ProvenanceExtra, interp_ok};
 
-/// Exactly what cache size we should use is a difficult tradeoff. There will always be some
+/// Exactly what cache size we should use is a difficult trade-off. There will always be some
 /// workload which has a `BorTag` working set which exceeds the size of the cache, and ends up
 /// falling back to linear searches of the borrow stack very often.
 /// The cost of making this value too large is that the loop in `Stack::insert` which ensures the
@@ -47,7 +46,7 @@ impl Stack {
         let mut first_removed = None;
 
         // We never consider removing the bottom-most tag. For stacks without an unknown
-        // bottom this preserves the base tag.
+        // bottom this preserves the root tag.
         // Note that the algorithm below is based on considering the tag at read_idx - 1,
         // so precisely considering the tag at index 0 for removal when we have an unknown
         // bottom would complicate the implementation. The simplification of not considering
@@ -93,7 +92,7 @@ impl Stack {
                 self.unique_range = 0..self.len();
             }
 
-            // Replace any Items which have been collected with the base item, a known-good value.
+            // Replace any Items which have been collected with the root item, a known-good value.
             for i in 0..CACHE_LEN {
                 if self.cache.idx[i] >= first_removed {
                     self.cache.items[i] = self.borrows[0];
@@ -135,8 +134,16 @@ impl StackCache {
 
 impl PartialEq for Stack {
     fn eq(&self, other: &Self) -> bool {
-        // All the semantics of Stack are in self.borrows, everything else is caching
-        self.borrows == other.borrows
+        let Stack {
+            borrows,
+            unknown_bottom,
+            // The cache is ignored for comparison.
+            #[cfg(feature = "stack-cache")]
+                cache: _,
+            #[cfg(feature = "stack-cache")]
+                unique_range: _,
+        } = self;
+        *borrows == other.borrows && *unknown_bottom == other.unknown_bottom
     }
 }
 
@@ -146,7 +153,7 @@ impl<'tcx> Stack {
     /// Panics if any of the caching mechanisms have broken,
     /// - The StackCache indices don't refer to the parallel items,
     /// - There are no Unique items outside of first_unique..last_unique
-    #[cfg(all(feature = "stack-cache", debug_assertions))]
+    #[cfg(feature = "stack-cache-consistency-check")]
     fn verify_cache_consistency(&self) {
         // Only a full cache needs to be valid. Also see the comments in find_granting_cache
         // and set_unknown_bottom.
@@ -190,25 +197,25 @@ impl<'tcx> Stack {
         tag: ProvenanceExtra,
         exposed_tags: &FxHashSet<BorTag>,
     ) -> Result<Option<usize>, ()> {
-        #[cfg(all(feature = "stack-cache", debug_assertions))]
+        #[cfg(feature = "stack-cache-consistency-check")]
         self.verify_cache_consistency();
 
         let ProvenanceExtra::Concrete(tag) = tag else {
             // Handle the wildcard case.
             // Go search the stack for an exposed tag.
-            if let Some(idx) =
-                self.borrows
-                    .iter()
-                    .enumerate() // we also need to know *where* in the stack
-                    .rev() // search top-to-bottom
-                    .find_map(|(idx, item)| {
-                        // If the item fits and *might* be this wildcard, use it.
-                        if item.perm().grants(access) && exposed_tags.contains(&item.tag()) {
-                            Some(idx)
-                        } else {
-                            None
-                        }
-                    })
+            if let Some(idx) = self
+                .borrows
+                .iter()
+                .enumerate() // we also need to know *where* in the stack
+                .rev() // search top-to-bottom
+                .find_map(|(idx, item)| {
+                    // If the item fits and *might* be this wildcard, use it.
+                    if item.perm().grants(access) && exposed_tags.contains(&item.tag()) {
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                })
             {
                 return Ok(Some(idx));
             }
@@ -248,7 +255,7 @@ impl<'tcx> Stack {
     #[cfg(feature = "stack-cache")]
     fn find_granting_cache(&mut self, access: AccessKind, tag: BorTag) -> Option<usize> {
         // This looks like a common-sense optimization; we're going to do a linear search of the
-        // cache or the borrow stack to scan the shorter of the two. This optimization is miniscule
+        // cache or the borrow stack to scan the shorter of the two. This optimization is minuscule
         // and this check actually ensures we do not access an invalid cache.
         // When a stack is created and when items are removed from the top of the borrow stack, we
         // need some valid value to populate the cache. In both cases, we try to use the bottom
@@ -327,11 +334,11 @@ impl<'tcx> Stack {
         // This primes the cache for the next access, which is almost always the just-added tag.
         self.cache.add(new_idx, new);
 
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "stack-cache-consistency-check")]
         self.verify_cache_consistency();
     }
 
-    /// Construct a new `Stack` using the passed `Item` as the base tag.
+    /// Construct a new `Stack` using the passed `Item` as the root tag.
     pub fn new(item: Item) -> Self {
         Stack {
             borrows: vec![item],
@@ -347,7 +354,7 @@ impl<'tcx> Stack {
         self.borrows.get(idx).cloned()
     }
 
-    #[allow(clippy::len_without_is_empty)] // Stacks are never empty
+    #[expect(clippy::len_without_is_empty)] // Stacks are never empty
     pub fn len(&self) -> usize {
         self.borrows.len()
     }
@@ -373,8 +380,8 @@ impl<'tcx> Stack {
     pub fn disable_uniques_starting_at(
         &mut self,
         disable_start: usize,
-        mut visitor: impl FnMut(Item) -> crate::InterpResult<'tcx>,
-    ) -> crate::InterpResult<'tcx> {
+        mut visitor: impl FnMut(Item) -> InterpResult<'tcx>,
+    ) -> InterpResult<'tcx> {
         #[cfg(feature = "stack-cache")]
         let unique_range = self.unique_range.clone();
         #[cfg(not(feature = "stack-cache"))]
@@ -385,7 +392,7 @@ impl<'tcx> Stack {
             let upper = unique_range.end;
             for item in &mut self.borrows[lower..upper] {
                 if item.perm() == Permission::Unique {
-                    log::trace!("access: disabling item {:?}", item);
+                    trace!("access: disabling item {:?}", item);
                     visitor(*item)?;
                     item.set_permission(Permission::Disabled);
                     // Also update all copies of this item in the cache.
@@ -410,19 +417,19 @@ impl<'tcx> Stack {
             self.unique_range.end = self.unique_range.end.min(disable_start);
         }
 
-        #[cfg(all(feature = "stack-cache", debug_assertions))]
+        #[cfg(feature = "stack-cache-consistency-check")]
         self.verify_cache_consistency();
 
-        Ok(())
+        interp_ok(())
     }
 
     /// Produces an iterator which iterates over `range` in reverse, and when dropped removes that
     /// range of `Item`s from this `Stack`.
-    pub fn pop_items_after<V: FnMut(Item) -> crate::InterpResult<'tcx>>(
+    pub fn pop_items_after<V: FnMut(Item) -> InterpResult<'tcx>>(
         &mut self,
         start: usize,
         mut visitor: V,
-    ) -> crate::InterpResult<'tcx> {
+    ) -> InterpResult<'tcx> {
         while self.borrows.len() > start {
             let item = self.borrows.pop().unwrap();
             visitor(item)?;
@@ -438,8 +445,8 @@ impl<'tcx> Stack {
             let mut removed = 0;
             let mut cursor = 0;
             // Remove invalid entries from the cache by rotating them to the end of the cache, then
-            // keep track of how many invalid elements there are and overwrite them with the base tag.
-            // The base tag here serves as a harmless default value.
+            // keep track of how many invalid elements there are and overwrite them with the root tag.
+            // The root tag here serves as a harmless default value.
             for _ in 0..CACHE_LEN - 1 {
                 if self.cache.idx[cursor] >= start {
                     self.cache.idx[cursor..CACHE_LEN - removed].rotate_left(1);
@@ -465,8 +472,8 @@ impl<'tcx> Stack {
             self.unique_range = 0..0;
         }
 
-        #[cfg(all(feature = "stack-cache", debug_assertions))]
+        #[cfg(feature = "stack-cache-consistency-check")]
         self.verify_cache_consistency();
-        Ok(())
+        interp_ok(())
     }
 }

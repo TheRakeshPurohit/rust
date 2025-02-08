@@ -1,14 +1,15 @@
-use crate::{Diagnostic, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::HirDisplay;
 
 // Diagnostic: moved-out-of-ref
 //
 // This diagnostic is triggered on moving non copy things out of references.
 pub(crate) fn moved_out_of_ref(ctx: &DiagnosticsContext<'_>, d: &hir::MovedOutOfRef) -> Diagnostic {
-    Diagnostic::new(
-        "moved-out-of-ref",
-        format!("cannot move `{}` out of reference", d.ty.display(ctx.sema.db)),
-        ctx.sema.diagnostics_display_range(d.span.clone()).range,
+    Diagnostic::new_with_syntax_node_ptr(
+        ctx,
+        DiagnosticCode::RustcHardError("E0507"),
+        format!("cannot move `{}` out of reference", d.ty.display(ctx.sema.db, ctx.edition)),
+        d.span,
     )
     .experimental() // spans are broken, and I'm not sure how precise we can detect copy types
 }
@@ -28,6 +29,7 @@ fn main() {
     let a = &X;
     let b = *a;
       //^ error: cannot move `X` out of reference
+    _ = b;
 }
 "#,
         );
@@ -45,6 +47,7 @@ fn main() {
     let b = a.0;
       //^ error: cannot move `X` out of reference
     let y = a.1;
+    _ = (b, y);
 }
 "#,
         );
@@ -58,8 +61,8 @@ fn main() {
 struct X;
 fn main() {
     static S: X = X;
-    let s = S;
-      //^ error: cannot move `X` out of reference
+    let _s = S;
+      //^^ error: cannot move `X` out of reference
 }
 "#,
         );
@@ -164,12 +167,39 @@ enum X {
 
 fn main() {
     let x = &X::Bar;
-    let c = || match *x {
+    let _c = || match *x {
         X::Foo(t) => t,
         _ => 5,
     };
 }
             "#,
         );
+    }
+
+    #[test]
+    fn regression_15787() {
+        check_diagnostics(
+            r#"
+//- minicore: coerce_unsized, slice, copy
+fn foo(mut slice: &[u32]) -> usize {
+    slice = match slice {
+        [0, rest @ ..] | rest => rest,
+    };
+    slice.len()
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn regression_16564() {
+        check_diagnostics(
+            r#"
+//- minicore: copy
+fn test() {
+    let _x = (&(&mut (),)).0 as *const ();
+}
+            "#,
+        )
     }
 }

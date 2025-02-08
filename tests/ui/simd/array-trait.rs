@@ -2,9 +2,8 @@
 
 #![allow(dead_code)]
 
-// pretty-expanded FIXME #23616
 
-#![feature(repr_simd, platform_intrinsics, generic_const_exprs)]
+#![feature(repr_simd, intrinsics, generic_const_exprs)]
 #![allow(non_camel_case_types, incomplete_features)]
 
 pub trait Simd {
@@ -22,20 +21,20 @@ impl Simd for i32x4 {
 #[derive(Copy, Clone)]
 pub struct T<S: Simd>([S::Lane; S::SIZE]);
 //~^ ERROR unconstrained generic constant
+//~| ERROR SIMD vector element type should be a primitive scalar
+//~| ERROR unconstrained generic constant
 
-extern "platform-intrinsic" {
-    fn simd_insert<T, E>(x: T, idx: u32, y: E) -> T;
-    fn simd_extract<T, E>(x: T, idx: u32) -> E;
-}
+#[rustc_intrinsic]
+unsafe fn simd_insert<T, E>(x: T, idx: u32, y: E) -> T;
+
+#[rustc_intrinsic]
+unsafe fn simd_extract<T, E>(x: T, idx: u32) -> E;
+
 
 pub fn main() {
     let mut t = T::<i32x4>([0; 4]);
     unsafe {
-        for i in 0_i32..4 {
-            t = simd_insert(t, i as u32, i);
-        }
-        for i in 0_i32..4 {
-            assert_eq!(i, simd_extract(t, i as u32));
-        }
+        t = simd_insert(t, 3, 3);
+        assert_eq!(3, simd_extract(t, 3));
     }
 }

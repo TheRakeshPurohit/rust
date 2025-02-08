@@ -1,25 +1,25 @@
-use crate::infer::canonical::{
-    Canonical, CanonicalQueryResponse, OriginalQueryValues, QueryRegionConstraints,
-};
-use crate::infer::{InferCtxt, InferOk};
-use crate::traits::{ObligationCause, ObligationCtxt};
+use std::fmt;
+
 use rustc_errors::ErrorGuaranteed;
-use rustc_infer::infer::canonical::Certainty;
 use rustc_infer::traits::PredicateObligations;
 use rustc_middle::traits::query::NoSolution;
 use rustc_middle::ty::fold::TypeFoldable;
 use rustc_middle::ty::{ParamEnvAnd, TyCtxt};
 use rustc_span::Span;
-use std::fmt;
+
+use crate::infer::canonical::{
+    CanonicalQueryInput, CanonicalQueryResponse, Certainty, OriginalQueryValues,
+    QueryRegionConstraints,
+};
+use crate::infer::{InferCtxt, InferOk};
+use crate::traits::{ObligationCause, ObligationCtxt};
 
 pub mod ascribe_user_type;
 pub mod custom;
-pub mod eq;
 pub mod implied_outlives_bounds;
 pub mod normalize;
 pub mod outlives;
 pub mod prove_predicate;
-pub mod subtype;
 
 pub use rustc_middle::traits::query::type_op::*;
 
@@ -80,7 +80,7 @@ pub trait QueryTypeOp<'tcx>: fmt::Debug + Copy + TypeFoldable<TyCtxt<'tcx>> + 't
     /// not captured in the return value.
     fn perform_query(
         tcx: TyCtxt<'tcx>,
-        canonicalized: Canonical<'tcx, ParamEnvAnd<'tcx, Self>>,
+        canonicalized: CanonicalQueryInput<'tcx, ParamEnvAnd<'tcx, Self>>,
     ) -> Result<CanonicalQueryResponse<'tcx, Self::QueryResponse>, NoSolution>;
 
     /// In the new trait solver, we already do caching in the solver itself,
@@ -89,41 +89,38 @@ pub trait QueryTypeOp<'tcx>: fmt::Debug + Copy + TypeFoldable<TyCtxt<'tcx>> + 't
     /// make sure to feed it predefined opaque types and the defining anchor
     /// and that would require duplicating all of the tcx queries. Instead,
     /// just perform these ops locally.
-    fn perform_locally_in_new_solver(
+    fn perform_locally_with_next_solver(
         ocx: &ObligationCtxt<'_, 'tcx>,
         key: ParamEnvAnd<'tcx, Self>,
+        span: Span,
     ) -> Result<Self::QueryResponse, NoSolution>;
 
     fn fully_perform_into(
         query_key: ParamEnvAnd<'tcx, Self>,
         infcx: &InferCtxt<'tcx>,
         output_query_region_constraints: &mut QueryRegionConstraints<'tcx>,
+        span: Span,
     ) -> Result<
         (
             Self::QueryResponse,
-            Option<Canonical<'tcx, ParamEnvAnd<'tcx, Self>>>,
+            Option<CanonicalQueryInput<'tcx, ParamEnvAnd<'tcx, Self>>>,
             PredicateObligations<'tcx>,
             Certainty,
         ),
         NoSolution,
     > {
         if let Some(result) = QueryTypeOp::try_fast_path(infcx.tcx, &query_key) {
-            return Ok((result, None, vec![], Certainty::Proven));
+            return Ok((result, None, PredicateObligations::new(), Certainty::Proven));
         }
 
-        // FIXME(#33684) -- We need to use
-        // `canonicalize_query_keep_static` here because of things
-        // like the subtype query, which go awry around
-        // `'static` otherwise.
         let mut canonical_var_values = OriginalQueryValues::default();
         let old_param_env = query_key.param_env;
-        let canonical_self =
-            infcx.canonicalize_query_keep_static(query_key, &mut canonical_var_values);
+        let canonical_self = infcx.canonicalize_query(query_key, &mut canonical_var_values);
         let canonical_result = Self::perform_query(infcx.tcx, canonical_self)?;
 
         let InferOk { value, obligations } = infcx
             .instantiate_nll_query_response_and_region_obligations(
-                &ObligationCause::dummy(),
+                &ObligationCause::dummy_with_span(span),
                 old_param_env,
                 &canonical_var_values,
                 canonical_result,
@@ -139,70 +136,59 @@ where
     Q: QueryTypeOp<'tcx>,
 {
     type Output = Q::QueryResponse;
-    type ErrorInfo = Canonical<'tcx, ParamEnvAnd<'tcx, Q>>;
+    type ErrorInfo = CanonicalQueryInput<'tcx, ParamEnvAnd<'tcx, Q>>;
 
     fn fully_perform(
         self,
         infcx: &InferCtxt<'tcx>,
         span: Span,
     ) -> Result<TypeOpOutput<'tcx, Self>, ErrorGuaranteed> {
+        // In the new trait solver, query type ops are performed locally. This
+        // is because query type ops currently use the old canonicalizer, and
+        // that doesn't preserve things like opaques which have been registered
+        // during MIR typeck. Even after the old canonicalizer is gone, it's
+        // probably worthwhile just keeping this run-locally logic, since we
+        // probably don't gain much from caching here given the new solver does
+        // caching internally.
         if infcx.next_trait_solver() {
             return Ok(scrape_region_constraints(
                 infcx,
-                |ocx| QueryTypeOp::perform_locally_in_new_solver(ocx, self),
+                |ocx| QueryTypeOp::perform_locally_with_next_solver(ocx, self, span),
                 "query type op",
                 span,
             )?
             .0);
         }
 
+        let mut error_info = None;
         let mut region_constraints = QueryRegionConstraints::default();
-        let (output, error_info, mut obligations, _) =
-            Q::fully_perform_into(self, infcx, &mut region_constraints).map_err(|_| {
-                infcx.tcx.sess.delay_span_bug(span, format!("error performing {self:?}"))
-            })?;
 
-        // Typically, instantiating NLL query results does not
-        // create obligations. However, in some cases there
-        // are unresolved type variables, and unify them *can*
-        // create obligations. In that case, we have to go
-        // fulfill them. We do this via a (recursive) query.
-        while !obligations.is_empty() {
-            trace!("{:#?}", obligations);
-            let mut progress = false;
-            for obligation in std::mem::take(&mut obligations) {
-                let obligation = infcx.resolve_vars_if_possible(obligation);
-                match ProvePredicate::fully_perform_into(
-                    obligation.param_env.and(ProvePredicate::new(obligation.predicate)),
-                    infcx,
-                    &mut region_constraints,
-                ) {
-                    Ok(((), _, new, certainty)) => {
-                        obligations.extend(new);
-                        progress = true;
-                        if let Certainty::Ambiguous = certainty {
-                            obligations.push(obligation);
-                        }
-                    }
-                    Err(_) => obligations.push(obligation),
-                }
-            }
-            if !progress {
-                return Err(infcx.tcx.sess.delay_span_bug(
-                    span,
-                    format!("ambiguity processing {obligations:?} from {self:?}"),
-                ));
-            }
-        }
+        // HACK(type_alias_impl_trait): When moving an opaque type to hidden type mapping from the query to the current inferctxt,
+        // we sometimes end up with `Opaque<'a> = Opaque<'b>` instead of an actual hidden type. In that case we don't register a
+        // hidden type but just equate the lifetimes. Thus we need to scrape the region constraints even though we're also manually
+        // collecting region constraints via `region_constraints`.
+        let (mut output, _) = scrape_region_constraints(
+            infcx,
+            |ocx| {
+                let (output, ei, obligations, _) =
+                    Q::fully_perform_into(self, infcx, &mut region_constraints, span)?;
+                error_info = ei;
 
-        Ok(TypeOpOutput {
-            output,
-            constraints: if region_constraints.is_empty() {
-                None
-            } else {
-                Some(infcx.tcx.arena.alloc(region_constraints))
+                ocx.register_obligations(obligations);
+                Ok(output)
             },
-            error_info,
-        })
+            "fully_perform",
+            span,
+        )?;
+        output.error_info = error_info;
+        if let Some(QueryRegionConstraints { outlives }) = output.constraints {
+            region_constraints.outlives.extend(outlives.iter().cloned());
+        }
+        output.constraints = if region_constraints.is_empty() {
+            None
+        } else {
+            Some(infcx.tcx.arena.alloc(region_constraints))
+        };
+        Ok(output)
     }
 }

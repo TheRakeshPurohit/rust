@@ -1,4 +1,4 @@
-// compile-flags: -g -O
+//@ compile-flags: -g -O
 
 // Check that simple constant values are preserved in debuginfo across both MIR opts and LLVM opts
 
@@ -18,8 +18,8 @@ fn foo(x: i32) {
 }
 
 // CHECK-LABEL: @check_it
-// CHECK: call void @llvm.dbg.value(metadata i32 1, metadata ![[a_metadata:[0-9]+]], metadata !DIExpression())
-// CHECK: call void @llvm.dbg.value(metadata i32 42, metadata ![[b_metadata:[0-9]+]], metadata !DIExpression())
+// CHECK: dbg{{.}}value({{(metadata )?}}i32 1, {{(metadata )?}}![[a_metadata:[0-9]+]], {{(metadata )?}}!DIExpression()
+// CHECK: dbg{{.}}value({{(metadata )?}}i32 42, {{(metadata )?}}![[b_metadata:[0-9]+]], {{(metadata )?}}!DIExpression()
 
 // CHECK: ![[a_metadata]] = !DILocalVariable(name: "a"
 // CHECK-SAME: line: 9

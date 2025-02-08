@@ -1,4 +1,6 @@
-// check-fail
+//@ check-fail
+
+#![allow(unexpected_cfgs)] // invalid cfgs
 
 #[cfg(any(foo, foo::bar))]
 //~^ERROR `cfg` predicate key must be an identifier

@@ -1,4 +1,4 @@
-#![feature(offset_of, extern_types)]
+#![feature(extern_types)]
 
 use std::mem::offset_of;
 
@@ -16,7 +16,7 @@ struct Beta {
     z: dyn Trait,
 }
 
-extern {
+extern "C" {
     type Extern;
 }
 
@@ -48,4 +48,8 @@ fn delta() {
 
 fn generic_with_maybe_sized<T: ?Sized>() -> usize {
     offset_of!(Delta<T>, z) //~ ERROR the size for values of type
+}
+
+fn illformed_tuple() {
+    offset_of!(([u8], u8), 1); //~ ERROR the size for values of type
 }

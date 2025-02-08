@@ -1,9 +1,10 @@
-// edition:2021
+//@ edition:2021
 
 #![feature(rustc_attrs)]
 
 // `u8` aligned at a byte and are unaffected by repr(packed).
-// Therefore we can precisely (and safely) capture references to both the fields.
+// Therefore we *could* precisely (and safely) capture references to both the fields,
+// but we don't, since we don't want capturing to change when field types change alignment.
 fn test_alignment_not_affected() {
     #[repr(packed)]
     struct Foo { x: u8, y: u8 }
@@ -13,15 +14,15 @@ fn test_alignment_not_affected() {
     let mut c = #[rustc_capture_analysis]
     //~^ ERROR: attributes on expressions are experimental
     //~| NOTE: see issue #15701 <https://github.com/rust-lang/rust/issues/15701>
+    //~| NOTE: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
     || {
     //~^ ERROR: First Pass analysis includes:
     //~| ERROR: Min Capture analysis includes:
         let z1: &u8 = &foo.x;
-        //~^ NOTE: Capturing foo[(0, 0)] -> ImmBorrow
-        //~| NOTE: Min Capture foo[(0, 0)] -> ImmBorrow
+        //~^ NOTE: Capturing foo[] -> Immutable
         let z2: &mut u8 = &mut foo.y;
-        //~^ NOTE: Capturing foo[(1, 0)] -> MutBorrow
-        //~| NOTE: Min Capture foo[(1, 0)] -> MutBorrow
+        //~^ NOTE: Capturing foo[] -> Mutable
+        //~| NOTE: Min Capture foo[] -> Mutable
 
         *z2 = 42;
 
@@ -44,14 +45,15 @@ fn test_alignment_affected() {
     let mut c = #[rustc_capture_analysis]
     //~^ ERROR: attributes on expressions are experimental
     //~| NOTE: see issue #15701 <https://github.com/rust-lang/rust/issues/15701>
+    //~| NOTE: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
     || {
     //~^ ERROR: First Pass analysis includes:
     //~| ERROR: Min Capture analysis includes:
         let z1: &String = &foo.x;
-        //~^ NOTE: Capturing foo[] -> ImmBorrow
+        //~^ NOTE: Capturing foo[] -> Immutable
         let z2: &mut u16 = &mut foo.y;
-        //~^ NOTE: Capturing foo[] -> MutBorrow
-        //~| NOTE: Min Capture foo[] -> MutBorrow
+        //~^ NOTE: Capturing foo[] -> Mutable
+        //~| NOTE: Min Capture foo[] -> Mutable
 
 
         *z2 = 42;
@@ -79,11 +81,12 @@ fn test_truncation_when_ref_and_move() {
     let c = #[rustc_capture_analysis]
     //~^ ERROR: attributes on expressions are experimental
     //~| NOTE: see issue #15701 <https://github.com/rust-lang/rust/issues/15701>
+    //~| NOTE: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
     || {
     //~^ ERROR: First Pass analysis includes:
     //~| ERROR: Min Capture analysis includes:
         println!("{}", foo.x);
-        //~^ NOTE: Capturing foo[] -> ImmBorrow
+        //~^ NOTE: Capturing foo[] -> Immutable
         //~| NOTE: Min Capture foo[] -> ByValue
         //~| NOTE: foo[] used here
         let _z = foo.x;

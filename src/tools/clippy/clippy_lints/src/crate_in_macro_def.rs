@@ -4,8 +4,9 @@ use rustc_ast::token::{Token, TokenKind};
 use rustc_ast::tokenstream::{TokenStream, TokenTree};
 use rustc_errors::Applicability;
 use rustc_lint::{EarlyContext, EarlyLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
-use rustc_span::{symbol::sym, Span};
+use rustc_session::declare_lint_pass;
+use rustc_span::Span;
+use rustc_span::symbol::sym;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -17,7 +18,7 @@ declare_clippy_lint! {
     /// https://doc.rust-lang.org/reference/macros-by-example.html#hygiene
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// #[macro_export]
     /// macro_rules! print_message {
     ///     () => {
@@ -27,7 +28,7 @@ declare_clippy_lint! {
     /// pub const MESSAGE: &str = "Hello!";
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// #[macro_export]
     /// macro_rules! print_message {
     ///     () => {
@@ -52,52 +53,45 @@ declare_lint_pass!(CrateInMacroDef => [CRATE_IN_MACRO_DEF]);
 
 impl EarlyLintPass for CrateInMacroDef {
     fn check_item(&mut self, cx: &EarlyContext<'_>, item: &Item) {
-        if_chain! {
-            if item.attrs.iter().any(is_macro_export);
-            if let ItemKind::MacroDef(macro_def) = &item.kind;
-            let tts = macro_def.body.tokens.clone();
-            if let Some(span) = contains_unhygienic_crate_reference(&tts);
-            then {
-                span_lint_and_sugg(
-                    cx,
-                    CRATE_IN_MACRO_DEF,
-                    span,
-                    "`crate` references the macro call's crate",
-                    "to reference the macro definition's crate, use",
-                    String::from("$crate"),
-                    Applicability::MachineApplicable,
-                );
-            }
+        if let ItemKind::MacroDef(macro_def) = &item.kind
+            && item.attrs.iter().any(is_macro_export)
+            && let Some(span) = contains_unhygienic_crate_reference(&macro_def.body.tokens)
+        {
+            span_lint_and_sugg(
+                cx,
+                CRATE_IN_MACRO_DEF,
+                span,
+                "`crate` references the macro call's crate",
+                "to reference the macro definition's crate, use",
+                String::from("$crate"),
+                Applicability::MachineApplicable,
+            );
         }
     }
 }
 
 fn is_macro_export(attr: &Attribute) -> bool {
-    if_chain! {
-        if let AttrKind::Normal(normal) = &attr.kind;
-        if let [segment] = normal.item.path.segments.as_slice();
-        then {
-            segment.ident.name == sym::macro_export
-        } else {
-            false
-        }
+    if let AttrKind::Normal(normal) = &attr.kind
+        && let [segment] = normal.item.path.segments.as_slice()
+    {
+        segment.ident.name == sym::macro_export
+    } else {
+        false
     }
 }
 
 fn contains_unhygienic_crate_reference(tts: &TokenStream) -> Option<Span> {
     let mut prev_is_dollar = false;
-    let mut cursor = tts.trees();
-    while let Some(curr) = cursor.next() {
-        if_chain! {
-            if !prev_is_dollar;
-            if let Some(span) = is_crate_keyword(curr);
-            if let Some(next) = cursor.look_ahead(0);
-            if is_token(next, &TokenKind::ModSep);
-            then {
-                return Some(span);
-            }
+    let mut iter = tts.iter();
+    while let Some(curr) = iter.next() {
+        if !prev_is_dollar
+            && let Some(span) = is_crate_keyword(curr)
+            && let Some(next) = iter.peek()
+            && is_token(next, &TokenKind::PathSep)
+        {
+            return Some(span);
         }
-        if let TokenTree::Delimited(_, _, tts) = &curr {
+        if let TokenTree::Delimited(.., tts) = &curr {
             let span = contains_unhygienic_crate_reference(tts);
             if span.is_some() {
                 return span;
@@ -109,10 +103,18 @@ fn contains_unhygienic_crate_reference(tts: &TokenStream) -> Option<Span> {
 }
 
 fn is_crate_keyword(tt: &TokenTree) -> Option<Span> {
-    if_chain! {
-        if let TokenTree::Token(Token { kind: TokenKind::Ident(symbol, _), span }, _) = tt;
-        if symbol.as_str() == "crate";
-        then { Some(*span) } else { None }
+    if let TokenTree::Token(
+        Token {
+            kind: TokenKind::Ident(symbol, _),
+            span,
+        },
+        _,
+    ) = tt
+        && symbol.as_str() == "crate"
+    {
+        Some(*span)
+    } else {
+        None
     }
 }
 

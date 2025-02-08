@@ -10,118 +10,108 @@ fn naive(_1: &Blueprint, _2: &Blueprint) -> bool {
     let mut _6: u32;
     let mut _7: u32;
     let mut _8: bool;
-    let mut _9: bool;
+    let mut _9: u32;
     let mut _10: u32;
-    let mut _11: u32;
-    let mut _12: bool;
-    let mut _13: bool;
-    let mut _14: u32;
+    let mut _11: bool;
+    let mut _12: u32;
+    let mut _13: u32;
+    let mut _14: bool;
     let mut _15: u32;
-    let mut _16: bool;
-    let mut _17: bool;
-    let mut _18: u32;
-    let mut _19: u32;
-    let mut _20: bool;
+    let mut _16: u32;
 
     bb0: {
-        StorageLive(_17);
-        StorageLive(_13);
-        StorageLive(_9);
         StorageLive(_5);
         StorageLive(_3);
-        _3 = ((*_1).0: u32);
+        _3 = copy ((*_1).0: u32);
         StorageLive(_4);
-        _4 = ((*_2).0: u32);
+        _4 = copy ((*_2).0: u32);
         _5 = Eq(move _3, move _4);
-        StorageDead(_4);
-        StorageDead(_3);
         switchInt(move _5) -> [0: bb1, otherwise: bb2];
     }
 
     bb1: {
-        StorageDead(_8);
-        StorageDead(_5);
-        goto -> bb3;
+        StorageDead(_4);
+        StorageDead(_3);
+        goto -> bb8;
     }
 
     bb2: {
+        StorageDead(_4);
+        StorageDead(_3);
         StorageLive(_8);
         StorageLive(_6);
-        _6 = ((*_1).1: u32);
+        _6 = copy ((*_1).1: u32);
         StorageLive(_7);
-        _7 = ((*_2).1: u32);
+        _7 = copy ((*_2).1: u32);
         _8 = Eq(move _6, move _7);
-        StorageDead(_7);
-        StorageDead(_6);
-        _9 = move _8;
-        StorageDead(_8);
-        StorageDead(_5);
-        switchInt(move _9) -> [0: bb3, otherwise: bb4];
+        switchInt(move _8) -> [0: bb3, otherwise: bb4];
     }
 
     bb3: {
-        StorageDead(_12);
-        StorageDead(_9);
-        goto -> bb5;
+        StorageDead(_7);
+        StorageDead(_6);
+        goto -> bb8;
     }
 
     bb4: {
-        StorageLive(_12);
-        StorageLive(_10);
-        _10 = ((*_1).2: u32);
+        StorageDead(_7);
+        StorageDead(_6);
         StorageLive(_11);
-        _11 = ((*_2).2: u32);
-        _12 = Eq(move _10, move _11);
-        StorageDead(_11);
-        StorageDead(_10);
-        _13 = move _12;
-        StorageDead(_12);
-        StorageDead(_9);
-        switchInt(move _13) -> [0: bb5, otherwise: bb6];
+        StorageLive(_9);
+        _9 = copy ((*_1).2: u32);
+        StorageLive(_10);
+        _10 = copy ((*_2).2: u32);
+        _11 = Eq(move _9, move _10);
+        switchInt(move _11) -> [0: bb5, otherwise: bb6];
     }
 
     bb5: {
-        StorageDead(_16);
-        StorageDead(_13);
-        goto -> bb7;
+        StorageDead(_10);
+        StorageDead(_9);
+        goto -> bb8;
     }
 
     bb6: {
-        StorageLive(_16);
+        StorageDead(_10);
+        StorageDead(_9);
         StorageLive(_14);
-        _14 = ((*_1).3: u32);
-        StorageLive(_15);
-        _15 = ((*_2).3: u32);
-        _16 = Eq(move _14, move _15);
-        StorageDead(_15);
-        StorageDead(_14);
-        _17 = move _16;
-        StorageDead(_16);
-        StorageDead(_13);
-        switchInt(move _17) -> [0: bb7, otherwise: bb8];
+        StorageLive(_12);
+        _12 = copy ((*_1).3: u32);
+        StorageLive(_13);
+        _13 = copy ((*_2).3: u32);
+        _14 = Eq(move _12, move _13);
+        switchInt(move _14) -> [0: bb7, otherwise: bb9];
     }
 
     bb7: {
-        _0 = const false;
-        goto -> bb9;
+        StorageDead(_13);
+        StorageDead(_12);
+        goto -> bb8;
     }
 
     bb8: {
-        StorageLive(_20);
-        StorageLive(_18);
-        _18 = ((*_1).4: u32);
-        StorageLive(_19);
-        _19 = ((*_2).4: u32);
-        _20 = Eq(move _18, move _19);
-        StorageDead(_19);
-        StorageDead(_18);
-        _0 = move _20;
-        goto -> bb9;
+        _0 = const false;
+        goto -> bb10;
     }
 
     bb9: {
-        StorageDead(_20);
-        StorageDead(_17);
+        StorageDead(_13);
+        StorageDead(_12);
+        StorageLive(_15);
+        _15 = copy ((*_1).4: u32);
+        StorageLive(_16);
+        _16 = copy ((*_2).4: u32);
+        _0 = Eq(move _15, move _16);
+        StorageDead(_16);
+        StorageDead(_15);
+        goto -> bb10;
+    }
+
+    bb10: {
+        StorageDead(_14);
+        StorageDead(_11);
+        StorageDead(_8);
+        StorageDead(_5);
         return;
     }
 }

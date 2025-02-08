@@ -1,5 +1,4 @@
-// run-pass
-#![feature(slice_ptr_len)]
+//@ run-pass
 
 use std::ptr::NonNull;
 

@@ -1,9 +1,9 @@
-//@compile-flags: -Zmiri-permissive-provenance
-#![feature(strict_provenance)]
-use std::{
-    alloc::{self, Layout},
-    mem::ManuallyDrop,
-};
+// We disable the GC for this test because it would change what is printed. We are testing the
+// printing, not how it interacts with the GC.
+//@compile-flags: -Zmiri-permissive-provenance -Zmiri-provenance-gc=0
+
+use std::alloc::{self, Layout};
+use std::mem::ManuallyDrop;
 
 extern "Rust" {
     fn miri_get_alloc_id(ptr: *const u8) -> u64;

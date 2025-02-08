@@ -1,4 +1,4 @@
-// edition:2021
+//@ edition:2021
 
 #![feature(rustc_attrs)]
 #![allow(unused)]
@@ -22,12 +22,13 @@ fn main() {
     let c = #[rustc_capture_analysis]
     //~^ ERROR: attributes on expressions are experimental
     //~| NOTE: see issue #15701 <https://github.com/rust-lang/rust/issues/15701>
+    //~| NOTE: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
     || {
     //~^ ERROR: First Pass analysis includes:
     //~| ERROR: Min Capture analysis includes:
         let wp = &w.p;
-        //~^ NOTE: Capturing w[(0, 0)] -> ImmBorrow
-        //~| NOTE: Min Capture w[(0, 0)] -> ImmBorrow
+        //~^ NOTE: Capturing w[(0, 0)] -> Immutable
+        //~| NOTE: Min Capture w[(0, 0)] -> Immutable
         println!("{}", wp.x);
     };
 

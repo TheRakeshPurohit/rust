@@ -17,9 +17,17 @@
 //! `// ignore-tidy-CHECK-NAME`.
 // ignore-tidy-dbg
 
+use std::ffi::OsStr;
+use std::path::Path;
+use std::sync::LazyLock;
+
+use regex::RegexSetBuilder;
+use rustc_hash::FxHashMap;
+
 use crate::walk::{filter_dirs, walk};
-use regex::{Regex, RegexSet};
-use std::{ffi::OsStr, path::Path};
+
+#[cfg(test)]
+mod tests;
 
 /// Error code markdown is restricted to 80 columns because they can be
 /// displayed on the console with --example.
@@ -55,18 +63,90 @@ const ANNOTATIONS_TO_IGNORE: &[&str] = &[
     "// CHECK",
     "// EMIT_MIR",
     "// compile-flags",
+    "//@ compile-flags",
     "// error-pattern",
+    "//@ error-pattern",
     "// gdb",
     "// lldb",
     "// cdb",
-    "// normalize-stderr-test",
+    "//@ normalize-stderr",
 ];
 
-// Intentionally written in decimal rather than hex
-const PROBLEMATIC_CONSTS: &[u32] = &[
-    184594741, 2880289470, 2881141438, 2965027518, 2976579765, 3203381950, 3405691582, 3405697037,
-    3735927486, 3735932941, 4027431614, 4276992702,
+// If you edit this, also edit where it gets used in `check` (calling `contains_ignore_directives`)
+const CONFIGURABLE_CHECKS: [&str; 11] = [
+    "cr",
+    "undocumented-unsafe",
+    "tab",
+    "linelength",
+    "filelength",
+    "end-whitespace",
+    "trailing-newlines",
+    "leading-newlines",
+    "copyright",
+    "dbg",
+    "odd-backticks",
 ];
+
+fn generate_problems<'a>(
+    consts: &'a [u32],
+    letter_digit: &'a FxHashMap<char, char>,
+) -> impl Iterator<Item = u32> + 'a {
+    consts.iter().flat_map(move |const_value| {
+        let problem =
+            letter_digit.iter().fold(format!("{:X}", const_value), |acc, (key, value)| {
+                acc.replace(&value.to_string(), &key.to_string())
+            });
+        let indexes: Vec<usize> = problem
+            .chars()
+            .enumerate()
+            .filter_map(|(index, c)| if letter_digit.contains_key(&c) { Some(index) } else { None })
+            .collect();
+        (0..1 << indexes.len()).map(move |i| {
+            u32::from_str_radix(
+                &problem
+                    .chars()
+                    .enumerate()
+                    .map(|(index, c)| {
+                        if let Some(pos) = indexes.iter().position(|&x| x == index) {
+                            if (i >> pos) & 1 == 1 { letter_digit[&c] } else { c }
+                        } else {
+                            c
+                        }
+                    })
+                    .collect::<String>(),
+                0x10,
+            )
+            .unwrap()
+        })
+    })
+}
+
+// Intentionally written in decimal rather than hex
+const ROOT_PROBLEMATIC_CONSTS: &[u32] = &[
+    184594741, 2880289470, 2881141438, 2965027518, 2976579765, 3203381950, 3405691582, 3405697037,
+    3735927486, 3735932941, 4027431614, 4276992702, 195934910, 252707358, 762133, 179681982,
+    173390526, 721077,
+];
+
+const LETTER_DIGIT: &[(char, char)] = &[('A', '4'), ('B', '8'), ('E', '3')];
+
+// Returns all permutations of problematic consts, over 2000 elements.
+fn generate_problematic_strings(
+    consts: &[u32],
+    letter_digit: &FxHashMap<char, char>,
+) -> Vec<String> {
+    generate_problems(consts, letter_digit)
+        .flat_map(|v| vec![v.to_string(), format!("{:X}", v)])
+        .collect()
+}
+
+static PROBLEMATIC_CONSTS_STRINGS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    generate_problematic_strings(ROOT_PROBLEMATIC_CONSTS, &LETTER_DIGIT.iter().cloned().collect())
+});
+
+fn contains_problematic_const(trimmed: &str) -> bool {
+    PROBLEMATIC_CONSTS_STRINGS.iter().any(|s| trimmed.to_uppercase().contains(s))
+}
 
 const INTERNAL_COMPILER_DOCS_LINE: &str = "#### This error code is internal to the compiler and will not be emitted with normal Rust code.";
 
@@ -127,8 +207,19 @@ fn should_ignore(line: &str) -> bool {
     // Matches test annotations like `//~ ERROR text`.
     // This mirrors the regex in src/tools/compiletest/src/runtest.rs, please
     // update both if either are changed.
-    let re = Regex::new("\\s*//(\\[.*\\])?~.*").unwrap();
-    re.is_match(line) || ANNOTATIONS_TO_IGNORE.iter().any(|a| line.contains(a))
+    static_regex!("\\s*//(\\[.*\\])?~.*").is_match(line)
+        || ANNOTATIONS_TO_IGNORE.iter().any(|a| line.contains(a))
+
+    // For `ui_test`-style UI test directives, also ignore
+    // - `//@[rev] compile-flags`
+    // - `//@[rev] normalize-stderr`
+        || static_regex!("\\s*//@(\\[.*\\]) (compile-flags|normalize-stderr|error-pattern).*")
+            .is_match(line)
+        // Matching for rustdoc tests commands.
+        // It allows to prevent them emitting warnings like `line longer than 100 chars`.
+        || static_regex!(
+            "\\s*//@ \\!?(count|files|has|has-dir|hasraw|matches|matchesraw|snapshot)\\s.*"
+        ).is_match(line)
 }
 
 /// Returns `true` if `line` is allowed to be longer than the normal limit.
@@ -144,6 +235,7 @@ fn long_line_is_ok(extension: &str, is_error_code: bool, max_columns: usize, lin
     }
 }
 
+#[derive(Clone, Copy)]
 enum Directive {
     /// By default, tidy always warns against style issues.
     Deny,
@@ -155,19 +247,28 @@ enum Directive {
     Ignore(bool),
 }
 
-fn contains_ignore_directive(can_contain: bool, contents: &str, check: &str) -> Directive {
+// Use a fixed size array in the return type to catch mistakes with changing `CONFIGURABLE_CHECKS`
+// without changing the code in `check` easier.
+fn contains_ignore_directives<const N: usize>(
+    can_contain: bool,
+    contents: &str,
+    checks: [&str; N],
+) -> [Directive; N] {
     if !can_contain {
-        return Directive::Deny;
+        return [Directive::Deny; N];
     }
-    // Update `can_contain` when changing this
-    if contents.contains(&format!("// ignore-tidy-{check}"))
-        || contents.contains(&format!("# ignore-tidy-{check}"))
-        || contents.contains(&format!("/* ignore-tidy-{check} */"))
-    {
-        Directive::Ignore(false)
-    } else {
-        Directive::Deny
-    }
+    checks.map(|check| {
+        // Update `can_contain` when changing this
+        if contents.contains(&format!("// ignore-tidy-{check}"))
+            || contents.contains(&format!("# ignore-tidy-{check}"))
+            || contents.contains(&format!("/* ignore-tidy-{check} */"))
+            || contents.contains(&format!("<!-- ignore-tidy-{check} -->"))
+        {
+            Directive::Ignore(false)
+        } else {
+            Directive::Deny
+        }
+    })
 }
 
 macro_rules! suppressible_tidy_err {
@@ -185,7 +286,7 @@ pub fn is_in(full_path: &Path, parent_folder_to_find: &str, folder_to_find: &str
         if parent.file_name().map_or_else(
             || false,
             |f| {
-                f.to_string_lossy() == folder_to_find
+                f == folder_to_find
                     && parent
                         .parent()
                         .and_then(|f| f.file_name())
@@ -253,17 +354,22 @@ pub fn check(path: &Path, bad: &mut bool) {
         path.extension().map_or(false, |e| e == "css") && !is_in(path, "src", "librustdoc")
     }
 
-    let problematic_consts_strings: Vec<String> = (PROBLEMATIC_CONSTS.iter().map(u32::to_string))
-        .chain(PROBLEMATIC_CONSTS.iter().map(|v| format!("{:x}", v)))
-        .chain(PROBLEMATIC_CONSTS.iter().map(|v| format!("{:X}", v)))
-        .collect();
-    let problematic_regex = RegexSet::new(problematic_consts_strings.as_slice()).unwrap();
+    // This creates a RegexSet as regex contains performance optimizations to be able to deal with these over
+    // 2000 needles efficiently. This runs over the entire source code, so performance matters.
+    let problematic_regex = RegexSetBuilder::new(PROBLEMATIC_CONSTS_STRINGS.as_slice())
+        .case_insensitive(true)
+        .build()
+        .unwrap();
+
+    // In some cases, a style check would be triggered by its own implementation
+    // or comments. A simple workaround is to just allowlist this file.
+    let this_file = Path::new(file!());
 
     walk(path, skip, &mut |entry, contents| {
         let file = entry.path();
         let filename = file.file_name().unwrap().to_string_lossy();
 
-        let is_style_file = filename.ends_with(".css");
+        let is_css_file = filename.ends_with(".css");
         let under_rustfmt = filename.ends_with(".rs") &&
             // This list should ideally be sourced from rustfmt.toml but we don't want to add a toml
             // parser to tidy.
@@ -288,9 +394,11 @@ pub fn check(path: &Path, bad: &mut bool) {
             COLS
         };
 
+        // When you change this, also change the `directive_line_starts` variable below
         let can_contain = contents.contains("// ignore-tidy-")
             || contents.contains("# ignore-tidy-")
-            || contents.contains("/* ignore-tidy-");
+            || contents.contains("/* ignore-tidy-")
+            || contents.contains("<!-- ignore-tidy-");
         // Enable testing ICE's that require specific (untidy)
         // file formats easily eg. `issue-1234-ignore-tidy.rs`
         if filename.contains("ignore-tidy") {
@@ -302,35 +410,33 @@ pub fn check(path: &Path, bad: &mut bool) {
                 return;
             }
         }
-        // apfloat shouldn't be changed because of license problems
-        if is_in(file, "compiler", "rustc_apfloat") {
-            return;
-        }
-        let mut skip_cr = contains_ignore_directive(can_contain, &contents, "cr");
-        let mut skip_undocumented_unsafe =
-            contains_ignore_directive(can_contain, &contents, "undocumented-unsafe");
-        let mut skip_tab = contains_ignore_directive(can_contain, &contents, "tab");
-        let mut skip_line_length = contains_ignore_directive(can_contain, &contents, "linelength");
-        let mut skip_file_length = contains_ignore_directive(can_contain, &contents, "filelength");
-        let mut skip_end_whitespace =
-            contains_ignore_directive(can_contain, &contents, "end-whitespace");
-        let mut skip_trailing_newlines =
-            contains_ignore_directive(can_contain, &contents, "trailing-newlines");
-        let mut skip_leading_newlines =
-            contains_ignore_directive(can_contain, &contents, "leading-newlines");
-        let mut skip_copyright = contains_ignore_directive(can_contain, &contents, "copyright");
-        let mut skip_dbg = contains_ignore_directive(can_contain, &contents, "dbg");
-        let mut skip_odd_backticks =
-            contains_ignore_directive(can_contain, &contents, "odd-backticks");
+        let [
+            mut skip_cr,
+            mut skip_undocumented_unsafe,
+            mut skip_tab,
+            mut skip_line_length,
+            mut skip_file_length,
+            mut skip_end_whitespace,
+            mut skip_trailing_newlines,
+            mut skip_leading_newlines,
+            mut skip_copyright,
+            mut skip_dbg,
+            mut skip_odd_backticks,
+        ] = contains_ignore_directives(can_contain, &contents, CONFIGURABLE_CHECKS);
         let mut leading_new_lines = false;
         let mut trailing_new_lines = 0;
         let mut lines = 0;
         let mut last_safety_comment = false;
         let mut comment_block: Option<(usize, usize)> = None;
-        let is_test = file.components().any(|c| c.as_os_str() == "tests");
+        let is_test = file.components().any(|c| c.as_os_str() == "tests")
+            || file.file_stem().unwrap() == "tests";
+        let is_this_file = file.ends_with(this_file) || this_file.ends_with(file);
+        let is_test_for_this_file =
+            is_test && file.parent().unwrap().ends_with(this_file.with_extension(""));
         // scanning the whole file for multiple needles at once is more efficient than
         // executing lines times needles separate searches.
-        let any_problematic_line = problematic_regex.is_match(contents);
+        let any_problematic_line =
+            !is_this_file && !is_test_for_this_file && problematic_regex.is_match(contents);
         for (i, line) in contents.split('\n').enumerate() {
             if line.is_empty() {
                 if i == 0 {
@@ -377,20 +483,38 @@ pub fn check(path: &Path, bad: &mut bool) {
                     "line longer than {max_columns} chars"
                 );
             }
-            if !is_style_file && line.contains('\t') {
+            if !is_css_file && line.contains('\t') {
                 suppressible_tidy_err!(err, skip_tab, "tab character");
             }
             if line.ends_with(' ') || line.ends_with('\t') {
                 suppressible_tidy_err!(err, skip_end_whitespace, "trailing whitespace");
             }
-            if is_style_file && line.starts_with(' ') {
+            if is_css_file && line.starts_with(' ') {
                 err("CSS files use tabs for indent");
             }
             if line.contains('\r') {
                 suppressible_tidy_err!(err, skip_cr, "CR character");
             }
-            if filename != "style.rs" {
-                if trimmed.contains("TODO") {
+            if !is_this_file {
+                let directive_line_starts = ["// ", "# ", "/* ", "<!-- "];
+                let possible_line_start =
+                    directive_line_starts.into_iter().any(|s| line.starts_with(s));
+                let contains_potential_directive =
+                    possible_line_start && (line.contains("-tidy") || line.contains("tidy-"));
+                let has_recognized_ignore_directive =
+                    contains_ignore_directives(can_contain, line, CONFIGURABLE_CHECKS)
+                        .into_iter()
+                        .any(|directive| matches!(directive, Directive::Ignore(_)));
+                let has_alphabetical_directive = line.contains("tidy-alphabetical-start")
+                    || line.contains("tidy-alphabetical-end");
+                let has_recognized_directive =
+                    has_recognized_ignore_directive || has_alphabetical_directive;
+                if contains_potential_directive && (!has_recognized_directive) {
+                    err("Unrecognized tidy directive")
+                }
+                // Allow using TODO in diagnostic suggestions by marking the
+                // relevant line with `// ignore-tidy-todo`.
+                if trimmed.contains("TODO") && !trimmed.contains("ignore-tidy-todo") {
                     err(
                         "TODO is used for tasks that should be done before merging a PR; If you want to leave a message in the codebase use FIXME",
                     )
@@ -398,19 +522,18 @@ pub fn check(path: &Path, bad: &mut bool) {
                 if trimmed.contains("//") && trimmed.contains(" XXX") {
                     err("Instead of XXX use FIXME")
                 }
-                if any_problematic_line {
-                    for s in problematic_consts_strings.iter() {
-                        if trimmed.contains(s) {
-                            err("Don't use magic numbers that spell things (consider 0x12345678)");
-                        }
-                    }
+                if any_problematic_line && contains_problematic_const(trimmed) {
+                    err("Don't use magic numbers that spell things (consider 0x12345678)");
                 }
             }
             // for now we just check libcore
-            if trimmed.contains("unsafe {") && !trimmed.starts_with("//") && !last_safety_comment {
-                if file.components().any(|c| c.as_os_str() == "core") && !is_test {
-                    suppressible_tidy_err!(err, skip_undocumented_unsafe, "undocumented unsafe");
-                }
+            if trimmed.contains("unsafe {")
+                && !trimmed.starts_with("//")
+                && !last_safety_comment
+                && file.components().any(|c| c.as_os_str() == "core")
+                && !is_test
+            {
+                suppressible_tidy_err!(err, skip_undocumented_unsafe, "undocumented unsafe");
             }
             if trimmed.contains("// SAFETY:") {
                 last_safety_comment = true;
@@ -431,9 +554,12 @@ pub fn check(path: &Path, bad: &mut bool) {
                     "copyright notices attributed to the Rust Project Developers are deprecated"
                 );
             }
-            if is_unexplained_ignore(&extension, line) {
+            if !file.components().any(|c| c.as_os_str() == "rustc_baked_icu_data")
+                && is_unexplained_ignore(&extension, line)
+            {
                 err(UNEXPLAINED_IGNORE_DOCTEST_INFO);
             }
+
             if filename.ends_with(".cpp") && line.contains("llvm_unreachable") {
                 err(LLVM_UNREACHABLE_INFO);
             }
@@ -466,26 +592,24 @@ pub fn check(path: &Path, bad: &mut bool) {
                         backtick_count += comment_text.chars().filter(|ch| *ch == '`').count();
                     }
                     comment_block = Some((start_line, backtick_count));
-                } else {
-                    if let Some((start_line, backtick_count)) = comment_block.take() {
-                        if backtick_count % 2 == 1 {
-                            let mut err = |msg: &str| {
-                                tidy_error!(bad, "{}:{start_line}: {msg}", file.display());
-                            };
-                            let block_len = (i + 1) - start_line;
-                            if block_len == 1 {
-                                suppressible_tidy_err!(
-                                    err,
-                                    skip_odd_backticks,
-                                    "comment with odd number of backticks"
-                                );
-                            } else {
-                                suppressible_tidy_err!(
-                                    err,
-                                    skip_odd_backticks,
-                                    "{block_len}-line comment block with odd number of backticks"
-                                );
-                            }
+                } else if let Some((start_line, backtick_count)) = comment_block.take() {
+                    if backtick_count % 2 == 1 {
+                        let mut err = |msg: &str| {
+                            tidy_error!(bad, "{}:{start_line}: {msg}", file.display());
+                        };
+                        let block_len = (i + 1) - start_line;
+                        if block_len == 1 {
+                            suppressible_tidy_err!(
+                                err,
+                                skip_odd_backticks,
+                                "comment with odd number of backticks"
+                            );
+                        } else {
+                            suppressible_tidy_err!(
+                                err,
+                                skip_odd_backticks,
+                                "{block_len}-line comment block with odd number of backticks"
+                            );
                         }
                     }
                 }
@@ -495,7 +619,7 @@ pub fn check(path: &Path, bad: &mut bool) {
             let mut err = |_| {
                 tidy_error!(bad, "{}: leading newline", file.display());
             };
-            suppressible_tidy_err!(err, skip_leading_newlines, "mising leading newline");
+            suppressible_tidy_err!(err, skip_leading_newlines, "missing leading newline");
         }
         let mut err = |msg: &str| {
             tidy_error!(bad, "{}: {}", file.display(), msg);

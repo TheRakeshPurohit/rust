@@ -1,27 +1,24 @@
-use crate::thir::cx::Cx;
-
 use rustc_hir as hir;
+use rustc_index::Idx;
 use rustc_middle::middle::region;
 use rustc_middle::thir::*;
 use rustc_middle::ty;
-
-use rustc_index::Idx;
 use rustc_middle::ty::CanonicalUserTypeAnnotation;
+use tracing::debug;
 
-impl<'tcx> Cx<'tcx> {
+use crate::thir::cx::ThirBuildCx;
+
+impl<'tcx> ThirBuildCx<'tcx> {
     pub(crate) fn mirror_block(&mut self, block: &'tcx hir::Block<'tcx>) -> BlockId {
         // We have to eagerly lower the "spine" of the statements
         // in order to get the lexical scoping correctly.
         let stmts = self.mirror_stmts(block.hir_id.local_id, block.stmts);
-        let opt_destruction_scope =
-            self.region_scope_tree.opt_destruction_scope(block.hir_id.local_id);
         let block = Block {
             targeted_by_break: block.targeted_by_break,
             region_scope: region::Scope {
-                id: block.hir_id.local_id,
+                local_id: block.hir_id.local_id,
                 data: region::ScopeData::Node,
             },
-            opt_destruction_scope,
             span: block.span,
             stmts,
             expr: block.expr.map(|expr| self.mirror_expr(expr)),
@@ -49,18 +46,16 @@ impl<'tcx> Cx<'tcx> {
             .enumerate()
             .filter_map(|(index, stmt)| {
                 let hir_id = stmt.hir_id;
-                let opt_dxn_ext = self.region_scope_tree.opt_destruction_scope(hir_id.local_id);
                 match stmt.kind {
-                    hir::StmtKind::Expr(ref expr) | hir::StmtKind::Semi(ref expr) => {
+                    hir::StmtKind::Expr(expr) | hir::StmtKind::Semi(expr) => {
                         let stmt = Stmt {
                             kind: StmtKind::Expr {
                                 scope: region::Scope {
-                                    id: hir_id.local_id,
+                                    local_id: hir_id.local_id,
                                     data: region::ScopeData::Node,
                                 },
                                 expr: self.mirror_expr(expr),
                             },
-                            opt_destruction_scope: opt_dxn_ext,
                         };
                         Some(self.thir.stmts.push(stmt))
                     }
@@ -68,9 +63,9 @@ impl<'tcx> Cx<'tcx> {
                         // ignore for purposes of the MIR
                         None
                     }
-                    hir::StmtKind::Local(ref local) => {
+                    hir::StmtKind::Let(local) => {
                         let remainder_scope = region::Scope {
-                            id: block_id,
+                            local_id: block_id,
                             data: region::ScopeData::Remainder(region::FirstStatementIndex::new(
                                 index,
                             )),
@@ -97,7 +92,7 @@ impl<'tcx> Cx<'tcx> {
                                     kind: PatKind::AscribeUserType {
                                         ascription: Ascription {
                                             annotation,
-                                            variance: ty::Variance::Covariant,
+                                            variance: ty::Covariant,
                                         },
                                         subpattern: pattern,
                                     },
@@ -113,7 +108,7 @@ impl<'tcx> Cx<'tcx> {
                             kind: StmtKind::Let {
                                 remainder_scope,
                                 init_scope: region::Scope {
-                                    id: hir_id.local_id,
+                                    local_id: hir_id.local_id,
                                     data: region::ScopeData::Node,
                                 },
                                 pattern,
@@ -122,7 +117,6 @@ impl<'tcx> Cx<'tcx> {
                                 lint_level: LintLevel::Explicit(local.hir_id),
                                 span,
                             },
-                            opt_destruction_scope: opt_dxn_ext,
                         };
                         Some(self.thir.stmts.push(stmt))
                     }

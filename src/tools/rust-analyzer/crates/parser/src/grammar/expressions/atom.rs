@@ -1,3 +1,5 @@
+use crate::grammar::types::type_;
+
 use super::*;
 
 // test expr_literals
@@ -49,6 +51,7 @@ pub(super) const ATOM_EXPR_FIRST: TokenSet =
         T![const],
         T![continue],
         T![do],
+        T![gen],
         T![for],
         T![if],
         T![let],
@@ -56,6 +59,7 @@ pub(super) const ATOM_EXPR_FIRST: TokenSet =
         T![match],
         T![move],
         T![return],
+        T![become],
         T![static],
         T![try],
         T![unsafe],
@@ -72,6 +76,9 @@ pub(super) fn atom_expr(
 ) -> Option<(CompletedMarker, BlockLike)> {
     if let Some(m) = literal(p) {
         return Some((m, BlockLike::NotBlock));
+    }
+    if p.at_contextual_kw(T![builtin]) && p.nth_at(1, T![#]) {
+        return Some((builtin_expr(p)?, BlockLike::NotBlock));
     }
     if paths::is_path_start(p) {
         return Some(path_expr(p, r));
@@ -93,11 +100,13 @@ pub(super) fn atom_expr(
             m.complete(p, UNDERSCORE_EXPR)
         }
         T![loop] => loop_expr(p, None),
-        T![box] => box_expr(p, None),
         T![while] => while_expr(p, None),
+        // test try_macro_fallback 2015
+        // fn foo() { try!(Ok(())); }
         T![try] => try_block_expr(p, None),
         T![match] => match_expr(p),
         T![return] => return_expr(p),
+        T![become] => become_expr(p),
         T![yield] => yield_expr(p),
         T![do] if p.nth_at_contextual_kw(1, T![yeet]) => yeet_expr(p),
         T![continue] => continue_expr(p),
@@ -132,16 +141,38 @@ pub(super) fn atom_expr(
         // fn f() { const { } }
         // fn f() { async { } }
         // fn f() { async move { } }
-        T![const] | T![unsafe] | T![async] if la == T!['{'] => {
+        T![const] | T![unsafe] | T![async] | T![gen] if la == T!['{'] => {
             let m = p.start();
             p.bump_any();
             stmt_list(p);
             m.complete(p, BLOCK_EXPR)
         }
-        T![async] if la == T![move] && p.nth(2) == T!['{'] => {
+        // test gen_blocks 2024
+        // pub fn main() {
+        //     gen { yield ""; };
+        //     async gen { yield ""; };
+        //     gen move { yield ""; };
+        //     async gen move { yield ""; };
+        // }
+        T![async] if la == T![gen] && p.nth(2) == T!['{'] => {
             let m = p.start();
             p.bump(T![async]);
-            p.eat(T![move]);
+            p.eat(T![gen]);
+            stmt_list(p);
+            m.complete(p, BLOCK_EXPR)
+        }
+        T![async] | T![gen] if la == T![move] && p.nth(2) == T!['{'] => {
+            let m = p.start();
+            p.bump_any();
+            p.bump(T![move]);
+            stmt_list(p);
+            m.complete(p, BLOCK_EXPR)
+        }
+        T![async] if la == T![gen] && p.nth(2) == T![move] && p.nth(3) == T!['{'] => {
+            let m = p.start();
+            p.bump(T![async]);
+            p.bump(T![gen]);
+            p.bump(T![move]);
             stmt_list(p);
             m.complete(p, BLOCK_EXPR)
         }
@@ -210,6 +241,246 @@ fn tuple_expr(p: &mut Parser<'_>) -> CompletedMarker {
     }
     p.expect(T![')']);
     m.complete(p, if saw_expr && !saw_comma { PAREN_EXPR } else { TUPLE_EXPR })
+}
+
+// test builtin_expr
+// fn foo() {
+//     builtin#asm("");
+//     builtin#format_args("", 0, 1, a = 2 + 3, a + b);
+//     builtin#offset_of(Foo, bar.baz.0);
+// }
+fn builtin_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
+    let m = p.start();
+    p.bump_remap(T![builtin]);
+    p.bump(T![#]);
+    if p.at_contextual_kw(T![offset_of]) {
+        p.bump_remap(T![offset_of]);
+        p.expect(T!['(']);
+        type_(p);
+        p.expect(T![,]);
+        while !p.at(EOF) && !p.at(T![')']) {
+            name_ref_mod_path_or_index(p);
+            if !p.at(T![')']) {
+                p.expect(T![.]);
+            }
+        }
+        p.expect(T![')']);
+        Some(m.complete(p, OFFSET_OF_EXPR))
+    } else if p.at_contextual_kw(T![format_args]) {
+        p.bump_remap(T![format_args]);
+        p.expect(T!['(']);
+        expr(p);
+        if p.eat(T![,]) {
+            while !p.at(EOF) && !p.at(T![')']) {
+                let m = p.start();
+                if p.at(IDENT) && p.nth_at(1, T![=]) {
+                    name(p);
+                    p.bump(T![=]);
+                }
+                if expr(p).is_none() {
+                    m.abandon(p);
+                    break;
+                }
+                m.complete(p, FORMAT_ARGS_ARG);
+
+                if !p.at(T![')']) {
+                    p.expect(T![,]);
+                }
+            }
+        }
+        p.expect(T![')']);
+        Some(m.complete(p, FORMAT_ARGS_EXPR))
+    } else if p.at_contextual_kw(T![asm]) {
+        parse_asm_expr(p, m)
+    } else {
+        m.abandon(p);
+        None
+    }
+}
+
+// test asm_expr
+// fn foo() {
+//     builtin#asm(
+//         "mov {tmp}, {x}",
+//         "shl {tmp}, 1",
+//         "shl {x}, 2",
+//         "add {x}, {tmp}",
+//         x = inout(reg) x,
+//         tmp = out(reg) _,
+//     );
+// }
+fn parse_asm_expr(p: &mut Parser<'_>, m: Marker) -> Option<CompletedMarker> {
+    p.bump_remap(T![asm]);
+    p.expect(T!['(']);
+    if expr(p).is_none() {
+        p.err_and_bump("expected asm template");
+    }
+    let mut allow_templates = true;
+    while !p.at(EOF) && !p.at(T![')']) {
+        p.expect(T![,]);
+        // accept trailing commas
+        if p.at(T![')']) {
+            break;
+        }
+
+        let op_n = p.start();
+        // Parse clobber_abi
+        if p.eat_contextual_kw(T![clobber_abi]) {
+            parse_clobber_abi(p);
+            op_n.complete(p, ASM_CLOBBER_ABI);
+            allow_templates = false;
+            continue;
+        }
+
+        // Parse options
+        if p.eat_contextual_kw(T![options]) {
+            parse_options(p);
+            op_n.complete(p, ASM_OPTIONS);
+            allow_templates = false;
+            continue;
+        }
+
+        // Parse operand names
+        if p.at(T![ident]) && p.nth_at(1, T![=]) {
+            name(p);
+            p.bump(T![=]);
+            allow_templates = false;
+        }
+
+        let op = p.start();
+        let dir_spec = p.start();
+        if p.eat(T![in]) || p.eat_contextual_kw(T![out]) || p.eat_contextual_kw(T![lateout]) {
+            dir_spec.complete(p, ASM_DIR_SPEC);
+            parse_reg(p);
+            let op_expr = p.start();
+            expr(p);
+            op_expr.complete(p, ASM_OPERAND_EXPR);
+            op.complete(p, ASM_REG_OPERAND);
+            op_n.complete(p, ASM_OPERAND_NAMED);
+        } else if p.eat_contextual_kw(T![inout]) || p.eat_contextual_kw(T![inlateout]) {
+            dir_spec.complete(p, ASM_DIR_SPEC);
+            parse_reg(p);
+            let op_expr = p.start();
+            expr(p);
+            if p.eat(T![=>]) {
+                expr(p);
+            }
+            op_expr.complete(p, ASM_OPERAND_EXPR);
+            op.complete(p, ASM_REG_OPERAND);
+            op_n.complete(p, ASM_OPERAND_NAMED);
+        } else if p.eat_contextual_kw(T![label]) {
+            dir_spec.abandon(p);
+            block_expr(p);
+            op.complete(p, ASM_OPERAND_NAMED);
+            op_n.complete(p, ASM_LABEL);
+        } else if p.eat(T![const]) {
+            dir_spec.abandon(p);
+            expr(p);
+            op.complete(p, ASM_CONST);
+            op_n.complete(p, ASM_OPERAND_NAMED);
+        } else if p.eat_contextual_kw(T![sym]) {
+            dir_spec.abandon(p);
+            paths::type_path(p);
+            op.complete(p, ASM_SYM);
+            op_n.complete(p, ASM_OPERAND_NAMED);
+        } else if allow_templates {
+            dir_spec.abandon(p);
+            op.abandon(p);
+            op_n.abandon(p);
+            if expr(p).is_none() {
+                p.err_and_bump("expected asm template");
+            }
+            continue;
+        } else {
+            dir_spec.abandon(p);
+            op.abandon(p);
+            op_n.abandon(p);
+            p.err_and_bump("expected asm operand");
+
+            // improves error recovery and handles err_and_bump recovering from `{` which gets
+            // the parser stuck here
+            if p.at(T!['{']) {
+                // test_err bad_asm_expr
+                // fn foo() {
+                //     builtin#asm(
+                //         label crashy = { return; }
+                //     );
+                // }
+                expr(p);
+            }
+
+            if p.at(T!['}']) {
+                break;
+            }
+            continue;
+        };
+        allow_templates = false;
+    }
+    p.expect(T![')']);
+    Some(m.complete(p, ASM_EXPR))
+}
+
+fn parse_options(p: &mut Parser<'_>) {
+    p.expect(T!['(']);
+
+    while !p.eat(T![')']) && !p.at(EOF) {
+        const OPTIONS: &[SyntaxKind] = &[
+            T![pure],
+            T![nomem],
+            T![readonly],
+            T![preserves_flags],
+            T![noreturn],
+            T![nostack],
+            T![may_unwind],
+            T![att_syntax],
+            T![raw],
+        ];
+        let m = p.start();
+        if !OPTIONS.iter().any(|&syntax| p.eat_contextual_kw(syntax)) {
+            p.err_and_bump("expected asm option");
+            m.abandon(p);
+            continue;
+        }
+        m.complete(p, ASM_OPTION);
+
+        // Allow trailing commas
+        if p.eat(T![')']) {
+            break;
+        }
+        p.expect(T![,]);
+    }
+}
+
+fn parse_clobber_abi(p: &mut Parser<'_>) {
+    p.expect(T!['(']);
+
+    while !p.eat(T![')']) && !p.at(EOF) {
+        if !p.expect(T![string]) {
+            break;
+        }
+
+        // Allow trailing commas
+        if p.eat(T![')']) {
+            break;
+        }
+        p.expect(T![,]);
+    }
+}
+
+fn parse_reg(p: &mut Parser<'_>) {
+    p.expect(T!['(']);
+    if p.at_ts(PATH_NAME_REF_KINDS) {
+        let m = p.start();
+        name_ref_mod_path(p);
+        m.complete(p, ASM_REG_SPEC);
+    } else if p.at(T![string]) {
+        let m = p.start();
+        p.bump_any();
+        m.complete(p, ASM_REG_SPEC);
+    } else {
+        p.err_and_bump("expected register name");
+    }
+    p.expect(T![')']);
 }
 
 // test array_expr
@@ -283,6 +554,7 @@ fn closure_expr(p: &mut Parser<'_>) -> CompletedMarker {
     p.eat(T![const]);
     p.eat(T![static]);
     p.eat(T![async]);
+    p.eat(T![gen]);
     p.eat(T![move]);
 
     if !p.at(T![|]) {
@@ -318,8 +590,7 @@ fn if_expr(p: &mut Parser<'_>) -> CompletedMarker {
     p.bump(T![if]);
     expr_no_struct(p);
     block_expr(p);
-    if p.at(T![else]) {
-        p.bump(T![else]);
+    if p.eat(T![else]) {
         if p.at(T![if]) {
             if_expr(p);
         } else {
@@ -393,7 +664,7 @@ fn for_expr(p: &mut Parser<'_>, m: Option<Marker>) -> CompletedMarker {
 fn let_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(T![let]);
-    patterns::pattern_top(p);
+    patterns::pattern(p);
     p.expect(T![=]);
     expr_let(p);
     m.complete(p, LET_EXPR)
@@ -419,6 +690,18 @@ fn match_expr(p: &mut Parser<'_>) -> CompletedMarker {
     m.complete(p, MATCH_EXPR)
 }
 
+// test_err match_arms_recovery
+// fn foo() {
+//     match () {
+//         _ => (),,
+//         _ => ,
+//         _ => (),
+//          => (),
+//         if true => (),
+//         _ => (),
+//         () if => (),
+//     }
+// }
 pub(crate) fn match_arm_list(p: &mut Parser<'_>) {
     assert!(p.at(T!['{']));
     let m = p.start();
@@ -438,6 +721,10 @@ pub(crate) fn match_arm_list(p: &mut Parser<'_>) {
     while !p.at(EOF) && !p.at(T!['}']) {
         if p.at(T!['{']) {
             error_block(p, "expected match arm");
+            continue;
+        }
+        if p.at(T![,]) {
+            p.err_and_bump("expected pattern");
             continue;
         }
         match_arm(p);
@@ -473,26 +760,30 @@ fn match_arm(p: &mut Parser<'_>) {
     // }
     attributes::outer_attrs(p);
 
-    patterns::pattern_top_r(p, TokenSet::EMPTY);
+    patterns::pattern_top_r(p, TokenSet::new(&[T![=], T![if]]));
     if p.at(T![if]) {
         match_guard(p);
     }
     p.expect(T![=>]);
-    let blocklike = match expr_stmt(p, None) {
-        Some((_, blocklike)) => blocklike,
-        None => BlockLike::NotBlock,
-    };
+    if p.eat(T![,]) {
+        p.error("expected expression");
+    } else {
+        let blocklike = match expr_stmt(p, None) {
+            Some((_, blocklike)) => blocklike,
+            None => BlockLike::NotBlock,
+        };
 
-    // test match_arms_commas
-    // fn foo() {
-    //     match () {
-    //         _ => (),
-    //         _ => {}
-    //         _ => ()
-    //     }
-    // }
-    if !p.eat(T![,]) && !blocklike.is_block() && !p.at(T!['}']) {
-        p.error("expected `,`");
+        // test match_arms_commas
+        // fn foo() {
+        //     match () {
+        //         _ => (),
+        //         _ => {}
+        //         _ => ()
+        //     }
+        // }
+        if !p.eat(T![,]) && !blocklike.is_block() && !p.at(T!['}']) {
+            p.error("expected `,`");
+        }
     }
     m.complete(p, MATCH_ARM);
 }
@@ -508,7 +799,11 @@ fn match_guard(p: &mut Parser<'_>) -> CompletedMarker {
     assert!(p.at(T![if]));
     let m = p.start();
     p.bump(T![if]);
-    expr(p);
+    if p.at(T![=]) {
+        p.error("expected expression");
+    } else {
+        expr(p);
+    }
     m.complete(p, MATCH_GUARD)
 }
 
@@ -549,6 +844,18 @@ fn return_expr(p: &mut Parser<'_>) -> CompletedMarker {
         expr(p);
     }
     m.complete(p, RETURN_EXPR)
+}
+
+// test become_expr
+// fn foo() {
+//     become foo();
+// }
+fn become_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    assert!(p.at(T![become]));
+    let m = p.start();
+    p.bump(T![become]);
+    expr(p);
+    m.complete(p, BECOME_EXPR)
 }
 
 // test yield_expr
@@ -636,24 +943,6 @@ fn break_expr(p: &mut Parser<'_>, r: Restrictions) -> CompletedMarker {
 fn try_block_expr(p: &mut Parser<'_>, m: Option<Marker>) -> CompletedMarker {
     assert!(p.at(T![try]));
     let m = m.unwrap_or_else(|| p.start());
-    // Special-case `try!` as macro.
-    // This is a hack until we do proper edition support
-    if p.nth_at(1, T![!]) {
-        // test try_macro_fallback
-        // fn foo() { try!(Ok(())); }
-        let macro_call = p.start();
-        let path = p.start();
-        let path_segment = p.start();
-        let name_ref = p.start();
-        p.bump_remap(IDENT);
-        name_ref.complete(p, NAME_REF);
-        path_segment.complete(p, PATH_SEGMENT);
-        path.complete(p, PATH);
-        let _block_like = items::macro_call_after_excl(p);
-        macro_call.complete(p, MACRO_CALL);
-        return m.complete(p, MACRO_EXPR);
-    }
-
     p.bump(T![try]);
     if p.at(T!['{']) {
         stmt_list(p);
@@ -661,20 +950,4 @@ fn try_block_expr(p: &mut Parser<'_>, m: Option<Marker>) -> CompletedMarker {
         p.error("expected a block");
     }
     m.complete(p, BLOCK_EXPR)
-}
-
-// test box_expr
-// fn foo() {
-//     let x = box 1i32;
-//     let y = (box 1i32, box 2i32);
-//     let z = Foo(box 1i32, box 2i32);
-// }
-fn box_expr(p: &mut Parser<'_>, m: Option<Marker>) -> CompletedMarker {
-    assert!(p.at(T![box]));
-    let m = m.unwrap_or_else(|| p.start());
-    p.bump(T![box]);
-    if p.at_ts(EXPR_FIRST) {
-        expr(p);
-    }
-    m.complete(p, BOX_EXPR)
 }

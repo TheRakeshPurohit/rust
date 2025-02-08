@@ -1,8 +1,9 @@
-// run-pass
+//@ run-pass
 // This is a regression test for something that only came up while
 // attempting to bootstrap librustc with new destructor lifetime
 // semantics.
 
+#![allow(unexpected_cfgs)] // for the cfg-as-descriptions
 
 use std::collections::HashMap;
 use std::cell::RefCell;

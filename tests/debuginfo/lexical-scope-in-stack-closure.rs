@@ -1,6 +1,4 @@
-// min-lldb-version: 310
-
-// compile-flags:-g
+//@ compile-flags:-g
 
 // === GDB TESTS ===================================================================================
 
@@ -35,34 +33,28 @@
 
 // lldb-command:run
 
-// lldb-command:print x
-// lldbg-check:[...]$0 = false
-// lldbr-check:(bool) x = false
+// lldb-command:v x
+// lldb-check:[...] false
 // lldb-command:continue
 
-// lldb-command:print x
-// lldbg-check:[...]$1 = false
-// lldbr-check:(bool) x = false
+// lldb-command:v x
+// lldb-check:[...] false
 // lldb-command:continue
 
-// lldb-command:print x
-// lldbg-check:[...]$2 = 1000
-// lldbr-check:(isize) x = 1000
+// lldb-command:v x
+// lldb-check:[...] 1000
 // lldb-command:continue
 
-// lldb-command:print x
-// lldbg-check:[...]$3 = 2.5
-// lldbr-check:(f64) x = 2.5
+// lldb-command:v x
+// lldb-check:[...] 2.5
 // lldb-command:continue
 
-// lldb-command:print x
-// lldbg-check:[...]$4 = true
-// lldbr-check:(bool) x = true
+// lldb-command:v x
+// lldb-check:[...] true
 // lldb-command:continue
 
-// lldb-command:print x
-// lldbg-check:[...]$5 = false
-// lldbr-check:(bool) x = false
+// lldb-command:v x
+// lldb-check:[...] false
 // lldb-command:continue
 
 #![feature(omit_gdb_pretty_printer_section)]

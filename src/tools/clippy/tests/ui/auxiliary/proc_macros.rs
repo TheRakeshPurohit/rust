@@ -1,21 +1,15 @@
-//@compile-flags: --emit=link
-//@no-prefer-dynamic
-
-#![crate_type = "proc-macro"]
 #![feature(let_chains)]
 #![feature(proc_macro_span)]
-#![allow(dead_code)]
+#![allow(clippy::needless_if, dead_code)]
 
 extern crate proc_macro;
 
 use core::mem;
-use proc_macro::{
-    token_stream::IntoIter,
-    Delimiter::{self, Brace, Parenthesis},
-    Group, Ident, Literal, Punct,
-    Spacing::{self, Alone, Joint},
-    Span, TokenStream, TokenTree as TT,
-};
+use proc_macro::Delimiter::{self, Brace, Parenthesis};
+use proc_macro::Spacing::{self, Alone, Joint};
+use proc_macro::token_stream::IntoIter;
+use proc_macro::{Group, Ident, Literal, Punct, Span, TokenStream, TokenTree as TT};
+use syn::spanned::Spanned;
 
 type Result<T> = core::result::Result<T, TokenStream>;
 
@@ -64,7 +58,7 @@ fn group_with_span(delimiter: Delimiter, stream: TokenStream, span: Span) -> Gro
 const ESCAPE_CHAR: char = '$';
 
 /// Takes a single token followed by a sequence of tokens. Returns the sequence of tokens with their
-/// span set to that of the first token. Tokens may be escaped with either `#ident` or `#(tokens)`.
+/// span set to that of the first token. Tokens may be escaped with either `$ident` or `$(tokens)`.
 #[proc_macro]
 pub fn with_span(input: TokenStream) -> TokenStream {
     let mut iter = input.into_iter();
@@ -78,7 +72,7 @@ pub fn with_span(input: TokenStream) -> TokenStream {
 }
 
 /// Takes a sequence of tokens and return the tokens with the span set such that they appear to be
-/// from an external macro. Tokens may be escaped with either `#ident` or `#(tokens)`.
+/// from an external macro. Tokens may be escaped with either `$ident` or `$(tokens)`.
 #[proc_macro]
 pub fn external(input: TokenStream) -> TokenStream {
     let mut res = TokenStream::new();
@@ -90,7 +84,7 @@ pub fn external(input: TokenStream) -> TokenStream {
 }
 
 /// Copies all the tokens, replacing all their spans with the given span. Tokens can be escaped
-/// either by `#ident` or `#(tokens)`.
+/// either by `$ident` or `$(tokens)`.
 fn write_with_span(s: Span, mut input: IntoIter, out: &mut TokenStream) -> Result<()> {
     while let Some(tt) = input.next() {
         match tt {
@@ -129,6 +123,22 @@ fn write_with_span(s: Span, mut input: IntoIter, out: &mut TokenStream) -> Resul
         }
     }
     Ok(())
+}
+
+/// Takes an array repeat expression such as `[0_u32; 2]`, and return the tokens with 10 times the
+/// original size, which turns to `[0_u32; 20]`.
+#[proc_macro]
+pub fn make_it_big(input: TokenStream) -> TokenStream {
+    let mut expr_repeat = syn::parse_macro_input!(input as syn::ExprRepeat);
+    let len_span = expr_repeat.len.span();
+    if let syn::Expr::Lit(expr_lit) = &mut *expr_repeat.len {
+        if let syn::Lit::Int(lit_int) = &expr_lit.lit {
+            let orig_val = lit_int.base10_parse::<usize>().expect("not a valid length parameter");
+            let new_val = orig_val.saturating_mul(10);
+            expr_lit.lit = syn::parse_quote_spanned!( len_span => #new_val);
+        }
+    }
+    quote::quote!(#expr_repeat).into()
 }
 
 /// Within the item this attribute is attached to, an `inline!` macro is available which expands the
@@ -386,7 +396,8 @@ impl MacroArm {
                         p.span(),
                     )?;
                     self.add_parenthesized_arg_def(kind, dollar_span, g.span(), out);
-                    self.args.push(TT::Group(group_with_span(Parenthesis, inner.collect(), g.span())))
+                    self.args
+                        .push(TT::Group(group_with_span(Parenthesis, inner.collect(), g.span())))
                 } else {
                     self.add_multi_arg_def(dollar_span, g.span(), out);
                     self.args.push(TT::Group(g));
@@ -443,7 +454,12 @@ impl Expander {
                 && p.as_char() == ESCAPE_CHAR
                 && let Some(arm) = self.arm.as_mut()
             {
-                arm.add_arg(p.span(), mem::replace(&mut input.tt, tt), &mut input.iter, &mut self.expn)?;
+                arm.add_arg(
+                    p.span(),
+                    mem::replace(&mut input.tt, tt),
+                    &mut input.iter,
+                    &mut self.expn,
+                )?;
                 if input.next().is_none() {
                     return Ok(());
                 }

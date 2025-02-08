@@ -1,10 +1,5 @@
-// check-pass
-// edition:2021
-// [next] compile-flags: -Zlower-impl-trait-in-trait-to-assoc-ty
-// revisions: current next
-
-#![feature(async_fn_in_trait)]
-#![allow(incomplete_features)]
+//@ check-pass
+//@ edition:2021
 
 use std::future::Future;
 
@@ -12,6 +7,8 @@ async fn yield_now() {}
 
 trait AsyncIterator {
     type Item;
+
+    #[allow(async_fn_in_trait)]
     async fn next(&mut self) -> Option<Self::Item>;
 }
 

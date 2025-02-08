@@ -1,6 +1,7 @@
 #![deny(unreachable_patterns)]
 
 // We wrap patterns in a tuple because top-level or-patterns were special-cased.
+#[rustfmt::skip]
 fn main() {
     match (0u8,) {
         (1 | 2,) => {}
@@ -26,6 +27,11 @@ fn main() {
         (2 | 1, 4) => {} //~ ERROR unreachable pattern
         (1, 5 | 6) => {}
         (1, 4 | 5) => {} //~ ERROR unreachable pattern
+        _ => {}
+    }
+    match (0u8, 0u8, 0u8) {
+        (0, 0, 0) => {}
+        (0, 0 | 1, 0) => {} //~ ERROR unreachable pattern
         _ => {}
     }
     match (true, true) {
@@ -71,6 +77,11 @@ fn main() {
             | 0 //~ ERROR unreachable
         , 0
             | 0] => {} //~ ERROR unreachable
+        _ => {}
+    }
+    match (true, 0) {
+        (true, 0 | 0) => {} //~ ERROR unreachable
+        (_, 0 | 0) => {} //~ ERROR unreachable
         _ => {}
     }
     match &[][..] {
@@ -149,4 +160,28 @@ fn main() {
             | true, //~ ERROR unreachable
             false | true) => {}
     }
+    match (true, true) {
+        (x, y)
+            | (y, x) => {} //~ ERROR unreachable
+    }
+}
+
+fn unreachable_in_param((_ | (_, _)): (bool, bool)) {}
+//~^ ERROR unreachable
+
+fn unreachable_in_binding() {
+    let bool_pair = (true, true);
+    let bool_option = Some(true);
+
+    let (_ | (_, _)) = bool_pair;
+    //~^ ERROR unreachable
+    for (_ | (_, _)) in [bool_pair] {}
+    //~^ ERROR unreachable
+
+    let (Some(_) | Some(true)) = bool_option else { return };
+    //~^ ERROR unreachable
+    if let Some(_) | Some(true) = bool_option {}
+    //~^ ERROR unreachable
+    while let Some(_) | Some(true) = bool_option {}
+    //~^ ERROR unreachable
 }

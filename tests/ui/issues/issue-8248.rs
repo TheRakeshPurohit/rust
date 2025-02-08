@@ -1,8 +1,7 @@
-// run-pass
-// pretty-expanded FIXME #23616
+//@ run-pass
 
 trait A {
-    fn dummy(&self) { }
+    fn dummy(&self) { } //~ WARN method `dummy` is never used
 }
 struct B;
 impl A for B {}

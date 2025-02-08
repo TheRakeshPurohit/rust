@@ -1,5 +1,4 @@
-// run-pass
-// pretty-expanded FIXME #23616
+//@ check-pass
 
 trait I { fn i(&self) -> Self; }
 

@@ -1,4 +1,4 @@
-FROM ubuntu:20.04
+FROM ubuntu:22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -44,6 +44,12 @@ ENV RUST_CONFIGURE_ARGS \
       --set target.x86_64-unknown-linux-gnu.cc=clang \
       --set target.x86_64-unknown-linux-gnu.cxx=clang++
 
+# This job appears to be checking two separate things:
+# - That we can build the compiler with `--enable-debug`
+#   (without necessarily testing the result).
+# - That the tests with `//@ needs-force-clang-based-tests` pass, since they
+#   don't run by default unless RUSTBUILD_FORCE_CLANG_BASED_TESTS is set.
+
 ENV SCRIPT \
   python3 ../x.py --stage 2 build && \
-  python3 ../x.py --stage 2 test tests/run-make-fulldeps --test-args clang
+  python3 ../x.py --stage 2 test tests/run-make

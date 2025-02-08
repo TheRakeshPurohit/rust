@@ -1,4 +1,4 @@
-// run-rustfix
+//@ run-rustfix
 
 #![deny(unused_parens)]
 #![allow(while_true)] // for rustfix
@@ -46,6 +46,28 @@ pub fn parens_with_keyword(e: &[()]) -> i32 {
 macro_rules! baz {
     ($($foo:expr),+) => {
         ($($foo),*)
+    };
+}
+
+macro_rules! unit {
+    () => {
+        ()
+    };
+}
+
+struct One;
+
+impl std::ops::Sub<One> for () {
+    type Output = i32;
+    fn sub(self, _: One) -> Self::Output {
+        -1
+    }
+}
+
+impl std::ops::Neg for One {
+    type Output = i32;
+    fn neg(self) -> Self::Output {
+        -1
     }
 }
 
@@ -84,6 +106,30 @@ fn main() {
     _a = 0; //~ ERROR unnecessary parentheses around assigned value
     _a += 1; //~ ERROR unnecessary parentheses around assigned value
 
+    let mut _a = 3; //~ ERROR unnecessary parentheses around pattern
+    let mut _a = 3; //~ ERROR unnecessary parentheses around pattern
+    let mut _a = 3; //~ ERROR unnecessary parentheses around pattern
+
+    let _a = 3; //~ ERROR unnecessary parentheses around pattern
+    let _a = 3; //~ ERROR unnecessary parentheses around pattern
+    let _a = 3; //~ ERROR unnecessary parentheses around pattern
+
     let _a = baz!(3, 4);
     let _b = baz!(3);
+
+    let _ = {
+        unit!() - One //~ ERROR unnecessary parentheses around block return value
+    } + {
+        unit![] - One //~ ERROR unnecessary parentheses around block return value
+    } + {
+        // FIXME: false positive. This parenthesis is required.
+        unit! {} - One //~ ERROR unnecessary parentheses around block return value
+    };
+
+    // Do *not* lint around `&raw` (but do lint when `&` creates a reference).
+    let mut x = 0;
+    let _r = &x; //~ ERROR unnecessary parentheses
+    let _r = &mut x; //~ ERROR unnecessary parentheses
+    let _r = (&raw const x);
+    let _r = (&raw mut x);
 }

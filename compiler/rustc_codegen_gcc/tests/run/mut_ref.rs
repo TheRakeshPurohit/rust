@@ -7,11 +7,12 @@
 //     6
 //     11
 
-#![allow(unused_attributes)]
-#![feature(auto_traits, lang_items, no_core, start, intrinsics, track_caller)]
+#![allow(internal_features, unused_attributes)]
+#![feature(auto_traits, lang_items, no_core, intrinsics, rustc_attrs, track_caller)]
 
 #![no_std]
 #![no_core]
+#![no_main]
 
 /*
  * Core
@@ -58,9 +59,11 @@ mod libc {
 }
 
 mod intrinsics {
-    extern "rust-intrinsic" {
-        #[rustc_safe_intrinsic]
-        pub fn abort() -> !;
+    #[rustc_nounwind]
+    #[rustc_intrinsic]
+    #[rustc_intrinsic_must_be_overridden]
+    pub fn abort() -> ! {
+        loop {}
     }
 }
 
@@ -122,6 +125,12 @@ impl Add for isize {
     }
 }
 
+#[track_caller]
+#[lang = "panic_const_add_overflow"]
+pub fn panic_const_add_overflow() -> ! {
+    panic("attempt to add with overflow");
+}
+
 /*
  * Code
  */
@@ -140,8 +149,8 @@ fn update_num(num: &mut isize) {
     *num = *num + 5;
 }
 
-#[start]
-fn main(mut argc: isize, _argv: *const *const u8) -> isize {
+#[no_mangle]
+extern "C" fn main(argc: i32, _argv: *const *const u8) -> i32 {
     let mut test = test(argc);
     unsafe {
         libc::printf(b"%ld\n\0" as *const u8 as *const i8, test.field);

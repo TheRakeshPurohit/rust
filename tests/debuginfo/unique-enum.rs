@@ -1,35 +1,33 @@
-// Require a gdb or lldb that can read DW_TAG_variant_part.
-// min-gdb-version: 8.2
-// needs-rust-lldb
+//@ min-lldb-version: 1800
 
-// compile-flags:-g
+//@ compile-flags:-g
 
 // === GDB TESTS ===================================================================================
 
 // gdb-command:run
 
 // gdb-command:print *the_a
-// gdbr-check:$1 = unique_enum::ABC::TheA{x: 0, y: 8970181431921507452}
+// gdb-check:$1 = unique_enum::ABC::TheA{x: 0, y: 8970181431921507452}
 
 // gdb-command:print *the_b
-// gdbr-check:$2 = unique_enum::ABC::TheB(0, 286331153, 286331153)
+// gdb-check:$2 = unique_enum::ABC::TheB(0, 286331153, 286331153)
 
 // gdb-command:print *univariant
-// gdbr-check:$3 = unique_enum::Univariant::TheOnlyCase(123234)
+// gdb-check:$3 = unique_enum::Univariant::TheOnlyCase(123234)
 
 
 // === LLDB TESTS ==================================================================================
 
 // lldb-command:run
 
-// lldb-command:print *the_a
-// lldbr-check:(unique_enum::ABC::TheA) *the_a = TheA { TheA: 0, TheB: 8970181431921507452 }
+// lldb-command:v *the_a
+// lldb-check:(unique_enum::ABC) *the_a = { value = { x = 0 y = 8970181431921507452 } $discr$ = 0 }
 
-// lldb-command:print *the_b
-// lldbr-check:(unique_enum::ABC::TheB) *the_b = { = 0 = 286331153 = 286331153 }
+// lldb-command:v *the_b
+// lldb-check:(unique_enum::ABC) *the_b = { value = { 0 = 0 1 = 286331153 2 = 286331153 } $discr$ = 1 }
 
-// lldb-command:print *univariant
-// lldbr-check:(unique_enum::Univariant) *univariant = { TheOnlyCase = { = 123234 } }
+// lldb-command:v *univariant
+// lldb-check:(unique_enum::Univariant) *univariant = { value = { 0 = 123234 } }
 
 #![allow(unused_variables)]
 #![feature(omit_gdb_pretty_printer_section)]

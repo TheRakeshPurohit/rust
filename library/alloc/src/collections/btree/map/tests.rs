@@ -1,4 +1,10 @@
-use super::Entry::{Occupied, Vacant};
+use core::assert_matches::assert_matches;
+use std::iter;
+use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering::SeqCst;
+
 use super::*;
 use crate::boxed::Box;
 use crate::fmt::Debug;
@@ -7,15 +13,6 @@ use crate::string::{String, ToString};
 use crate::testing::crash_test::{CrashTestDummy, Panic};
 use crate::testing::ord_chaos::{Cyclic3, Governed, Governor};
 use crate::testing::rng::DeterministicRng;
-use crate::vec::Vec;
-use core::assert_matches::assert_matches;
-use std::cmp::Ordering;
-use std::iter;
-use std::mem;
-use std::ops::Bound::{self, Excluded, Included, Unbounded};
-use std::ops::RangeBounds;
-use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
 // Minimum number of elements to insert, to guarantee a tree with 2 levels,
 // i.e., a tree who's root is an internal node at height 1, with edges to leaf nodes.
@@ -1219,7 +1216,7 @@ mod test_extract_if {
         {
             let mut it = map.extract_if(|dummy, _| dummy.query(true));
             catch_unwind(AssertUnwindSafe(|| while it.next().is_some() {})).unwrap_err();
-            // Iterator behaviour after a panic is explicitly unspecified,
+            // Iterator behavior after a panic is explicitly unspecified,
             // so this is just the current implementation:
             let result = catch_unwind(AssertUnwindSafe(|| it.next()));
             assert!(matches!(result, Ok(None)));
@@ -1801,18 +1798,18 @@ fn test_ord_absence() {
     }
 
     fn map_debug<K: Debug>(mut map: BTreeMap<K, ()>) {
-        format!("{map:?}");
-        format!("{:?}", map.iter());
-        format!("{:?}", map.iter_mut());
-        format!("{:?}", map.keys());
-        format!("{:?}", map.values());
-        format!("{:?}", map.values_mut());
+        let _ = format!("{map:?}");
+        let _ = format!("{:?}", map.iter());
+        let _ = format!("{:?}", map.iter_mut());
+        let _ = format!("{:?}", map.keys());
+        let _ = format!("{:?}", map.values());
+        let _ = format!("{:?}", map.values_mut());
         if true {
-            format!("{:?}", map.into_iter());
+            let _ = format!("{:?}", map.into_iter());
         } else if true {
-            format!("{:?}", map.into_keys());
+            let _ = format!("{:?}", map.into_keys());
         } else {
-            format!("{:?}", map.into_values());
+            let _ = format!("{:?}", map.into_values());
         }
     }
 
@@ -2275,6 +2272,54 @@ fn test_into_iter_drop_leak_height_0() {
 
 #[test]
 #[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
+fn test_into_iter_drop_leak_kv_panic_in_key() {
+    let a_k = CrashTestDummy::new(0);
+    let a_v = CrashTestDummy::new(1);
+    let b_k = CrashTestDummy::new(2);
+    let b_v = CrashTestDummy::new(3);
+    let c_k = CrashTestDummy::new(4);
+    let c_v = CrashTestDummy::new(5);
+    let mut map = BTreeMap::new();
+    map.insert(a_k.spawn(Panic::Never), a_v.spawn(Panic::Never));
+    map.insert(b_k.spawn(Panic::InDrop), b_v.spawn(Panic::Never));
+    map.insert(c_k.spawn(Panic::Never), c_v.spawn(Panic::Never));
+
+    catch_unwind(move || drop(map.into_iter())).unwrap_err();
+
+    assert_eq!(a_k.dropped(), 1);
+    assert_eq!(a_v.dropped(), 1);
+    assert_eq!(b_k.dropped(), 1);
+    assert_eq!(b_v.dropped(), 1);
+    assert_eq!(c_k.dropped(), 1);
+    assert_eq!(c_v.dropped(), 1);
+}
+
+#[test]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
+fn test_into_iter_drop_leak_kv_panic_in_val() {
+    let a_k = CrashTestDummy::new(0);
+    let a_v = CrashTestDummy::new(1);
+    let b_k = CrashTestDummy::new(2);
+    let b_v = CrashTestDummy::new(3);
+    let c_k = CrashTestDummy::new(4);
+    let c_v = CrashTestDummy::new(5);
+    let mut map = BTreeMap::new();
+    map.insert(a_k.spawn(Panic::Never), a_v.spawn(Panic::Never));
+    map.insert(b_k.spawn(Panic::Never), b_v.spawn(Panic::InDrop));
+    map.insert(c_k.spawn(Panic::Never), c_v.spawn(Panic::Never));
+
+    catch_unwind(move || drop(map.into_iter())).unwrap_err();
+
+    assert_eq!(a_k.dropped(), 1);
+    assert_eq!(a_v.dropped(), 1);
+    assert_eq!(b_k.dropped(), 1);
+    assert_eq!(b_v.dropped(), 1);
+    assert_eq!(c_k.dropped(), 1);
+    assert_eq!(c_v.dropped(), 1);
+}
+
+#[test]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
 fn test_into_iter_drop_leak_height_1() {
     let size = MIN_INSERTS_HEIGHT_1;
     for panic_point in vec![0, 1, size - 2, size - 1] {
@@ -2354,112 +2399,151 @@ fn test_cursor() {
     let map = BTreeMap::from([(1, 'a'), (2, 'b'), (3, 'c')]);
 
     let mut cur = map.lower_bound(Bound::Unbounded);
-    assert_eq!(cur.key(), Some(&1));
-    cur.move_next();
-    assert_eq!(cur.key(), Some(&2));
-    assert_eq!(cur.peek_next(), Some((&3, &'c')));
-    cur.move_prev();
-    assert_eq!(cur.key(), Some(&1));
+    assert_eq!(cur.peek_next(), Some((&1, &'a')));
     assert_eq!(cur.peek_prev(), None);
+    assert_eq!(cur.prev(), None);
+    assert_eq!(cur.next(), Some((&1, &'a')));
+
+    assert_eq!(cur.next(), Some((&2, &'b')));
+
+    assert_eq!(cur.peek_next(), Some((&3, &'c')));
+    assert_eq!(cur.prev(), Some((&2, &'b')));
+    assert_eq!(cur.peek_prev(), Some((&1, &'a')));
 
     let mut cur = map.upper_bound(Bound::Excluded(&1));
-    assert_eq!(cur.key(), None);
-    cur.move_next();
-    assert_eq!(cur.key(), Some(&1));
-    cur.move_prev();
-    assert_eq!(cur.key(), None);
-    assert_eq!(cur.peek_prev(), Some((&3, &'c')));
+    assert_eq!(cur.peek_prev(), None);
+    assert_eq!(cur.next(), Some((&1, &'a')));
+    assert_eq!(cur.prev(), Some((&1, &'a')));
 }
 
 #[test]
 fn test_cursor_mut() {
     let mut map = BTreeMap::from([(1, 'a'), (3, 'c'), (5, 'e')]);
     let mut cur = map.lower_bound_mut(Bound::Excluded(&3));
-    assert_eq!(cur.key(), Some(&5));
-    cur.insert_before(4, 'd');
-    assert_eq!(cur.key(), Some(&5));
+    assert_eq!(cur.peek_next(), Some((&5, &mut 'e')));
+    assert_eq!(cur.peek_prev(), Some((&3, &mut 'c')));
+
+    cur.insert_before(4, 'd').unwrap();
+    assert_eq!(cur.peek_next(), Some((&5, &mut 'e')));
     assert_eq!(cur.peek_prev(), Some((&4, &mut 'd')));
-    cur.move_next();
-    assert_eq!(cur.key(), None);
-    cur.insert_before(6, 'f');
-    assert_eq!(cur.key(), None);
-    assert_eq!(cur.remove_current(), None);
-    assert_eq!(cur.key(), None);
-    cur.insert_after(0, '?');
-    assert_eq!(cur.key(), None);
-    assert_eq!(map, BTreeMap::from([(0, '?'), (1, 'a'), (3, 'c'), (4, 'd'), (5, 'e'), (6, 'f')]));
+
+    assert_eq!(cur.next(), Some((&5, &mut 'e')));
+    assert_eq!(cur.peek_next(), None);
+    assert_eq!(cur.peek_prev(), Some((&5, &mut 'e')));
+    cur.insert_before(6, 'f').unwrap();
+    assert_eq!(cur.peek_next(), None);
+    assert_eq!(cur.peek_prev(), Some((&6, &mut 'f')));
+    assert_eq!(cur.remove_prev(), Some((6, 'f')));
+    assert_eq!(cur.remove_prev(), Some((5, 'e')));
+    assert_eq!(cur.remove_next(), None);
+    assert_eq!(map, BTreeMap::from([(1, 'a'), (3, 'c'), (4, 'd')]));
 
     let mut cur = map.upper_bound_mut(Bound::Included(&5));
-    assert_eq!(cur.key(), Some(&5));
-    assert_eq!(cur.remove_current(), Some((5, 'e')));
-    assert_eq!(cur.key(), Some(&6));
-    assert_eq!(cur.remove_current_and_move_back(), Some((6, 'f')));
-    assert_eq!(cur.key(), Some(&4));
-    assert_eq!(map, BTreeMap::from([(0, '?'), (1, 'a'), (3, 'c'), (4, 'd')]));
+    assert_eq!(cur.peek_next(), None);
+    assert_eq!(cur.prev(), Some((&4, &mut 'd')));
+    assert_eq!(cur.peek_next(), Some((&4, &mut 'd')));
+    assert_eq!(cur.peek_prev(), Some((&3, &mut 'c')));
+    assert_eq!(cur.remove_next(), Some((4, 'd')));
+    assert_eq!(map, BTreeMap::from([(1, 'a'), (3, 'c')]));
 }
 
-#[should_panic(expected = "key must be ordered above the previous element")]
+#[test]
+fn test_cursor_mut_key() {
+    let mut map = BTreeMap::from([(1, 'a'), (3, 'c'), (5, 'e')]);
+    let mut cur = unsafe { map.lower_bound_mut(Bound::Excluded(&3)).with_mutable_key() };
+    assert_eq!(cur.peek_next(), Some((&mut 5, &mut 'e')));
+    assert_eq!(cur.peek_prev(), Some((&mut 3, &mut 'c')));
+
+    cur.insert_before(4, 'd').unwrap();
+    assert_eq!(cur.peek_next(), Some((&mut 5, &mut 'e')));
+    assert_eq!(cur.peek_prev(), Some((&mut 4, &mut 'd')));
+
+    assert_eq!(cur.next(), Some((&mut 5, &mut 'e')));
+    assert_eq!(cur.peek_next(), None);
+    assert_eq!(cur.peek_prev(), Some((&mut 5, &mut 'e')));
+    cur.insert_before(6, 'f').unwrap();
+    assert_eq!(cur.peek_next(), None);
+    assert_eq!(cur.peek_prev(), Some((&mut 6, &mut 'f')));
+    assert_eq!(cur.remove_prev(), Some((6, 'f')));
+    assert_eq!(cur.remove_prev(), Some((5, 'e')));
+    assert_eq!(cur.remove_next(), None);
+    assert_eq!(map, BTreeMap::from([(1, 'a'), (3, 'c'), (4, 'd')]));
+
+    let mut cur = unsafe { map.upper_bound_mut(Bound::Included(&5)).with_mutable_key() };
+    assert_eq!(cur.peek_next(), None);
+    assert_eq!(cur.prev(), Some((&mut 4, &mut 'd')));
+    assert_eq!(cur.peek_next(), Some((&mut 4, &mut 'd')));
+    assert_eq!(cur.peek_prev(), Some((&mut 3, &mut 'c')));
+    assert_eq!(cur.remove_next(), Some((4, 'd')));
+    assert_eq!(map, BTreeMap::from([(1, 'a'), (3, 'c')]));
+}
+
+#[test]
+fn test_cursor_empty() {
+    let mut map = BTreeMap::new();
+    let mut cur = map.lower_bound_mut(Bound::Excluded(&3));
+    assert_eq!(cur.peek_next(), None);
+    assert_eq!(cur.peek_prev(), None);
+    cur.insert_after(0, 0).unwrap();
+    assert_eq!(cur.peek_next(), Some((&0, &mut 0)));
+    assert_eq!(cur.peek_prev(), None);
+    assert_eq!(map, BTreeMap::from([(0, 0)]));
+}
+
 #[test]
 fn test_cursor_mut_insert_before_1() {
     let mut map = BTreeMap::from([(1, 'a'), (2, 'b'), (3, 'c')]);
     let mut cur = map.upper_bound_mut(Bound::Included(&2));
-    cur.insert_before(0, 'd');
+    cur.insert_before(0, 'd').unwrap_err();
 }
 
-#[should_panic(expected = "key must be ordered above the previous element")]
 #[test]
 fn test_cursor_mut_insert_before_2() {
     let mut map = BTreeMap::from([(1, 'a'), (2, 'b'), (3, 'c')]);
     let mut cur = map.upper_bound_mut(Bound::Included(&2));
-    cur.insert_before(1, 'd');
+    cur.insert_before(1, 'd').unwrap_err();
 }
 
-#[should_panic(expected = "key must be ordered below the current element")]
 #[test]
 fn test_cursor_mut_insert_before_3() {
     let mut map = BTreeMap::from([(1, 'a'), (2, 'b'), (3, 'c')]);
     let mut cur = map.upper_bound_mut(Bound::Included(&2));
-    cur.insert_before(2, 'd');
+    cur.insert_before(2, 'd').unwrap_err();
 }
 
-#[should_panic(expected = "key must be ordered below the current element")]
 #[test]
 fn test_cursor_mut_insert_before_4() {
     let mut map = BTreeMap::from([(1, 'a'), (2, 'b'), (3, 'c')]);
     let mut cur = map.upper_bound_mut(Bound::Included(&2));
-    cur.insert_before(3, 'd');
+    cur.insert_before(3, 'd').unwrap_err();
 }
 
-#[should_panic(expected = "key must be ordered above the current element")]
 #[test]
 fn test_cursor_mut_insert_after_1() {
     let mut map = BTreeMap::from([(1, 'a'), (2, 'b'), (3, 'c')]);
     let mut cur = map.upper_bound_mut(Bound::Included(&2));
-    cur.insert_after(1, 'd');
+    cur.insert_after(1, 'd').unwrap_err();
 }
 
-#[should_panic(expected = "key must be ordered above the current element")]
 #[test]
 fn test_cursor_mut_insert_after_2() {
     let mut map = BTreeMap::from([(1, 'a'), (2, 'b'), (3, 'c')]);
     let mut cur = map.upper_bound_mut(Bound::Included(&2));
-    cur.insert_after(2, 'd');
+    cur.insert_after(2, 'd').unwrap_err();
 }
 
-#[should_panic(expected = "key must be ordered below the next element")]
 #[test]
 fn test_cursor_mut_insert_after_3() {
     let mut map = BTreeMap::from([(1, 'a'), (2, 'b'), (3, 'c')]);
     let mut cur = map.upper_bound_mut(Bound::Included(&2));
-    cur.insert_after(3, 'd');
+    cur.insert_after(3, 'd').unwrap_err();
 }
 
-#[should_panic(expected = "key must be ordered below the next element")]
 #[test]
 fn test_cursor_mut_insert_after_4() {
     let mut map = BTreeMap::from([(1, 'a'), (2, 'b'), (3, 'c')]);
     let mut cur = map.upper_bound_mut(Bound::Included(&2));
-    cur.insert_after(4, 'd');
+    cur.insert_after(4, 'd').unwrap_err();
 }
 
 #[test]
@@ -2467,14 +2551,14 @@ fn cursor_peek_prev_agrees_with_cursor_mut() {
     let mut map = BTreeMap::from([(1, 1), (2, 2), (3, 3)]);
 
     let cursor = map.lower_bound(Bound::Excluded(&3));
-    assert!(cursor.key().is_none());
+    assert!(cursor.peek_next().is_none());
 
     let prev = cursor.peek_prev();
     assert_matches!(prev, Some((&3, _)));
 
     // Shadow names so the two parts of this test match.
     let mut cursor = map.lower_bound_mut(Bound::Excluded(&3));
-    assert!(cursor.key().is_none());
+    assert!(cursor.peek_next().is_none());
 
     let prev = cursor.peek_prev();
     assert_matches!(prev, Some((&3, _)));

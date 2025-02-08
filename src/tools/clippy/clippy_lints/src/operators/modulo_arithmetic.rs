@@ -1,8 +1,7 @@
-use clippy_utils::consts::{constant, Constant};
+use clippy_utils::consts::{ConstEvalCtxt, Constant};
 use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::sext;
-use if_chain::if_chain;
-use rustc_hir::{BinOpKind, Expr};
+use rustc_hir::{BinOpKind, Expr, ExprKind, Node};
 use rustc_lint::LateContext;
 use rustc_middle::ty::{self, Ty};
 use std::fmt::Display;
@@ -15,21 +14,39 @@ pub(super) fn check<'tcx>(
     op: BinOpKind,
     lhs: &'tcx Expr<'_>,
     rhs: &'tcx Expr<'_>,
+    allow_comparison_to_zero: bool,
 ) {
     if op == BinOpKind::Rem {
+        if allow_comparison_to_zero && used_in_comparison_with_zero(cx, e) {
+            return;
+        }
+
         let lhs_operand = analyze_operand(lhs, cx, e);
         let rhs_operand = analyze_operand(rhs, cx, e);
-        if_chain! {
-            if let Some(lhs_operand) = lhs_operand;
-            if let Some(rhs_operand) = rhs_operand;
-            then {
-                check_const_operands(cx, e, &lhs_operand, &rhs_operand);
-            }
-            else {
-                check_non_const_operands(cx, e, lhs);
-            }
+        if let Some(lhs_operand) = lhs_operand
+            && let Some(rhs_operand) = rhs_operand
+        {
+            check_const_operands(cx, e, &lhs_operand, &rhs_operand);
+        } else {
+            check_non_const_operands(cx, e, lhs);
         }
+    }
+}
+
+fn used_in_comparison_with_zero(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
+    let Node::Expr(parent_expr) = cx.tcx.parent_hir_node(expr.hir_id) else {
+        return false;
     };
+    let ExprKind::Binary(op, lhs, rhs) = parent_expr.kind else {
+        return false;
+    };
+
+    if op.node == BinOpKind::Eq || op.node == BinOpKind::Ne {
+        let ecx = ConstEvalCtxt::new(cx);
+        matches!(ecx.eval(lhs), Some(Constant::Int(0))) || matches!(ecx.eval(rhs), Some(Constant::Int(0)))
+    } else {
+        false
+    }
 }
 
 struct OperandInfo {
@@ -39,7 +56,7 @@ struct OperandInfo {
 }
 
 fn analyze_operand(operand: &Expr<'_>, cx: &LateContext<'_>, expr: &Expr<'_>) -> Option<OperandInfo> {
-    match constant(cx, cx.typeck_results(), operand) {
+    match ConstEvalCtxt::new(cx).eval(operand) {
         Some(Constant::Int(v)) => match *cx.typeck_results().expr_ty(expr).kind() {
             ty::Int(ity) => {
                 let value = sext(cx.tcx, v, ity);
@@ -58,6 +75,7 @@ fn analyze_operand(operand: &Expr<'_>, cx: &LateContext<'_>, expr: &Expr<'_>) ->
             },
             _ => {},
         },
+        // FIXME(f16_f128): add when casting is available on all platforms
         Some(Constant::F32(f)) => {
             return Some(floating_point_operand_info(&f));
         },
@@ -92,7 +110,7 @@ fn check_const_operands<'tcx>(
             cx,
             MODULO_ARITHMETIC,
             expr.span,
-            &format!(
+            format!(
                 "you are using modulo operator on constants with different signs: `{} % {}`",
                 lhs_operand.string_representation.as_ref().unwrap(),
                 rhs_operand.string_representation.as_ref().unwrap()

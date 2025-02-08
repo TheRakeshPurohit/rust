@@ -1,4 +1,3 @@
-//@run-rustfix
 #![warn(clippy::to_string_in_format_args)]
 #![allow(unused)]
 #![allow(
@@ -9,12 +8,13 @@
     clippy::uninlined_format_args
 )]
 
-use std::io::{stdout, Write};
+use std::io::{Write, stdout};
 use std::ops::Deref;
 use std::panic::Location;
 
 struct Somewhere;
 
+#[allow(clippy::to_string_trait_impl)]
 impl ToString for Somewhere {
     fn to_string(&self) -> String {
         String::from("somewhere")
@@ -104,6 +104,7 @@ fn main() {
     println!("{foo}{bar}", foo = "foo", bar = "bar".to_string());
     println!("{foo}{bar}", bar = "bar".to_string(), foo = "foo");
     println!("{foo}{bar}", bar = "bar", foo = "foo".to_string());
+    println!("{}", my_other_macro!().to_string());
 
     // negative tests
     println!("error: something failed at {}", Somewhere.to_string());

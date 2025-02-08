@@ -1,11 +1,11 @@
-//@run-rustfix
 #![warn(clippy::match_single_binding)]
 #![allow(
     unused,
     clippy::let_unit_value,
     clippy::no_effect,
     clippy::toplevel_ref_arg,
-    clippy::uninlined_format_args
+    clippy::uninlined_format_args,
+    clippy::useless_vec
 )]
 
 struct Point {

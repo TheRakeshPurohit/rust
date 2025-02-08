@@ -1,4 +1,4 @@
-// check-pass
+//@ check-pass
 
 #![warn(dropping_copy_types)]
 
@@ -75,5 +75,24 @@ fn issue9482(x: u8) {
         // Lint, not a fn/method call
         4 => drop(2),//~ WARN calls to `std::mem::drop`
         _ => (),
+    }
+}
+
+fn issue112653() {
+    fn foo() -> Result<u8, ()> {
+        println!("doing foo");
+        Ok(0) // result is not always useful, the side-effect matters
+    }
+    fn bar() {
+        println!("doing bar");
+    }
+
+    fn stuff() -> Result<(), ()> {
+        match 42 {
+            0 => drop(foo()?),  // drop is needed because we only care about side-effects
+            1 => bar(),
+            _ => (),  // doing nothing (no side-effects needed here)
+        }
+        Ok(())
     }
 }

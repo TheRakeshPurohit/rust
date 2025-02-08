@@ -1,12 +1,12 @@
 #[cfg(test)]
 mod tests;
 
-use std::hash;
-use std::iter;
 use std::ops::Range;
+use std::{hash, iter};
 
+use rustc_abi::Size;
+use rustc_macros::{HashStable, TyDecodable, TyEncodable};
 use rustc_serialize::{Decodable, Encodable};
-use rustc_target::abi::Size;
 use rustc_type_ir::{TyDecoder, TyEncoder};
 
 use super::AllocRange;
@@ -243,7 +243,7 @@ impl hash::Hash for InitMaskMaterialized {
 }
 
 impl InitMaskMaterialized {
-    pub const BLOCK_SIZE: u64 = 64;
+    const BLOCK_SIZE: u64 = 64;
 
     fn new(size: Size, state: bool) -> Self {
         let mut m = InitMaskMaterialized { blocks: vec![] };
@@ -542,11 +542,7 @@ impl InitMaskMaterialized {
         debug_assert_eq!(
             result,
             find_bit_slow(self, start, end, is_init),
-            "optimized implementation of find_bit is wrong for start={:?} end={:?} is_init={} init_mask={:#?}",
-            start,
-            end,
-            is_init,
-            self
+            "optimized implementation of find_bit is wrong for start={start:?} end={end:?} is_init={is_init} init_mask={self:#?}"
         );
 
         result

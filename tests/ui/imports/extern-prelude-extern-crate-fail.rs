@@ -1,5 +1,5 @@
-// aux-build:two_macros.rs
-// compile-flags:--extern non_existent
+//@ aux-build:two_macros.rs
+//@ compile-flags:--extern non_existent
 
 mod n {
     extern crate two_macros;
@@ -7,7 +7,7 @@ mod n {
 
 mod m {
     fn check() {
-        two_macros::m!(); //~ ERROR failed to resolve: use of undeclared crate or module `two_macros`
+        two_macros::m!(); //~ ERROR failed to resolve: use of unresolved module or unlinked crate `two_macros`
     }
 }
 

@@ -2,7 +2,7 @@ error[E0061]: this method takes 1 argument but 2 arguments were supplied
   --> $DIR/wrong_argument_ice-3.rs:9:16
    |
 LL |         groups.push(new_group, vec![process]);
-   |                ^^^^            ------------- unexpected argument of type `Vec<&Process>`
+   |                ^^^^            ------------- unexpected argument #2 of type `Vec<&Process>`
    |
 note: expected `(Vec<String>, Vec<Process>)`, found `Vec<String>`
   --> $DIR/wrong_argument_ice-3.rs:9:21
@@ -19,6 +19,6 @@ LL -         groups.push(new_group, vec![process]);
 LL +         groups.push(/* (Vec<String>, Vec<Process>) */);
    |
 
-error: aborting due to previous error
+error: aborting due to 1 previous error
 
 For more information about this error, try `rustc --explain E0061`.

@@ -1,5 +1,5 @@
-// aux-build:test-macros.rs
-// needs-unwind proc macro panics to report errors
+//@ proc-macro: test-macros.rs
+//@ needs-unwind proc macro panics to report errors
 
 #[macro_use]
 extern crate test_macros;

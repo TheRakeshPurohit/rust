@@ -8,8 +8,8 @@ const fn not_fn_items() {
     //~^ ERROR this argument must be a function item
     //~| ERROR this argument must be a function item
     const_eval_select((), 42, 0xDEADBEEF);
-    //~^ ERROR expected a `FnOnce<()>` closure
-    //~| ERROR expected a `FnOnce<()>` closure
+    //~^ ERROR expected a `FnOnce()` closure
+    //~| ERROR expected a `FnOnce()` closure
     //~| ERROR this argument must be a function item
     //~| ERROR this argument must be a function item
 }
@@ -30,7 +30,7 @@ fn baz(n: bool) -> i32 {
 
 const fn return_ty_mismatch() {
     const_eval_select((1,), foo, bar);
-    //~^ ERROR expected `bar` to be a fn item that returns `i32`, but it returns `bool`
+    //~^ ERROR expected `bar` to return `i32`, but it returns `bool`
 }
 
 const fn args_ty_mismatch() {

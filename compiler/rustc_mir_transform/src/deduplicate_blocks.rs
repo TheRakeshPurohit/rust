@@ -1,20 +1,21 @@
 //! This pass finds basic blocks that are completely equal,
 //! and replaces all uses with just one of them.
 
-use std::{collections::hash_map::Entry, hash::Hash, hash::Hasher, iter};
-
-use crate::MirPass;
+use std::collections::hash_map::Entry;
+use std::hash::{Hash, Hasher};
+use std::iter;
 
 use rustc_data_structures::fx::FxHashMap;
 use rustc_middle::mir::visit::MutVisitor;
 use rustc_middle::mir::*;
 use rustc_middle::ty::TyCtxt;
+use tracing::debug;
 
 use super::simplify::simplify_cfg;
 
-pub struct DeduplicateBlocks;
+pub(super) struct DeduplicateBlocks;
 
-impl<'tcx> MirPass<'tcx> for DeduplicateBlocks {
+impl<'tcx> crate::MirPass<'tcx> for DeduplicateBlocks {
     fn is_enabled(&self, sess: &rustc_session::Session) -> bool {
         sess.mir_opt_level() >= 4
     }
@@ -27,8 +28,12 @@ impl<'tcx> MirPass<'tcx> for DeduplicateBlocks {
         if has_opts_to_apply {
             let mut opt_applier = OptApplier { tcx, duplicates };
             opt_applier.visit_body(body);
-            simplify_cfg(tcx, body);
+            simplify_cfg(body);
         }
+    }
+
+    fn is_required(&self) -> bool {
+        false
     }
 }
 
@@ -68,8 +73,8 @@ fn find_duplicates(body: &Body<'_>) -> FxHashMap<BasicBlock, BasicBlock> {
     // For example, if bb1, bb2 and bb3 are duplicates, we will first insert bb3 in same_hashes.
     // Then we will see that bb2 is a duplicate of bb3,
     // and insert bb2 with the replacement bb3 in the duplicates list.
-    // When we see bb1, we see that it is a duplicate of bb3, and therefore insert it in the duplicates list
-    // with replacement bb3.
+    // When we see bb1, we see that it is a duplicate of bb3, and therefore insert it in the
+    // duplicates list with replacement bb3.
     // When the duplicates are removed, we will end up with only bb3.
     for (bb, bbd) in body.basic_blocks.iter_enumerated().rev().filter(|(_, bbd)| !bbd.is_cleanup) {
         // Basic blocks can get really big, so to avoid checking for duplicates in basic blocks
@@ -97,14 +102,15 @@ fn find_duplicates(body: &Body<'_>) -> FxHashMap<BasicBlock, BasicBlock> {
     duplicates
 }
 
-struct BasicBlockHashable<'tcx, 'a> {
+struct BasicBlockHashable<'a, 'tcx> {
     basic_block_data: &'a BasicBlockData<'tcx>,
 }
 
 impl Hash for BasicBlockHashable<'_, '_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         hash_statements(state, self.basic_block_data.statements.iter());
-        // Note that since we only hash the kind, we lose span information if we deduplicate the blocks
+        // Note that since we only hash the kind, we lose span information if we deduplicate the
+        // blocks.
         self.basic_block_data.terminator().kind.hash(state);
     }
 }
@@ -150,7 +156,7 @@ fn rvalue_hash<H: Hasher>(hasher: &mut H, rvalue: &Rvalue<'_>) {
 
 fn operand_hash<H: Hasher>(hasher: &mut H, operand: &Operand<'_>) {
     match operand {
-        Operand::Constant(box Constant { user_ty: _, literal, span: _ }) => literal.hash(hasher),
+        Operand::Constant(box ConstOperand { user_ty: _, const_, span: _ }) => const_.hash(hasher),
         x => x.hash(hasher),
     };
 }
@@ -179,9 +185,9 @@ fn rvalue_eq<'tcx>(lhs: &Rvalue<'tcx>, rhs: &Rvalue<'tcx>) -> bool {
 fn operand_eq<'tcx>(lhs: &Operand<'tcx>, rhs: &Operand<'tcx>) -> bool {
     let res = match (lhs, rhs) {
         (
-            Operand::Constant(box Constant { user_ty: _, literal, span: _ }),
-            Operand::Constant(box Constant { user_ty: _, literal: literal2, span: _ }),
-        ) => literal == literal2,
+            Operand::Constant(box ConstOperand { user_ty: _, const_, span: _ }),
+            Operand::Constant(box ConstOperand { user_ty: _, const_: const2, span: _ }),
+        ) => const_ == const2,
         (x, y) => x == y,
     };
     debug!("operand_eq lhs: `{:?}` rhs: `{:?}` result: {:?}", lhs, rhs, res);

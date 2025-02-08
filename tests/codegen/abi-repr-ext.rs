@@ -1,21 +1,21 @@
-// compile-flags: -O
+//@ compile-flags: -O
 
-// revisions:x86_64 i686 aarch64-apple aarch64-windows aarch64-linux arm riscv
+//@ revisions:x86_64 i686 aarch64-apple aarch64-windows aarch64-linux arm riscv
 
-//[x86_64] compile-flags: --target x86_64-unknown-uefi
-//[x86_64] needs-llvm-components: x86
-//[i686] compile-flags: --target i686-unknown-linux-musl
-//[i686] needs-llvm-components: x86
-//[aarch64-windows] compile-flags: --target aarch64-pc-windows-msvc
-//[aarch64-windows] needs-llvm-components: aarch64
-//[aarch64-linux] compile-flags: --target aarch64-unknown-linux-gnu
-//[aarch64-linux] needs-llvm-components: aarch64
-//[aarch64-apple] compile-flags: --target aarch64-apple-darwin
-//[aarch64-apple] needs-llvm-components: aarch64
-//[arm] compile-flags: --target armv7r-none-eabi
-//[arm] needs-llvm-components: arm
-//[riscv] compile-flags: --target riscv64gc-unknown-none-elf
-//[riscv] needs-llvm-components: riscv
+//@[x86_64] compile-flags: --target x86_64-unknown-uefi
+//@[x86_64] needs-llvm-components: x86
+//@[i686] compile-flags: --target i686-unknown-linux-musl
+//@[i686] needs-llvm-components: x86
+//@[aarch64-windows] compile-flags: --target aarch64-pc-windows-msvc
+//@[aarch64-windows] needs-llvm-components: aarch64
+//@[aarch64-linux] compile-flags: --target aarch64-unknown-linux-gnu
+//@[aarch64-linux] needs-llvm-components: aarch64
+//@[aarch64-apple] compile-flags: --target aarch64-apple-darwin
+//@[aarch64-apple] needs-llvm-components: aarch64
+//@[arm] compile-flags: --target armv7r-none-eabi
+//@[arm] needs-llvm-components: arm
+//@[riscv] compile-flags: --target riscv64gc-unknown-none-elf
+//@[riscv] needs-llvm-components: riscv
 
 // See bottom of file for a corresponding C source file that is meant to yield
 // equivalent declarations.
@@ -24,14 +24,17 @@
 #![no_std]
 #![no_core]
 
-#[lang="sized"] trait Sized { }
-#[lang="freeze"] trait Freeze { }
-#[lang="copy"] trait Copy { }
+#[lang = "sized"]
+trait Sized {}
+#[lang = "freeze"]
+trait Freeze {}
+#[lang = "copy"]
+trait Copy {}
 
 #[repr(i8)]
 pub enum Type {
     Type1 = 0,
-    Type2 = 1
+    Type2 = 1,
 }
 
 // To accommodate rust#97800, one might consider writing the below as:
@@ -49,7 +52,6 @@ pub enum Type {
 // arm-SAME:                    signext
 // riscv-SAME:                  signext
 // CHECK-SAME: i8 @test()
-
 
 #[no_mangle]
 pub extern "C" fn test() -> Type {

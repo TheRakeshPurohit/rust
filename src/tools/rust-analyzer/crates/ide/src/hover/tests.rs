@@ -1,5 +1,5 @@
 use expect_test::{expect, Expect};
-use ide_db::base_db::{FileLoader, FileRange};
+use ide_db::{base_db::SourceDatabase, FileRange};
 use syntax::TextRange;
 
 use crate::{
@@ -17,9 +17,13 @@ const HOVER_BASE_CONFIG: HoverConfig = HoverConfig {
     documentation: true,
     format: HoverDocFormat::Markdown,
     keywords: true,
+    max_trait_assoc_items_count: None,
+    max_fields_count: Some(5),
+    max_enum_variants_count: Some(5),
+    max_subst_ty_len: super::SubstTyLen::Unlimited,
 };
 
-fn check_hover_no_result(ra_fixture: &str) {
+fn check_hover_no_result(#[rust_analyzer::rust_fixture] ra_fixture: &str) {
     let (analysis, position) = fixture::position(ra_fixture);
     let hover = analysis
         .hover(
@@ -31,7 +35,7 @@ fn check_hover_no_result(ra_fixture: &str) {
 }
 
 #[track_caller]
-fn check(ra_fixture: &str, expect: Expect) {
+fn check(#[rust_analyzer::rust_fixture] ra_fixture: &str, expect: Expect) {
     let (analysis, position) = fixture::position(ra_fixture);
     let hover = analysis
         .hover(
@@ -48,7 +52,85 @@ fn check(ra_fixture: &str, expect: Expect) {
     expect.assert_eq(&actual)
 }
 
-fn check_hover_no_links(ra_fixture: &str, expect: Expect) {
+#[track_caller]
+fn check_hover_fields_limit(
+    fields_count: impl Into<Option<usize>>,
+    #[rust_analyzer::rust_fixture] ra_fixture: &str,
+    expect: Expect,
+) {
+    let (analysis, position) = fixture::position(ra_fixture);
+    let hover = analysis
+        .hover(
+            &HoverConfig {
+                links_in_hover: true,
+                max_fields_count: fields_count.into(),
+                ..HOVER_BASE_CONFIG
+            },
+            FileRange { file_id: position.file_id, range: TextRange::empty(position.offset) },
+        )
+        .unwrap()
+        .unwrap();
+
+    let content = analysis.db.file_text(position.file_id);
+    let hovered_element = &content[hover.range];
+
+    let actual = format!("*{hovered_element}*\n{}\n", hover.info.markup);
+    expect.assert_eq(&actual)
+}
+
+#[track_caller]
+fn check_hover_enum_variants_limit(
+    variants_count: impl Into<Option<usize>>,
+    #[rust_analyzer::rust_fixture] ra_fixture: &str,
+    expect: Expect,
+) {
+    let (analysis, position) = fixture::position(ra_fixture);
+    let hover = analysis
+        .hover(
+            &HoverConfig {
+                links_in_hover: true,
+                max_enum_variants_count: variants_count.into(),
+                ..HOVER_BASE_CONFIG
+            },
+            FileRange { file_id: position.file_id, range: TextRange::empty(position.offset) },
+        )
+        .unwrap()
+        .unwrap();
+
+    let content = analysis.db.file_text(position.file_id);
+    let hovered_element = &content[hover.range];
+
+    let actual = format!("*{hovered_element}*\n{}\n", hover.info.markup);
+    expect.assert_eq(&actual)
+}
+
+#[track_caller]
+fn check_assoc_count(
+    count: usize,
+    #[rust_analyzer::rust_fixture] ra_fixture: &str,
+    expect: Expect,
+) {
+    let (analysis, position) = fixture::position(ra_fixture);
+    let hover = analysis
+        .hover(
+            &HoverConfig {
+                links_in_hover: true,
+                max_trait_assoc_items_count: Some(count),
+                ..HOVER_BASE_CONFIG
+            },
+            FileRange { file_id: position.file_id, range: TextRange::empty(position.offset) },
+        )
+        .unwrap()
+        .unwrap();
+
+    let content = analysis.db.file_text(position.file_id);
+    let hovered_element = &content[hover.range];
+
+    let actual = format!("*{hovered_element}*\n{}\n", hover.info.markup);
+    expect.assert_eq(&actual)
+}
+
+fn check_hover_no_links(#[rust_analyzer::rust_fixture] ra_fixture: &str, expect: Expect) {
     let (analysis, position) = fixture::position(ra_fixture);
     let hover = analysis
         .hover(
@@ -65,7 +147,7 @@ fn check_hover_no_links(ra_fixture: &str, expect: Expect) {
     expect.assert_eq(&actual)
 }
 
-fn check_hover_no_memory_layout(ra_fixture: &str, expect: Expect) {
+fn check_hover_no_memory_layout(#[rust_analyzer::rust_fixture] ra_fixture: &str, expect: Expect) {
     let (analysis, position) = fixture::position(ra_fixture);
     let hover = analysis
         .hover(
@@ -82,7 +164,7 @@ fn check_hover_no_memory_layout(ra_fixture: &str, expect: Expect) {
     expect.assert_eq(&actual)
 }
 
-fn check_hover_no_markdown(ra_fixture: &str, expect: Expect) {
+fn check_hover_no_markdown(#[rust_analyzer::rust_fixture] ra_fixture: &str, expect: Expect) {
     let (analysis, position) = fixture::position(ra_fixture);
     let hover = analysis
         .hover(
@@ -103,34 +185,60 @@ fn check_hover_no_markdown(ra_fixture: &str, expect: Expect) {
     expect.assert_eq(&actual)
 }
 
-fn check_actions(ra_fixture: &str, expect: Expect) {
+fn check_actions(#[rust_analyzer::rust_fixture] ra_fixture: &str, expect: Expect) {
     let (analysis, file_id, position) = fixture::range_or_position(ra_fixture);
-    let hover = analysis
+    let mut hover = analysis
         .hover(
             &HoverConfig { links_in_hover: true, ..HOVER_BASE_CONFIG },
             FileRange { file_id, range: position.range_or_empty() },
         )
         .unwrap()
         .unwrap();
+    // stub out ranges into minicore as they can change every now and then
+    hover.info.actions.iter_mut().for_each(|action| match action {
+        super::HoverAction::GoToType(act) => act.iter_mut().for_each(|data| {
+            if data.nav.file_id == file_id {
+                return;
+            }
+            data.nav.full_range = TextRange::empty(span::TextSize::new(!0));
+            if let Some(range) = &mut data.nav.focus_range {
+                *range = TextRange::empty(span::TextSize::new(!0));
+            }
+        }),
+        _ => (),
+    });
     expect.assert_debug_eq(&hover.info.actions)
 }
 
-fn check_hover_range(ra_fixture: &str, expect: Expect) {
+fn check_hover_range(#[rust_analyzer::rust_fixture] ra_fixture: &str, expect: Expect) {
     let (analysis, range) = fixture::range(ra_fixture);
     let hover = analysis.hover(&HOVER_BASE_CONFIG, range).unwrap().unwrap();
     expect.assert_eq(hover.info.markup.as_str())
 }
 
-fn check_hover_range_actions(ra_fixture: &str, expect: Expect) {
+fn check_hover_range_actions(#[rust_analyzer::rust_fixture] ra_fixture: &str, expect: Expect) {
     let (analysis, range) = fixture::range(ra_fixture);
-    let hover = analysis
+    let mut hover = analysis
         .hover(&HoverConfig { links_in_hover: true, ..HOVER_BASE_CONFIG }, range)
         .unwrap()
         .unwrap();
+    // stub out ranges into minicore as they can change every now and then
+    hover.info.actions.iter_mut().for_each(|action| match action {
+        super::HoverAction::GoToType(act) => act.iter_mut().for_each(|data| {
+            if data.nav.file_id == range.file_id {
+                return;
+            }
+            data.nav.full_range = TextRange::empty(span::TextSize::new(!0));
+            if let Some(range) = &mut data.nav.focus_range {
+                *range = TextRange::empty(span::TextSize::new(!0));
+            }
+        }),
+        _ => (),
+    });
     expect.assert_debug_eq(&hover.info.actions);
 }
 
-fn check_hover_range_no_results(ra_fixture: &str) {
+fn check_hover_range_no_results(#[rust_analyzer::rust_fixture] ra_fixture: &str) {
     let (analysis, range) = fixture::range(ra_fixture);
     let hover = analysis.hover(&HOVER_BASE_CONFIG, range).unwrap();
     assert!(hover.is_none());
@@ -157,7 +265,7 @@ fn foo() {
             *local*
 
             ```rust
-            let local: i32 // size = 4, align = 4
+            let local: i32
             ```
         "#]],
     );
@@ -185,20 +293,7 @@ m!(ab$0c);
             *abc*
 
             ```rust
-            test::module
-            ```
-
-            ```rust
-            fn abc()
-            ```
-
-            ---
-
-            Inner
-            ---
-
-            ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -208,6 +303,20 @@ m!(ab$0c);
             ---
 
             Outer
+
+            ---
+
+            ```rust
+            ra_test_fixture::module
+            ```
+
+            ```rust
+            fn abc()
+            ```
+
+            ---
+
+            Inner
         "#]],
     );
 }
@@ -224,7 +333,7 @@ fn main() {
 "#,
         expect![[r#"
             *foo*
-            test
+            ra_test_fixture
 
             pub fn foo() -> u32
         "#]],
@@ -244,9 +353,10 @@ fn main() {
         expect![[r#"
             *|*
             ```rust
-            {closure#0} // size = 8, align = 8, niches = 1
             impl Fn(i32) -> i32
             ```
+            ___
+            size = 8, align = 8, niches = 1
 
             ## Captures
             * `x` by immutable borrow
@@ -266,9 +376,10 @@ fn main() {
         expect![[r#"
             *|*
             ```rust
-            {closure#0} // size = 0, align = 1
             impl Fn(i32) -> i32
             ```
+            ___
+            size = 0, align = 1
 
             ## Captures
             This closure captures nothing
@@ -299,9 +410,10 @@ fn main() {
         expect![[r#"
             *|*
             ```rust
-            {closure#0} // size = 16 (0x10), align = 8, niches = 1
             impl FnOnce()
             ```
+            ___
+            size = 16 (0x10), align = 8, niches = 1
 
             ## Captures
             * `x.f1` by move
@@ -327,9 +439,10 @@ fn main() {
         expect![[r#"
             *|*
             ```rust
-            {closure#0} // size = 8, align = 8, niches = 1
             impl FnMut()
             ```
+            ___
+            size = 8, align = 8, niches = 1
 
             ## Captures
             * `x` by mutable borrow
@@ -351,9 +464,10 @@ fn main() {
 "#,
         expect![[r#"
             ```rust
-            {closure#0} // size = 8, align = 8, niches = 1
             impl FnOnce() -> S2
             ```
+            ___
+            size = 8, align = 8, niches = 1
             Coerced to: &impl FnOnce() -> S2
 
             ## Captures
@@ -374,7 +488,7 @@ fn main() {
                 GoToType(
                     [
                         HoverGotoTypeData {
-                            mod_path: "test::S2",
+                            mod_path: "ra_test_fixture::S2",
                             nav: NavigationTarget {
                                 file_id: FileId(
                                     0,
@@ -387,7 +501,7 @@ fn main() {
                             },
                         },
                         HoverGotoTypeData {
-                            mod_path: "test::S",
+                            mod_path: "ra_test_fixture::S",
                             nav: NavigationTarget {
                                 file_id: FileId(
                                     0,
@@ -397,6 +511,20 @@ fn main() {
                                 name: "S",
                                 kind: Struct,
                                 description: "struct S",
+                            },
+                        },
+                        HoverGotoTypeData {
+                            mod_path: "core::ops::function::FnOnce",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    1,
+                                ),
+                                full_range: 4294967295..4294967295,
+                                focus_range: 4294967295..4294967295,
+                                name: "FnOnce",
+                                kind: Trait,
+                                container_name: "function",
+                                description: "pub trait FnOnce<Args>\nwhere\n    Args: Tuple,",
                             },
                         },
                     ],
@@ -433,8 +561,12 @@ fn main() {
             *iter*
 
             ```rust
-            let mut iter: Iter<Scan<OtherStruct<OtherStruct<i32>>, impl Fn(&mut u32, &u32, &mut u32) -> Option<u32>, u32>> // size = 8, align = 4
+            let mut iter: Iter<Scan<OtherStruct<OtherStruct<i32>>, impl Fn(&mut u32, &u32, &mut u32) -> Option<u32>, u32>>
             ```
+
+            ---
+
+            size = 8, align = 4
         "#]],
     );
 }
@@ -449,16 +581,16 @@ pub fn foo() -> u32 { 1 }
 fn main() { let foo_test = fo$0o(); }
 "#,
         expect![[r#"
-                *foo*
+            *foo*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                pub fn foo() -> u32
-                ```
-            "#]],
+            ```rust
+            pub fn foo() -> u32
+            ```
+        "#]],
     );
 
     // Use literal `crate` in path
@@ -474,7 +606,7 @@ fn main() { f$0oo(); }
             *foo*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -493,16 +625,16 @@ mod m { pub fn foo() -> super::X { super::X } }
 fn main() { m::f$0oo(); }
         "#,
         expect![[r#"
-                *foo*
+            *foo*
 
-                ```rust
-                test::m
-                ```
+            ```rust
+            ra_test_fixture::m
+            ```
 
-                ```rust
-                pub fn foo() -> super::X
-                ```
-            "#]],
+            ```rust
+            pub fn foo() -> super::X
+            ```
+        "#]],
     );
 }
 
@@ -518,7 +650,7 @@ fn main() { fo$0o(); }
             *foo*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -536,7 +668,7 @@ fn main() { fo$0o(); }
             *foo*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -557,18 +689,18 @@ pub fn foo<'a, T: AsRef<str>>(b: &'a T) -> &'a str { }
 fn main() { let foo_test = fo$0o(); }
         "#,
         expect![[r#"
-                *foo*
+            *foo*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                pub fn foo<'a, T>(b: &'a T) -> &'a str
-                where
-                    T: AsRef<str>,
-                ```
-            "#]],
+            ```rust
+            pub fn foo<'a, T>(b: &'a T) -> &'a str
+            where
+                T: AsRef<str>,
+            ```
+        "#]],
     );
 }
 
@@ -581,16 +713,16 @@ pub fn foo$0(a: u32, b: u32) -> u32 {}
 fn main() { }
 "#,
         expect![[r#"
-                *foo*
+            *foo*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                pub fn foo(a: u32, b: u32) -> u32
-                ```
-            "#]],
+            ```rust
+            pub fn foo(a: u32, b: u32) -> u32
+            ```
+        "#]],
     );
 }
 
@@ -608,27 +740,27 @@ pub fn foo$0(_: &Path) {}
 
 fn main() { }
 "#,
-        expect![[r##"
-                *foo*
+        expect![[r#"
+            *foo*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                pub fn foo(_: &Path)
-                ```
+            ```rust
+            pub fn foo(_: &Path)
+            ```
 
-                ---
+            ---
 
-                # Example
+            # Example
 
-                ```
-                # use std::path::Path;
-                #
-                foo(Path::new("hello, world!"))
-                ```
-            "##]],
+            ```
+            # use std::path::Path;
+            #
+            foo(Path::new("hello, world!"))
+            ```
+        "#]],
     );
 }
 
@@ -641,21 +773,21 @@ pub fn foo$0(_: &Path) {}
 
 fn main() { }
 "##,
-        expect![[r##"
-                *foo*
+        expect![[r#"
+            *foo*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                pub fn foo(_: &Path)
-                ```
+            ```rust
+            pub fn foo(_: &Path)
+            ```
 
-                ---
+            ---
 
-                Raw string doc attr
-            "##]],
+            Raw string doc attr
+        "#]],
     );
 }
 
@@ -670,12 +802,16 @@ struct Foo { fiel$0d_a: u8, field_b: i32, field_c: i16 }
             *field_a*
 
             ```rust
-            test::Foo
+            ra_test_fixture::Foo
             ```
 
             ```rust
-            field_a: u8 // size = 1, align = 1, offset = 4
+            field_a: u8
             ```
+
+            ---
+
+            size = 1, align = 1, offset = 6
         "#]],
     );
 }
@@ -685,7 +821,7 @@ fn hover_shows_struct_field_info() {
     // Hovering over the field when instantiating
     check(
         r#"
-struct Foo { field_a: u32 }
+struct Foo { pub field_a: u32 }
 
 fn main() {
     let foo = Foo { field_a$0: 0, };
@@ -695,11 +831,11 @@ fn main() {
             *field_a*
 
             ```rust
-            test::Foo
+            ra_test_fixture::Foo
             ```
 
             ```rust
-            field_a: u32 // size = 4, align = 4, offset = 0
+            pub field_a: u32
             ```
         "#]],
     );
@@ -707,7 +843,7 @@ fn main() {
     // Hovering over the field in the definition
     check(
         r#"
-struct Foo { field_a$0: u32 }
+struct Foo { pub field_a$0: u32 }
 
 fn main() {
     let foo = Foo { field_a: 0 };
@@ -717,11 +853,645 @@ fn main() {
             *field_a*
 
             ```rust
-            test::Foo
+            ra_test_fixture::Foo
             ```
 
             ```rust
-            field_a: u32 // size = 4, align = 4, offset = 0
+            pub field_a: u32
+            ```
+
+            ---
+
+            size = 4, align = 4, offset = 0
+        "#]],
+    );
+}
+
+#[test]
+fn hover_shows_tuple_struct_field_info() {
+    check(
+        r#"
+struct Foo(pub u32)
+
+fn main() {
+    let foo = Foo { 0$0: 0, };
+}
+"#,
+        expect![[r#"
+            *0*
+
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            pub 0: u32
+            ```
+        "#]],
+    );
+    check(
+        r#"
+struct Foo(pub u32)
+
+fn foo(foo: Foo) {
+    foo.0$0;
+}
+"#,
+        expect![[r#"
+            *0*
+
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            pub 0: u32
+            ```
+        "#]],
+    );
+}
+
+#[test]
+fn hover_tuple_struct() {
+    check(
+        r#"
+struct Foo$0(pub u32) where u32: Copy;
+"#,
+        expect![[r#"
+            *Foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            struct Foo(pub u32)
+            where
+                u32: Copy,
+            ```
+
+            ---
+
+            size = 4, align = 4
+        "#]],
+    );
+}
+
+#[test]
+fn hover_record_struct() {
+    check(
+        r#"
+struct Foo$0 { field: u32 }
+"#,
+        expect![[r#"
+            *Foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            struct Foo {
+                field: u32,
+            }
+            ```
+
+            ---
+
+            size = 4, align = 4
+        "#]],
+    );
+    check(
+        r#"
+struct Foo$0 where u32: Copy { field: u32 }
+"#,
+        expect![[r#"
+            *Foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            struct Foo
+            where
+                u32: Copy,
+            {
+                field: u32,
+            }
+            ```
+
+            ---
+
+            size = 4, align = 4
+        "#]],
+    );
+}
+
+#[test]
+fn hover_record_struct_limit() {
+    check_hover_fields_limit(
+        3,
+        r#"
+    struct Foo$0 { a: u32, b: i32, c: i32 }
+    "#,
+        expect![[r#"
+            *Foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            struct Foo {
+                a: u32,
+                b: i32,
+                c: i32,
+            }
+            ```
+
+            ---
+
+            size = 12 (0xC), align = 4
+        "#]],
+    );
+    check_hover_fields_limit(
+        3,
+        r#"
+    struct Foo$0 { a: u32 }
+    "#,
+        expect![[r#"
+            *Foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            struct Foo {
+                a: u32,
+            }
+            ```
+
+            ---
+
+            size = 4, align = 4
+        "#]],
+    );
+    check_hover_fields_limit(
+        3,
+        r#"
+    struct Foo$0 { a: u32, b: i32, c: i32, d: u32 }
+    "#,
+        expect![[r#"
+            *Foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            struct Foo {
+                a: u32,
+                b: i32,
+                c: i32,
+                /* … */
+            }
+            ```
+
+            ---
+
+            size = 16 (0x10), align = 4
+        "#]],
+    );
+    check_hover_fields_limit(
+        None,
+        r#"
+    struct Foo$0 { a: u32, b: i32, c: i32 }
+    "#,
+        expect![[r#"
+            *Foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            struct Foo
+            ```
+
+            ---
+
+            size = 12 (0xC), align = 4
+        "#]],
+    );
+    check_hover_fields_limit(
+        0,
+        r#"
+    struct Foo$0 { a: u32, b: i32, c: i32 }
+    "#,
+        expect![[r#"
+            *Foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            struct Foo { /* … */ }
+            ```
+
+            ---
+
+            size = 12 (0xC), align = 4
+        "#]],
+    );
+
+    // No extra spaces within `{}` when there are no fields
+    check_hover_fields_limit(
+        5,
+        r#"
+    struct Foo$0 {}
+    "#,
+        expect![[r#"
+            *Foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            struct Foo {}
+            ```
+
+            ---
+
+            size = 0, align = 1
+        "#]],
+    );
+}
+
+#[test]
+fn hover_record_variant_limit() {
+    check_hover_fields_limit(
+        3,
+        r#"
+    enum Foo { A$0 { a: u32, b: i32, c: i32 } }
+    "#,
+        expect![[r#"
+            *A*
+
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            A { a: u32, b: i32, c: i32, }
+            ```
+
+            ---
+
+            size = 12 (0xC), align = 4
+        "#]],
+    );
+    check_hover_fields_limit(
+        3,
+        r#"
+    enum Foo { A$0 { a: u32 } }
+    "#,
+        expect![[r#"
+            *A*
+
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            A { a: u32, }
+            ```
+
+            ---
+
+            size = 4, align = 4
+        "#]],
+    );
+    check_hover_fields_limit(
+        3,
+        r#"
+    enum Foo { A$0 { a: u32, b: i32, c: i32, d: u32 } }
+    "#,
+        expect![[r#"
+            *A*
+
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            A { a: u32, b: i32, c: i32, /* … */ }
+            ```
+
+            ---
+
+            size = 16 (0x10), align = 4
+        "#]],
+    );
+    check_hover_fields_limit(
+        None,
+        r#"
+    enum Foo { A$0 { a: u32, b: i32, c: i32 } }
+    "#,
+        expect![[r#"
+            *A*
+
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            A
+            ```
+
+            ---
+
+            size = 12 (0xC), align = 4
+        "#]],
+    );
+    check_hover_fields_limit(
+        0,
+        r#"
+    enum Foo { A$0 { a: u32, b: i32, c: i32 } }
+    "#,
+        expect![[r#"
+            *A*
+
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            A { /* … */ }
+            ```
+
+            ---
+
+            size = 12 (0xC), align = 4
+        "#]],
+    );
+}
+
+#[test]
+fn hover_enum_limit() {
+    check_hover_enum_variants_limit(
+        5,
+        r#"enum Foo$0 { A, B }"#,
+        expect![[r#"
+            *Foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            enum Foo {
+                A,
+                B,
+            }
+            ```
+
+            ---
+
+            size = 1, align = 1, niches = 254
+        "#]],
+    );
+    check_hover_enum_variants_limit(
+        1,
+        r#"enum Foo$0 { A, B }"#,
+        expect![[r#"
+            *Foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            enum Foo {
+                A,
+                /* … */
+            }
+            ```
+
+            ---
+
+            size = 1, align = 1, niches = 254
+        "#]],
+    );
+    check_hover_enum_variants_limit(
+        0,
+        r#"enum Foo$0 { A, B }"#,
+        expect![[r#"
+            *Foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            enum Foo { /* … */ }
+            ```
+
+            ---
+
+            size = 1, align = 1, niches = 254
+        "#]],
+    );
+    check_hover_enum_variants_limit(
+        None,
+        r#"enum Foo$0 { A, B }"#,
+        expect![[r#"
+            *Foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            enum Foo
+            ```
+
+            ---
+
+            size = 1, align = 1, niches = 254
+        "#]],
+    );
+    check_hover_enum_variants_limit(
+        7,
+        r#"enum Enum$0 {
+               Variant {},
+               Variant2 { field: i32 },
+               Variant3 { field: i32, field2: i32 },
+               Variant4(),
+               Variant5(i32),
+               Variant6(i32, i32),
+               Variant7,
+               Variant8,
+           }"#,
+        expect![[r#"
+            *Enum*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            enum Enum {
+                Variant {},
+                Variant2 { /* … */ },
+                Variant3 { /* … */ },
+                Variant4(),
+                Variant5( /* … */ ),
+                Variant6( /* … */ ),
+                Variant7,
+                /* … */
+            }
+            ```
+
+            ---
+
+            size = 12 (0xC), align = 4, niches = a lot
+        "#]],
+    );
+}
+
+#[test]
+fn hover_union_limit() {
+    check_hover_fields_limit(
+        5,
+        r#"union Foo$0 { a: u32, b: i32 }"#,
+        expect![[r#"
+            *Foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            union Foo {
+                a: u32,
+                b: i32,
+            }
+            ```
+
+            ---
+
+            size = 4, align = 4
+        "#]],
+    );
+    check_hover_fields_limit(
+        1,
+        r#"union Foo$0 { a: u32, b: i32 }"#,
+        expect![[r#"
+            *Foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            union Foo {
+                a: u32,
+                /* … */
+            }
+            ```
+
+            ---
+
+            size = 4, align = 4
+        "#]],
+    );
+    check_hover_fields_limit(
+        0,
+        r#"union Foo$0 { a: u32, b: i32 }"#,
+        expect![[r#"
+            *Foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            union Foo { /* … */ }
+            ```
+
+            ---
+
+            size = 4, align = 4
+        "#]],
+    );
+    check_hover_fields_limit(
+        None,
+        r#"union Foo$0 { a: u32, b: i32 }"#,
+        expect![[r#"
+            *Foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            union Foo
+            ```
+
+            ---
+
+            size = 4, align = 4
+        "#]],
+    );
+}
+
+#[test]
+fn hover_unit_struct() {
+    check(
+        r#"
+struct Foo$0 where u32: Copy;
+"#,
+        expect![[r#"
+            *Foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            struct Foo
+            where
+                u32: Copy,
+            ```
+
+            ---
+
+            size = 0, align = 1
+        "#]],
+    );
+}
+
+#[test]
+fn hover_type_alias() {
+    check(
+        r#"
+type Fo$0o: Trait = S where T: Trait;
+"#,
+        expect![[r#"
+            *Foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            type Foo: Trait = S
+            where
+                T: Trait,
             ```
         "#]],
     );
@@ -735,7 +1505,7 @@ fn hover_const_static() {
             *foo*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -753,7 +1523,7 @@ const foo$0: u32 = {
             *foo*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -771,11 +1541,62 @@ const foo$0: u32 = {
             *foo*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
-            static foo: u32 = 456
+            static foo: u32 = 456 (0x1C8)
+            ```
+        "#]],
+    );
+
+    check(
+        r#"const FOO$0: i32 = -2147483648;"#,
+        expect![[r#"
+            *FOO*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            const FOO: i32 = -2147483648 (0x80000000)
+            ```
+        "#]],
+    );
+
+    check(
+        r#"
+        const FOO: i32 = -2147483648;
+        const BAR$0: bool = FOO > 0;
+        "#,
+        expect![[r#"
+            *BAR*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            const BAR: bool = false
+            ```
+        "#]],
+    );
+}
+
+#[test]
+fn hover_unsigned_max_const() {
+    check(
+        r#"const $0A: u128 = -1_i128 as u128;"#,
+        expect![[r#"
+            *A*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            const A: u128 = 340282366920938463463374607431768211455 (0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF)
             ```
         "#]],
     );
@@ -792,7 +1613,7 @@ fn hover_eval_complex_constants() {
             *foo*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -815,8 +1636,12 @@ fn main() {
             *zz*
 
             ```rust
-            let zz: Test<i32> // size = 8, align = 4
+            let zz: Test<i32>
             ```
+
+            ---
+
+            size = 8, align = 4
         "#]],
     );
     check_hover_range(
@@ -843,16 +1668,16 @@ use Option::Some;
 fn main() { So$0me(12); }
 "#,
         expect![[r#"
-                *Some*
+            *Some*
 
-                ```rust
-                test::Option
-                ```
+            ```rust
+            ra_test_fixture::Option
+            ```
 
-                ```rust
-                Some(T)
-                ```
-            "#]],
+            ```rust
+            Some(T)
+            ```
+        "#]],
     );
 
     check(
@@ -866,8 +1691,12 @@ fn main() { let b$0ar = Some(12); }
             *bar*
 
             ```rust
-            let bar: Option<i32> // size = 4, align = 4
+            let bar: Option<i32>
             ```
+
+            ---
+
+            size = 4, align = 4
         "#]],
     );
 }
@@ -883,20 +1712,20 @@ enum Option<T> {
 }
 "#,
         expect![[r#"
-                *None*
+            *None*
 
-                ```rust
-                test::Option
-                ```
+            ```rust
+            ra_test_fixture::Option
+            ```
 
-                ```rust
-                None
-                ```
+            ```rust
+            None
+            ```
 
-                ---
+            ---
 
-                The None variant
-            "#]],
+            The None variant
+        "#]],
     );
 
     check(
@@ -910,20 +1739,20 @@ fn main() {
 }
 "#,
         expect![[r#"
-                *Some*
+            *Some*
 
-                ```rust
-                test::Option
-                ```
+            ```rust
+            ra_test_fixture::Option
+            ```
 
-                ```rust
-                Some(T)
-                ```
+            ```rust
+            Some(T)
+            ```
 
-                ---
+            ---
 
-                The Some variant
-            "#]],
+            The Some variant
+        "#]],
     );
 }
 
@@ -935,7 +1764,7 @@ fn hover_for_local_variable() {
             *foo*
 
             ```rust
-            foo: i32 // size = 4, align = 4
+            foo: i32
             ```
         "#]],
     )
@@ -949,8 +1778,12 @@ fn hover_for_local_variable_pat() {
             *foo*
 
             ```rust
-            foo: i32 // size = 4, align = 4
+            foo: i32
             ```
+
+            ---
+
+            size = 4, align = 4
         "#]],
     )
 }
@@ -963,7 +1796,7 @@ fn hover_local_var_edge() {
             *foo*
 
             ```rust
-            foo: i32 // size = 4, align = 4
+            foo: i32
             ```
         "#]],
     )
@@ -977,8 +1810,12 @@ fn hover_for_param_edge() {
             *foo*
 
             ```rust
-            foo: i32 // size = 4, align = 4
+            foo: i32
             ```
+
+            ---
+
+            size = 4, align = 4
         "#]],
     )
 }
@@ -996,12 +1833,12 @@ fn hover_for_param_with_multiple_traits() {
             }
             fn f(_x$0: impl Deref<Target=u8> + DerefMut<Target=u8>) {}"#,
         expect![[r#"
-                *_x*
+            *_x*
 
-                ```rust
-                _x: impl Deref<Target = u8> + DerefMut<Target = u8>
-                ```
-            "#]],
+            ```rust
+            _x: impl Deref<Target = u8> + DerefMut<Target = u8>
+            ```
+        "#]],
     )
 }
 
@@ -1021,8 +1858,12 @@ fn main() { let foo_$0test = Thing::new(); }
             *foo_test*
 
             ```rust
-            let foo_test: Thing // size = 4, align = 4
+            let foo_test: Thing
             ```
+
+            ---
+
+            size = 4, align = 4
         "#]],
     )
 }
@@ -1042,15 +1883,15 @@ mod wrapper {
 fn main() { let foo_test = wrapper::Thing::new$0(); }
 "#,
         expect![[r#"
-                *new*
+            *new*
 
-                ```rust
-                test::wrapper::Thing
-                ```
+            ```rust
+            ra_test_fixture::wrapper::Thing
+            ```
 
-                ```rust
-                pub fn new() -> Thing
-                ```
+            ```rust
+            pub fn new() -> Thing
+            ```
         "#]],
     )
 }
@@ -1076,7 +1917,7 @@ fn main() {
             *C*
 
             ```rust
-            test
+            ra_test_fixture::X
             ```
 
             ```rust
@@ -1096,16 +1937,38 @@ impl Thing {
 }
 "#,
         expect![[r#"
-                *Self*
+            *Self*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                struct Thing
-                ```
-            "#]],
+            ```rust
+            struct Thing {
+                x: u32,
+            }
+            ```
+        "#]],
+    );
+    check_hover_fields_limit(
+        None,
+        r#"
+struct Thing { x: u32 }
+impl Thing {
+    fn new() -> Self$0 { Self { x: 0 } }
+}
+"#,
+        expect![[r#"
+            *Self*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            struct Thing
+            ```
+        "#]],
     );
     check(
         r#"
@@ -1115,16 +1978,18 @@ impl Thing {
 }
 "#,
         expect![[r#"
-                *Self*
+            *Self*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                struct Thing
-                ```
-            "#]],
+            ```rust
+            struct Thing {
+                x: u32,
+            }
+            ```
+        "#]],
     );
     check(
         r#"
@@ -1134,35 +1999,75 @@ impl Thing {
 }
 "#,
         expect![[r#"
-                *Self*
+            *Self*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                enum Thing
-                ```
-            "#]],
+            ```rust
+            enum Thing {
+                A,
+            }
+            ```
+        "#]],
     );
     check(
         r#"
-        enum Thing { A }
-        impl Thing {
-            pub fn thing(a: Self$0) {}
-        }
-        "#,
+enum Thing { A }
+impl Thing {
+    pub fn thing(a: Self$0) {}
+}
+"#,
         expect![[r#"
-                *Self*
+            *Self*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                enum Thing
-                ```
-            "#]],
+            ```rust
+            enum Thing {
+                A,
+            }
+            ```
+        "#]],
+    );
+    check(
+        r#"
+impl usize {
+    pub fn thing(a: Self$0) {}
+}
+"#,
+        expect![[r#"
+            *Self*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            usize
+            ```
+        "#]],
+    );
+    check(
+        r#"
+impl fn() -> usize {
+    pub fn thing(a: Self$0) {}
+}
+"#,
+        expect![[r#"
+            *Self*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            fn() -> usize
+            ```
+        "#]],
     );
 }
 
@@ -1181,7 +2086,7 @@ fn y() {
             *x*
 
             ```rust
-            let x: i32 // size = 4, align = 4
+            let x: i32
             ```
         "#]],
     )
@@ -1191,21 +2096,21 @@ fn y() {
 fn test_hover_macro_invocation() {
     check(
         r#"
-macro_rules! foo { () => {} }
+macro_rules! foo { (a) => {}; () => {} }
 
 fn f() { fo$0o!(); }
 "#,
         expect![[r#"
-                *foo*
+            *foo*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                macro_rules! foo
-                ```
-            "#]],
+            ```rust
+            macro_rules! foo // matched arm #1
+            ```
+        "#]],
     )
 }
 
@@ -1221,22 +2126,22 @@ macro foo() {}
 fn f() { fo$0o!(); }
 "#,
         expect![[r#"
-                *foo*
+            *foo*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                macro foo
-                ```
+            ```rust
+            macro foo // matched arm #0
+            ```
 
-                ---
+            ---
 
-                foo bar
+            foo bar
 
-                foo bar baz
-            "#]],
+            foo bar baz
+        "#]],
     )
 }
 
@@ -1245,12 +2150,12 @@ fn test_hover_tuple_field() {
     check(
         r#"struct TS(String, i32$0);"#,
         expect![[r#"
-                *i32*
+            *i32*
 
-                ```rust
-                i32
-                ```
-            "#]],
+            ```rust
+            i32
+            ```
+        "#]],
     )
 }
 
@@ -1265,16 +2170,16 @@ id! {
 }
 "#,
         expect![[r#"
-                *foo*
+            *foo*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                fn foo()
-                ```
-            "#]],
+            ```rust
+            fn foo()
+            ```
+        "#]],
     );
 }
 
@@ -1287,16 +2192,16 @@ fn test_hover_through_attr() {
 fn foo$0() {}
 "#,
         expect![[r#"
-                *foo*
+            *foo*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                fn foo()
-                ```
-            "#]],
+            ```rust
+            fn foo()
+            ```
+        "#]],
     );
 }
 
@@ -1311,7 +2216,7 @@ fn foo(bar:u32) { let a = id!(ba$0r); }
             *bar*
 
             ```rust
-            bar: u32 // size = 4, align = 4
+            bar: u32
             ```
         "#]],
     );
@@ -1329,7 +2234,7 @@ fn foo(bar:u32) { let a = id!(ba$0r); }
             *bar*
 
             ```rust
-            bar: u32 // size = 4, align = 4
+            bar: u32
             ```
         "#]],
     );
@@ -1348,7 +2253,7 @@ fn foo() { let a = id!([0u32, bar$0()] ); }
             *bar*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -1371,16 +2276,16 @@ fn foo() {
 }
 "#,
         expect![[r#"
-                *bar*
+            *bar*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                fn bar() -> bool
-                ```
-            "#]],
+            ```rust
+            fn bar() -> bool
+            ```
+        "#]],
     );
 }
 
@@ -1398,7 +2303,7 @@ fn foo(Foo { b$0ar }: &Foo) {}
                 GoToType(
                     [
                         HoverGotoTypeData {
-                            mod_path: "test::Bar",
+                            mod_path: "ra_test_fixture::Bar",
                             nav: NavigationTarget {
                                 file_id: FileId(
                                     0,
@@ -1418,16 +2323,140 @@ fn foo(Foo { b$0ar }: &Foo) {}
 }
 
 #[test]
-fn test_hover_through_literal_string_in_builtin_macro() {
-    check_hover_no_result(
+fn test_hover_show_type_def_for_subst() {
+    check_actions(
         r#"
-            #[rustc_builtin_macro]
-            macro_rules! format {}
+fn f<T>(t: T) {
 
-            fn foo() {
-                format!("hel$0lo {}", 0);
-            }
+}
+
+struct S;
+
+fn test() {
+    let a = S;
+    f$0(a);
+}
 "#,
+        expect![[r#"
+            [
+                Reference(
+                    FilePositionWrapper {
+                        file_id: FileId(
+                            0,
+                        ),
+                        offset: 3,
+                    },
+                ),
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::S",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 20..29,
+                                focus_range: 27..28,
+                                name: "S",
+                                kind: Struct,
+                                description: "struct S",
+                            },
+                        },
+                    ],
+                ),
+            ]
+        "#]],
+    );
+}
+
+#[test]
+fn test_hover_show_type_def_for_func_param() {
+    check_actions(
+        r#"
+struct Bar;
+fn f(b: Bar) {
+
+}
+
+fn test() {
+    let b = Bar;
+    f$0(b);
+}
+"#,
+        expect![[r#"
+            [
+                Reference(
+                    FilePositionWrapper {
+                        file_id: FileId(
+                            0,
+                        ),
+                        offset: 15,
+                    },
+                ),
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Bar",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 0..11,
+                                focus_range: 7..10,
+                                name: "Bar",
+                                kind: Struct,
+                                description: "struct Bar",
+                            },
+                        },
+                    ],
+                ),
+            ]
+        "#]],
+    );
+}
+
+#[test]
+fn test_hover_show_type_def_for_trait_bound() {
+    check_actions(
+        r#"
+trait Bar {}
+fn f<T: Bar>(b: T) {
+
+}
+
+fn test() {
+    f$0();
+}
+"#,
+        expect![[r#"
+            [
+                Reference(
+                    FilePositionWrapper {
+                        file_id: FileId(
+                            0,
+                        ),
+                        offset: 16,
+                    },
+                ),
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Bar",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 0..12,
+                                focus_range: 6..9,
+                                name: "Bar",
+                                kind: Trait,
+                                description: "trait Bar",
+                            },
+                        },
+                    ],
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -1441,20 +2470,20 @@ fn foo() { }
 fn bar() { fo$0o(); }
 ",
         expect![[r#"
-                *foo*
+            *foo*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                fn foo()
-                ```
+            ```rust
+            fn foo()
+            ```
 
-                ---
+            ---
 
-                \<- `　` here
-            "#]],
+            \<- `　` here
+        "#]],
     );
 }
 
@@ -1463,45 +2492,45 @@ fn test_hover_function_show_qualifiers() {
     check(
         r#"async fn foo$0() {}"#,
         expect![[r#"
-                *foo*
+            *foo*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                async fn foo()
-                ```
-            "#]],
+            ```rust
+            async fn foo()
+            ```
+        "#]],
     );
     check(
         r#"pub const unsafe fn foo$0() {}"#,
         expect![[r#"
-                *foo*
+            *foo*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                pub const unsafe fn foo()
-                ```
-            "#]],
+            ```rust
+            pub const unsafe fn foo()
+            ```
+        "#]],
     );
     // Top level `pub(crate)` will be displayed as no visibility.
     check(
         r#"mod m { pub(crate) async unsafe extern "C" fn foo$0() {} }"#,
         expect![[r#"
-                *foo*
+            *foo*
 
-                ```rust
-                test::m
-                ```
+            ```rust
+            ra_test_fixture::m
+            ```
 
-                ```rust
-                pub(crate) async unsafe extern "C" fn foo()
-                ```
-            "#]],
+            ```rust
+            pub(crate) async unsafe extern "C" fn foo()
+            ```
+        "#]],
     );
 }
 
@@ -1510,16 +2539,59 @@ fn test_hover_function_show_types() {
     check(
         r#"fn foo$0(a: i32, b:i32) -> i32 { 0 }"#,
         expect![[r#"
-                *foo*
+            *foo*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                fn foo(a: i32, b: i32) -> i32
-                ```
-            "#]],
+            ```rust
+            fn foo(a: i32, b: i32) -> i32
+            ```
+        "#]],
+    );
+}
+
+#[test]
+fn test_hover_function_associated_type_params() {
+    check(
+        r#"
+trait Foo { type Bar; }
+impl Foo for i32 { type Bar = i64; }
+fn foo(arg: <i32 as Foo>::Bar) {}
+fn main() { foo$0; }
+"#,
+        expect![[r#"
+            *foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            fn foo(arg: <i32 as Foo>::Bar)
+            ```
+        "#]],
+    );
+
+    check(
+        r#"
+trait Foo<T> { type Bar<U>; }
+impl Foo<i64> for i32 { type Bar<U> = i32; }
+fn foo(arg: <<i32 as Foo<i64>>::Bar<i8> as Foo<i64>>::Bar<i8>) {}
+fn main() { foo$0; }
+"#,
+        expect![[r#"
+            *foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            fn foo(arg: <<i32 as Foo<i64>>::Bar<i8> as Foo<i64>>::Bar<i8>)
+            ```
+        "#]],
     );
 }
 
@@ -1531,12 +2603,16 @@ fn test_hover_function_pointer_show_identifiers() {
             *foo*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
-            type foo = fn(a: i32, b: i32) -> i32 // size = 8, align = 8, niches = 1
+            type foo = fn(a: i32, b: i32) -> i32
             ```
+
+            ---
+
+            size = 8, align = 8, niches = 1
         "#]],
     );
 }
@@ -1549,12 +2625,16 @@ fn test_hover_function_pointer_no_identifier() {
             *foo*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
-            type foo = fn(i32, i32) -> i32 // size = 8, align = 8, niches = 1
+            type foo = fn(i32, i32) -> i32
             ```
+
+            ---
+
+            size = 8, align = 8, niches = 1
         "#]],
     );
 }
@@ -1564,17 +2644,17 @@ fn test_hover_trait_show_qualifiers() {
     check_actions(
         r"unsafe trait foo$0() {}",
         expect![[r#"
-                [
-                    Implementation(
-                        FilePosition {
-                            file_id: FileId(
-                                0,
-                            ),
-                            offset: 13,
-                        },
-                    ),
-                ]
-            "#]],
+            [
+                Implementation(
+                    FilePositionWrapper {
+                        file_id: FileId(
+                            0,
+                        ),
+                        offset: 13,
+                    },
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -1583,6 +2663,9 @@ fn test_hover_extern_crate() {
     check(
         r#"
 //- /main.rs crate:main deps:std
+//! Crate docs
+
+/// Decl docs!
 extern crate st$0d;
 //- /std/lib.rs crate:std
 //! Standard library for this test
@@ -1591,23 +2674,32 @@ extern crate st$0d;
 //! abc123
 "#,
         expect![[r#"
-                *std*
+            *std*
 
-                ```rust
-                extern crate std
-                ```
+            ```rust
+            main
+            ```
 
-                ---
+            ```rust
+            extern crate std
+            ```
 
-                Standard library for this test
+            ---
 
-                Printed?
-                abc123
-            "#]],
+            Decl docs!
+
+            Standard library for this test
+
+            Printed?
+            abc123
+        "#]],
     );
     check(
         r#"
 //- /main.rs crate:main deps:std
+//! Crate docs
+
+/// Decl docs!
 extern crate std as ab$0c;
 //- /std/lib.rs crate:std
 //! Standard library for this test
@@ -1616,19 +2708,25 @@ extern crate std as ab$0c;
 //! abc123
 "#,
         expect![[r#"
-                *abc*
+            *abc*
 
-                ```rust
-                extern crate std
-                ```
+            ```rust
+            main
+            ```
 
-                ---
+            ```rust
+            extern crate std as abc
+            ```
 
-                Standard library for this test
+            ---
 
-                Printed?
-                abc123
-            "#]],
+            Decl docs!
+
+            Standard library for this test
+
+            Printed?
+            abc123
+        "#]],
     );
 }
 
@@ -1642,16 +2740,16 @@ mod my { pub struct Bar; }
 fn my() {}
 "#,
         expect![[r#"
-                *my*
+            *my*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                mod my
-                ```
-            "#]],
+            ```rust
+            mod my
+            ```
+        "#]],
     );
 }
 
@@ -1677,11 +2775,11 @@ fn foo() { let bar = Ba$0r; }
             *Bar*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
-            struct Bar // size = 0, align = 1
+            struct Bar
             ```
 
             ---
@@ -1713,11 +2811,11 @@ fn foo() { let bar = Ba$0r; }
             *Bar*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
-            struct Bar // size = 0, align = 1
+            struct Bar
             ```
 
             ---
@@ -1742,11 +2840,11 @@ fn foo() { let bar = Ba$0r; }
             *Bar*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
-            struct Bar // size = 0, align = 1
+            struct Bar
             ```
 
             ---
@@ -1770,12 +2868,16 @@ pub struct B$0ar
             *Bar*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
-            pub struct Bar // size = 0, align = 1
+            pub struct Bar
             ```
+
+            ---
+
+            size = 0, align = 1
 
             ---
 
@@ -1797,12 +2899,16 @@ pub struct B$0ar
             *Bar*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
-            pub struct Bar // size = 0, align = 1
+            pub struct Bar
             ```
+
+            ---
+
+            size = 0, align = 1
 
             ---
 
@@ -1839,39 +2945,39 @@ fn test_hover_no_links() {
 pub fn fo$0o() {}
 "#,
         expect![[r#"
-                *foo*
+            *foo*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                pub fn foo()
-                ```
+            ```rust
+            pub fn foo()
+            ```
 
-                ---
+            ---
 
-                Test cases:
-                case 1.  bare URL: https://www.example.com/
-                case 2.  inline URL with title: [example](https://www.example.com/)
-                case 3.  code reference: `Result`
-                case 4.  code reference but miss footnote: `String`
-                case 5.  autolink: http://www.example.com/
-                case 6.  email address: test@example.com
-                case 7.  reference: example
-                case 8.  collapsed link: example
-                case 9.  shortcut link: example
-                case 10. inline without URL: example
-                case 11. reference: foo
-                case 12. reference: foo
-                case 13. collapsed link: foo
-                case 14. shortcut link: foo
-                case 15. inline without URL: foo
-                case 16. just escaped text: \[foo\]
-                case 17. inline link: Foo
+            Test cases:
+            case 1.  bare URL: https://www.example.com/
+            case 2.  inline URL with title: [example](https://www.example.com/)
+            case 3.  code reference: `Result`
+            case 4.  code reference but miss footnote: `String`
+            case 5.  autolink: http://www.example.com/
+            case 6.  email address: test@example.com
+            case 7.  reference: example
+            case 8.  collapsed link: example
+            case 9.  shortcut link: example
+            case 10. inline without URL: example
+            case 11. reference: foo
+            case 12. reference: foo
+            case 13. collapsed link: foo
+            case 14. shortcut link: foo
+            case 15. inline without URL: foo
+            case 16. just escaped text: \[foo\]
+            case 17. inline link: Foo
 
-                [^example]: https://www.example.com/
-            "#]],
+            [^example]: https://www.example.com/
+        "#]],
     );
 }
 
@@ -1886,12 +2992,62 @@ fn test_hover_layout_of_variant() {
             *Variant1*
 
             ```rust
-            test::Foo
+            ra_test_fixture::Foo
             ```
 
             ```rust
-            Variant1(u8, u16) // size = 4, align = 2
+            Variant1(u8, u16)
             ```
+
+            ---
+
+            size = 4, align = 2
+        "#]],
+    );
+}
+
+#[test]
+fn test_hover_layout_of_variant_generic() {
+    check(
+        r#"enum Option<T> {
+    Some(T),
+    None$0
+}"#,
+        expect![[r#"
+            *None*
+
+            ```rust
+            ra_test_fixture::Option
+            ```
+
+            ```rust
+            None
+            ```
+        "#]],
+    );
+}
+
+#[test]
+fn test_hover_layout_generic_unused() {
+    check(
+        r#"
+//- minicore: phantom_data
+struct S$0<T>(core::marker::PhantomData<T>);
+"#,
+        expect![[r#"
+            *S*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            struct S<T>(PhantomData<T>)
+            ```
+
+            ---
+
+            size = 0, align = 1
         "#]],
     );
 }
@@ -1907,12 +3063,19 @@ fn test_hover_layout_of_enum() {
             *Foo*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
-            enum Foo // size = 16 (0x10), align = 8, niches = 254
+            enum Foo {
+                Variant1( /* … */ ),
+                Variant2( /* … */ ),
+            }
             ```
+
+            ---
+
+            size = 16 (0x10), align = 8, niches = 254
         "#]],
     );
 }
@@ -1925,7 +3088,7 @@ fn test_hover_no_memory_layout() {
             *field_a*
 
             ```rust
-            test::Foo
+            ra_test_fixture::Foo
             ```
 
             ```rust
@@ -1945,7 +3108,6 @@ fn main() {
         expect![[r#"
             *|*
             ```rust
-            {closure#0}
             impl Fn(i32) -> i32
             ```
 
@@ -1976,20 +3138,20 @@ bar!();
 fn foo() { let bar = Bar; bar.fo$0o(); }
 "#,
         expect![[r#"
-                *foo*
+            *foo*
 
-                ```rust
-                test::Bar
-                ```
+            ```rust
+            ra_test_fixture::Bar
+            ```
 
-                ```rust
-                fn foo(&self)
-                ```
+            ```rust
+            fn foo(&self)
+            ```
 
-                ---
+            ---
 
-                Do the foo
-            "#]],
+            Do the foo
+        "#]],
     );
 }
 
@@ -2014,20 +3176,20 @@ bar!();
 fn foo() { let bar = Bar; bar.fo$0o(); }
 "#,
         expect![[r#"
-                *foo*
+            *foo*
 
-                ```rust
-                test::Bar
-                ```
+            ```rust
+            ra_test_fixture::Bar
+            ```
 
-                ```rust
-                fn foo(&self)
-                ```
+            ```rust
+            fn foo(&self)
+            ```
 
-                ---
+            ---
 
-                Do the foo
-            "#]],
+            Do the foo
+        "#]],
     );
 }
 
@@ -2045,7 +3207,7 @@ fn main() { let foo_test = unsafe { fo$0o(1, 2, 3); } }
             *foo*
 
             ```rust
-            test
+            ra_test_fixture::<extern>
             ```
 
             ```rust
@@ -2060,17 +3222,17 @@ fn test_hover_trait_has_impl_action() {
     check_actions(
         r#"trait foo$0() {}"#,
         expect![[r#"
-                [
-                    Implementation(
-                        FilePosition {
-                            file_id: FileId(
-                                0,
-                            ),
-                            offset: 6,
-                        },
-                    ),
-                ]
-            "#]],
+            [
+                Implementation(
+                    FilePositionWrapper {
+                        file_id: FileId(
+                            0,
+                        ),
+                        offset: 6,
+                    },
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -2079,17 +3241,17 @@ fn test_hover_struct_has_impl_action() {
     check_actions(
         r"struct foo$0() {}",
         expect![[r#"
-                [
-                    Implementation(
-                        FilePosition {
-                            file_id: FileId(
-                                0,
-                            ),
-                            offset: 7,
-                        },
-                    ),
-                ]
-            "#]],
+            [
+                Implementation(
+                    FilePositionWrapper {
+                        file_id: FileId(
+                            0,
+                        ),
+                        offset: 7,
+                    },
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -2098,17 +3260,17 @@ fn test_hover_union_has_impl_action() {
     check_actions(
         r#"union foo$0() {}"#,
         expect![[r#"
-                [
-                    Implementation(
-                        FilePosition {
-                            file_id: FileId(
-                                0,
-                            ),
-                            offset: 6,
-                        },
-                    ),
-                ]
-            "#]],
+            [
+                Implementation(
+                    FilePositionWrapper {
+                        file_id: FileId(
+                            0,
+                        ),
+                        offset: 6,
+                    },
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -2117,17 +3279,17 @@ fn test_hover_enum_has_impl_action() {
     check_actions(
         r"enum foo$0() { A, B }",
         expect![[r#"
-                [
-                    Implementation(
-                        FilePosition {
-                            file_id: FileId(
-                                0,
-                            ),
-                            offset: 5,
-                        },
-                    ),
-                ]
-            "#]],
+            [
+                Implementation(
+                    FilePositionWrapper {
+                        file_id: FileId(
+                            0,
+                        ),
+                        offset: 5,
+                    },
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -2136,17 +3298,17 @@ fn test_hover_self_has_impl_action() {
     check_actions(
         r#"struct foo where Self$0:;"#,
         expect![[r#"
-                [
-                    Implementation(
-                        FilePosition {
-                            file_id: FileId(
-                                0,
-                            ),
-                            offset: 7,
-                        },
-                    ),
-                ]
-            "#]],
+            [
+                Implementation(
+                    FilePositionWrapper {
+                        file_id: FileId(
+                            0,
+                        ),
+                        offset: 7,
+                    },
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -2160,7 +3322,7 @@ fn foo_$0test() {}
         expect![[r#"
             [
                 Reference(
-                    FilePosition {
+                    FilePositionWrapper {
                         file_id: FileId(
                             0,
                         ),
@@ -2188,6 +3350,11 @@ fn foo_$0test() {}
                             },
                         },
                         cfg: None,
+                        update_test: UpdateTest {
+                            expect_test: false,
+                            insta: false,
+                            snapbox: false,
+                        },
                     },
                 ),
             ]
@@ -2205,28 +3372,33 @@ mod tests$0 {
 }
 "#,
         expect![[r#"
-                [
-                    Runnable(
-                        Runnable {
-                            use_name_in_title: false,
-                            nav: NavigationTarget {
-                                file_id: FileId(
-                                    0,
-                                ),
-                                full_range: 0..46,
-                                focus_range: 4..9,
-                                name: "tests",
-                                kind: Module,
-                                description: "mod tests",
-                            },
-                            kind: TestMod {
-                                path: "tests",
-                            },
-                            cfg: None,
+            [
+                Runnable(
+                    Runnable {
+                        use_name_in_title: false,
+                        nav: NavigationTarget {
+                            file_id: FileId(
+                                0,
+                            ),
+                            full_range: 0..46,
+                            focus_range: 4..9,
+                            name: "tests",
+                            kind: Module,
+                            description: "mod tests",
                         },
-                    ),
-                ]
-            "#]],
+                        kind: TestMod {
+                            path: "tests",
+                        },
+                        cfg: None,
+                        update_test: UpdateTest {
+                            expect_test: false,
+                            insta: false,
+                            snapbox: false,
+                        },
+                    },
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -2239,26 +3411,26 @@ struct S{ f1: u32 }
 fn main() { let s$0t = S{ f1:0 }; }
 "#,
         expect![[r#"
-                [
-                    GoToType(
-                        [
-                            HoverGotoTypeData {
-                                mod_path: "test::S",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 0..19,
-                                    focus_range: 7..8,
-                                    name: "S",
-                                    kind: Struct,
-                                    description: "struct S",
-                                },
+            [
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::S",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 0..19,
+                                focus_range: 7..8,
+                                name: "S",
+                                kind: Struct,
+                                description: "struct S",
                             },
-                        ],
-                    ),
-                ]
-            "#]],
+                        },
+                    ],
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -2272,39 +3444,39 @@ struct S<T>{ f1: T }
 fn main() { let s$0t = S{ f1:Arg(0) }; }
 "#,
         expect![[r#"
-                [
-                    GoToType(
-                        [
-                            HoverGotoTypeData {
-                                mod_path: "test::S",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 17..37,
-                                    focus_range: 24..25,
-                                    name: "S",
-                                    kind: Struct,
-                                    description: "struct S<T>",
-                                },
+            [
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Arg",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 0..16,
+                                focus_range: 7..10,
+                                name: "Arg",
+                                kind: Struct,
+                                description: "struct Arg(u32)",
                             },
-                            HoverGotoTypeData {
-                                mod_path: "test::Arg",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 0..16,
-                                    focus_range: 7..10,
-                                    name: "Arg",
-                                    kind: Struct,
-                                    description: "struct Arg",
-                                },
+                        },
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::S",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 17..37,
+                                focus_range: 24..25,
+                                name: "S",
+                                kind: Struct,
+                                description: "struct S<T>",
                             },
-                        ],
-                    ),
-                ]
-            "#]],
+                        },
+                    ],
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -2331,39 +3503,39 @@ struct S<T>{ f1: T }
 fn main() { let s$0t = S{ f1: S{ f1: Arg(0) } }; }
 "#,
         expect![[r#"
-                [
-                    GoToType(
-                        [
-                            HoverGotoTypeData {
-                                mod_path: "test::S",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 17..37,
-                                    focus_range: 24..25,
-                                    name: "S",
-                                    kind: Struct,
-                                    description: "struct S<T>",
-                                },
+            [
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Arg",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 0..16,
+                                focus_range: 7..10,
+                                name: "Arg",
+                                kind: Struct,
+                                description: "struct Arg(u32)",
                             },
-                            HoverGotoTypeData {
-                                mod_path: "test::Arg",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 0..16,
-                                    focus_range: 7..10,
-                                    name: "Arg",
-                                    kind: Struct,
-                                    description: "struct Arg",
-                                },
+                        },
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::S",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 17..37,
+                                focus_range: 24..25,
+                                name: "S",
+                                kind: Struct,
+                                description: "struct S<T>",
                             },
-                        ],
-                    ),
-                ]
-            "#]],
+                        },
+                    ],
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -2384,7 +3556,7 @@ fn main() { let s$0t = (A(1), B(2), M::C(3) ); }
                 GoToType(
                     [
                         HoverGotoTypeData {
-                            mod_path: "test::A",
+                            mod_path: "ra_test_fixture::A",
                             nav: NavigationTarget {
                                 file_id: FileId(
                                     0,
@@ -2393,11 +3565,11 @@ fn main() { let s$0t = (A(1), B(2), M::C(3) ); }
                                 focus_range: 7..8,
                                 name: "A",
                                 kind: Struct,
-                                description: "struct A",
+                                description: "struct A(u32)",
                             },
                         },
                         HoverGotoTypeData {
-                            mod_path: "test::B",
+                            mod_path: "ra_test_fixture::B",
                             nav: NavigationTarget {
                                 file_id: FileId(
                                     0,
@@ -2406,11 +3578,11 @@ fn main() { let s$0t = (A(1), B(2), M::C(3) ); }
                                 focus_range: 22..23,
                                 name: "B",
                                 kind: Struct,
-                                description: "struct B",
+                                description: "struct B(u32)",
                             },
                         },
                         HoverGotoTypeData {
-                            mod_path: "test::M::C",
+                            mod_path: "ra_test_fixture::M::C",
                             nav: NavigationTarget {
                                 file_id: FileId(
                                     0,
@@ -2420,7 +3592,7 @@ fn main() { let s$0t = (A(1), B(2), M::C(3) ); }
                                 name: "C",
                                 kind: Struct,
                                 container_name: "M",
-                                description: "pub struct C",
+                                description: "pub struct C(u32)",
                             },
                         },
                     ],
@@ -2440,26 +3612,26 @@ fn foo() -> impl Foo {}
 fn main() { let s$0t = foo(); }
 "#,
         expect![[r#"
-                [
-                    GoToType(
-                        [
-                            HoverGotoTypeData {
-                                mod_path: "test::Foo",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 0..12,
-                                    focus_range: 6..9,
-                                    name: "Foo",
-                                    kind: Trait,
-                                    description: "trait Foo",
-                                },
+            [
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Foo",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 0..12,
+                                focus_range: 6..9,
+                                name: "Foo",
+                                kind: Trait,
+                                description: "trait Foo",
                             },
-                        ],
-                    ),
-                ]
-            "#]],
+                        },
+                    ],
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -2474,39 +3646,39 @@ fn foo() -> impl Foo<S> {}
 fn main() { let s$0t = foo(); }
 "#,
         expect![[r#"
-                [
-                    GoToType(
-                        [
-                            HoverGotoTypeData {
-                                mod_path: "test::Foo",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 0..15,
-                                    focus_range: 6..9,
-                                    name: "Foo",
-                                    kind: Trait,
-                                    description: "trait Foo<T>",
-                                },
+            [
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Foo",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 0..15,
+                                focus_range: 6..9,
+                                name: "Foo",
+                                kind: Trait,
+                                description: "trait Foo<T>",
                             },
-                            HoverGotoTypeData {
-                                mod_path: "test::S",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 16..25,
-                                    focus_range: 23..24,
-                                    name: "S",
-                                    kind: Struct,
-                                    description: "struct S",
-                                },
+                        },
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::S",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 16..25,
+                                focus_range: 23..24,
+                                name: "S",
+                                kind: Struct,
+                                description: "struct S",
                             },
-                        ],
-                    ),
-                ]
-            "#]],
+                        },
+                    ],
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -2521,39 +3693,39 @@ fn foo() -> impl Foo + Bar {}
 fn main() { let s$0t = foo(); }
 "#,
         expect![[r#"
-                [
-                    GoToType(
-                        [
-                            HoverGotoTypeData {
-                                mod_path: "test::Foo",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 0..12,
-                                    focus_range: 6..9,
-                                    name: "Foo",
-                                    kind: Trait,
-                                    description: "trait Foo",
-                                },
+            [
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Bar",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 13..25,
+                                focus_range: 19..22,
+                                name: "Bar",
+                                kind: Trait,
+                                description: "trait Bar",
                             },
-                            HoverGotoTypeData {
-                                mod_path: "test::Bar",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 13..25,
-                                    focus_range: 19..22,
-                                    name: "Bar",
-                                    kind: Trait,
-                                    description: "trait Bar",
-                                },
+                        },
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Foo",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 0..12,
+                                focus_range: 6..9,
+                                name: "Foo",
+                                kind: Trait,
+                                description: "trait Foo",
                             },
-                        ],
-                    ),
-                ]
-            "#]],
+                        },
+                    ],
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -2571,65 +3743,65 @@ fn foo() -> impl Foo<S1> + Bar<S2> {}
 fn main() { let s$0t = foo(); }
 "#,
         expect![[r#"
-                [
-                    GoToType(
-                        [
-                            HoverGotoTypeData {
-                                mod_path: "test::Foo",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 0..15,
-                                    focus_range: 6..9,
-                                    name: "Foo",
-                                    kind: Trait,
-                                    description: "trait Foo<T>",
-                                },
+            [
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Bar",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 16..31,
+                                focus_range: 22..25,
+                                name: "Bar",
+                                kind: Trait,
+                                description: "trait Bar<T>",
                             },
-                            HoverGotoTypeData {
-                                mod_path: "test::Bar",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 16..31,
-                                    focus_range: 22..25,
-                                    name: "Bar",
-                                    kind: Trait,
-                                    description: "trait Bar<T>",
-                                },
+                        },
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Foo",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 0..15,
+                                focus_range: 6..9,
+                                name: "Foo",
+                                kind: Trait,
+                                description: "trait Foo<T>",
                             },
-                            HoverGotoTypeData {
-                                mod_path: "test::S1",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 32..44,
-                                    focus_range: 39..41,
-                                    name: "S1",
-                                    kind: Struct,
-                                    description: "struct S1",
-                                },
+                        },
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::S1",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 32..44,
+                                focus_range: 39..41,
+                                name: "S1",
+                                kind: Struct,
+                                description: "struct S1",
                             },
-                            HoverGotoTypeData {
-                                mod_path: "test::S2",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 45..57,
-                                    focus_range: 52..54,
-                                    name: "S2",
-                                    kind: Struct,
-                                    description: "struct S2",
-                                },
+                        },
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::S2",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 45..57,
+                                focus_range: 52..54,
+                                name: "S2",
+                                kind: Struct,
+                                description: "struct S2",
                             },
-                        ],
-                    ),
-                ]
-            "#]],
+                        },
+                    ],
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -2641,26 +3813,26 @@ trait Foo {}
 fn foo(ar$0g: &impl Foo) {}
 "#,
         expect![[r#"
-                [
-                    GoToType(
-                        [
-                            HoverGotoTypeData {
-                                mod_path: "test::Foo",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 0..12,
-                                    focus_range: 6..9,
-                                    name: "Foo",
-                                    kind: Trait,
-                                    description: "trait Foo",
-                                },
+            [
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Foo",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 0..12,
+                                focus_range: 6..9,
+                                name: "Foo",
+                                kind: Trait,
+                                description: "trait Foo",
                             },
-                        ],
-                    ),
-                ]
-            "#]],
+                        },
+                    ],
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -2675,52 +3847,52 @@ struct S{}
 fn foo(ar$0g: &impl Foo + Bar<S>) {}
 "#,
         expect![[r#"
-                [
-                    GoToType(
-                        [
-                            HoverGotoTypeData {
-                                mod_path: "test::Foo",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 0..12,
-                                    focus_range: 6..9,
-                                    name: "Foo",
-                                    kind: Trait,
-                                    description: "trait Foo",
-                                },
+            [
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Bar",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 13..28,
+                                focus_range: 19..22,
+                                name: "Bar",
+                                kind: Trait,
+                                description: "trait Bar<T>",
                             },
-                            HoverGotoTypeData {
-                                mod_path: "test::Bar",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 13..28,
-                                    focus_range: 19..22,
-                                    name: "Bar",
-                                    kind: Trait,
-                                    description: "trait Bar<T>",
-                                },
+                        },
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Foo",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 0..12,
+                                focus_range: 6..9,
+                                name: "Foo",
+                                kind: Trait,
+                                description: "trait Foo",
                             },
-                            HoverGotoTypeData {
-                                mod_path: "test::S",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 29..39,
-                                    focus_range: 36..37,
-                                    name: "S",
-                                    kind: Struct,
-                                    description: "struct S",
-                                },
+                        },
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::S",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 29..39,
+                                focus_range: 36..37,
+                                name: "S",
+                                kind: Struct,
+                                description: "struct S",
                             },
-                        ],
-                    ),
-                ]
-            "#]],
+                        },
+                    ],
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -2751,8 +3923,8 @@ pub mod future {
                                 file_id: FileId(
                                     1,
                                 ),
-                                full_range: 21..69,
-                                focus_range: 60..66,
+                                full_range: 4294967295..4294967295,
+                                focus_range: 4294967295..4294967295,
                                 name: "Future",
                                 kind: Trait,
                                 container_name: "future",
@@ -2788,39 +3960,39 @@ struct S {}
 fn foo(ar$0g: &impl Foo<S>) {}
 "#,
         expect![[r#"
-                [
-                    GoToType(
-                        [
-                            HoverGotoTypeData {
-                                mod_path: "test::Foo",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 0..15,
-                                    focus_range: 6..9,
-                                    name: "Foo",
-                                    kind: Trait,
-                                    description: "trait Foo<T>",
-                                },
+            [
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Foo",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 0..15,
+                                focus_range: 6..9,
+                                name: "Foo",
+                                kind: Trait,
+                                description: "trait Foo<T>",
                             },
-                            HoverGotoTypeData {
-                                mod_path: "test::S",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 16..27,
-                                    focus_range: 23..24,
-                                    name: "S",
-                                    kind: Struct,
-                                    description: "struct S",
-                                },
+                        },
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::S",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 16..27,
+                                focus_range: 23..24,
+                                name: "S",
+                                kind: Struct,
+                                description: "struct S",
                             },
-                        ],
-                    ),
-                ]
-            "#]],
+                        },
+                    ],
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -2828,49 +4000,62 @@ fn foo(ar$0g: &impl Foo<S>) {}
 fn test_hover_dyn_return_has_goto_type_action() {
     check_actions(
         r#"
-trait Foo {}
+trait Foo<T> {}
 struct S;
-impl Foo for S {}
+impl Foo<S> for S {}
 
 struct B<T>{}
-fn foo() -> B<dyn Foo> {}
+fn foo() -> B<dyn Foo<S>> {}
 
 fn main() { let s$0t = foo(); }
 "#,
         expect![[r#"
-                [
-                    GoToType(
-                        [
-                            HoverGotoTypeData {
-                                mod_path: "test::B",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 42..55,
-                                    focus_range: 49..50,
-                                    name: "B",
-                                    kind: Struct,
-                                    description: "struct B<T>",
-                                },
+            [
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::B",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 48..61,
+                                focus_range: 55..56,
+                                name: "B",
+                                kind: Struct,
+                                description: "struct B<T>",
                             },
-                            HoverGotoTypeData {
-                                mod_path: "test::Foo",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 0..12,
-                                    focus_range: 6..9,
-                                    name: "Foo",
-                                    kind: Trait,
-                                    description: "trait Foo",
-                                },
+                        },
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Foo",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 0..15,
+                                focus_range: 6..9,
+                                name: "Foo",
+                                kind: Trait,
+                                description: "trait Foo<T>",
                             },
-                        ],
-                    ),
-                ]
-            "#]],
+                        },
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::S",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 16..25,
+                                focus_range: 23..24,
+                                name: "S",
+                                kind: Struct,
+                                description: "struct S",
+                            },
+                        },
+                    ],
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -2882,26 +4067,26 @@ trait Foo {}
 fn foo(ar$0g: &dyn Foo) {}
 "#,
         expect![[r#"
-                [
-                    GoToType(
-                        [
-                            HoverGotoTypeData {
-                                mod_path: "test::Foo",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 0..12,
-                                    focus_range: 6..9,
-                                    name: "Foo",
-                                    kind: Trait,
-                                    description: "trait Foo",
-                                },
+            [
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Foo",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 0..12,
+                                focus_range: 6..9,
+                                name: "Foo",
+                                kind: Trait,
+                                description: "trait Foo",
                             },
-                        ],
-                    ),
-                ]
-            "#]],
+                        },
+                    ],
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -2914,39 +4099,39 @@ struct S {}
 fn foo(ar$0g: &dyn Foo<S>) {}
 "#,
         expect![[r#"
-                [
-                    GoToType(
-                        [
-                            HoverGotoTypeData {
-                                mod_path: "test::Foo",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 0..15,
-                                    focus_range: 6..9,
-                                    name: "Foo",
-                                    kind: Trait,
-                                    description: "trait Foo<T>",
-                                },
+            [
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Foo",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 0..15,
+                                focus_range: 6..9,
+                                name: "Foo",
+                                kind: Trait,
+                                description: "trait Foo<T>",
                             },
-                            HoverGotoTypeData {
-                                mod_path: "test::S",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 16..27,
-                                    focus_range: 23..24,
-                                    name: "S",
-                                    kind: Struct,
-                                    description: "struct S",
-                                },
+                        },
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::S",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 16..27,
+                                focus_range: 23..24,
+                                name: "S",
+                                kind: Struct,
+                                description: "struct S",
                             },
-                        ],
-                    ),
-                ]
-            "#]],
+                        },
+                    ],
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -2962,65 +4147,65 @@ struct S {}
 fn foo(a$0rg: &impl ImplTrait<B<dyn DynTrait<B<S>>>>) {}
 "#,
         expect![[r#"
-                [
-                    GoToType(
-                        [
-                            HoverGotoTypeData {
-                                mod_path: "test::ImplTrait",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 0..21,
-                                    focus_range: 6..15,
-                                    name: "ImplTrait",
-                                    kind: Trait,
-                                    description: "trait ImplTrait<T>",
-                                },
+            [
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::B",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 43..57,
+                                focus_range: 50..51,
+                                name: "B",
+                                kind: Struct,
+                                description: "struct B<T>",
                             },
-                            HoverGotoTypeData {
-                                mod_path: "test::B",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 43..57,
-                                    focus_range: 50..51,
-                                    name: "B",
-                                    kind: Struct,
-                                    description: "struct B<T>",
-                                },
+                        },
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::DynTrait",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 22..42,
+                                focus_range: 28..36,
+                                name: "DynTrait",
+                                kind: Trait,
+                                description: "trait DynTrait<T>",
                             },
-                            HoverGotoTypeData {
-                                mod_path: "test::DynTrait",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 22..42,
-                                    focus_range: 28..36,
-                                    name: "DynTrait",
-                                    kind: Trait,
-                                    description: "trait DynTrait<T>",
-                                },
+                        },
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::ImplTrait",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 0..21,
+                                focus_range: 6..15,
+                                name: "ImplTrait",
+                                kind: Trait,
+                                description: "trait ImplTrait<T>",
                             },
-                            HoverGotoTypeData {
-                                mod_path: "test::S",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 58..69,
-                                    focus_range: 65..66,
-                                    name: "S",
-                                    kind: Struct,
-                                    description: "struct S",
-                                },
+                        },
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::S",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 58..69,
+                                focus_range: 65..66,
+                                name: "S",
+                                kind: Struct,
+                                description: "struct S",
                             },
-                        ],
-                    ),
-                ]
-            "#]],
+                        },
+                    ],
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -3043,26 +4228,26 @@ fn test() -> impl Foo { S {} }
 fn main() { let s$0t = test().get(); }
 "#,
         expect![[r#"
-                [
-                    GoToType(
-                        [
-                            HoverGotoTypeData {
-                                mod_path: "test::Foo",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 0..62,
-                                    focus_range: 6..9,
-                                    name: "Foo",
-                                    kind: Trait,
-                                    description: "trait Foo",
-                                },
+            [
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Foo",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 0..62,
+                                focus_range: 6..9,
+                                name: "Foo",
+                                kind: Trait,
+                                description: "trait Foo",
                             },
-                        ],
-                    ),
-                ]
-            "#]],
+                        },
+                    ],
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -3076,26 +4261,26 @@ struct Foo<const BAR: Bar>;
 impl<const BAR: Bar> Foo<BAR$0> {}
 "#,
         expect![[r#"
-                [
-                    GoToType(
-                        [
-                            HoverGotoTypeData {
-                                mod_path: "test::Bar",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 0..11,
-                                    focus_range: 7..10,
-                                    name: "Bar",
-                                    kind: Struct,
-                                    description: "struct Bar",
-                                },
+            [
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Bar",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 0..11,
+                                focus_range: 7..10,
+                                name: "Bar",
+                                kind: Struct,
+                                description: "struct Bar",
                             },
-                        ],
-                    ),
-                ]
-            "#]],
+                        },
+                    ],
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -3108,26 +4293,26 @@ trait Foo {}
 fn foo<T: Foo>(t: T$0){}
 "#,
         expect![[r#"
-                [
-                    GoToType(
-                        [
-                            HoverGotoTypeData {
-                                mod_path: "test::Foo",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 0..12,
-                                    focus_range: 6..9,
-                                    name: "Foo",
-                                    kind: Trait,
-                                    description: "trait Foo",
-                                },
+            [
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Foo",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 0..12,
+                                focus_range: 6..9,
+                                name: "Foo",
+                                kind: Trait,
+                                description: "trait Foo",
                             },
-                        ],
-                    ),
-                ]
-            "#]],
+                        },
+                    ],
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -3141,26 +4326,26 @@ impl Foo {
 }
 "#,
         expect![[r#"
-                [
-                    GoToType(
-                        [
-                            HoverGotoTypeData {
-                                mod_path: "test::Foo",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 0..11,
-                                    focus_range: 7..10,
-                                    name: "Foo",
-                                    kind: Struct,
-                                    description: "struct Foo",
-                                },
+            [
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Foo",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 0..11,
+                                focus_range: 7..10,
+                                name: "Foo",
+                                kind: Struct,
+                                description: "struct Foo",
                             },
-                        ],
-                    ),
-                ]
-            "#]],
+                        },
+                    ],
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -3190,7 +4375,7 @@ fn main() { let foo_test = name_with_dashes::wrapper::Thing::new$0(); }
             ```rust
             pub fn new() -> Thing
             ```
-            "#]],
+        "#]],
     )
 }
 
@@ -3211,17 +4396,26 @@ fn main() {
             *f*
 
             ```rust
-            f: &i32 // size = 8, align = 8, niches = 1
+            let f: &i32
             ```
+
+            ---
+
+            size = 8, align = 8, niches = 1
+
             ---
 
             ```rust
-            test::S
+            ra_test_fixture::S
             ```
 
             ```rust
-            f: i32 // size = 4, align = 4, offset = 0
+            f: i32
             ```
+
+            ---
+
+            size = 4, align = 4, offset = 0
         "#]],
     );
 }
@@ -3237,12 +4431,67 @@ struct S$0T<const C: usize = 1, T = Foo>(T);
             *ST*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
-            struct ST<const C: usize, T = Foo>
+            struct ST<const C: usize = 1, T = Foo>(T)
             ```
+
+            ---
+
+            size = 0, align = 1
+        "#]],
+    );
+}
+
+#[test]
+fn const_generic_default_value() {
+    check(
+        r#"
+struct Foo;
+struct S$0T<const C: usize = {40 + 2}, T = Foo>(T);
+"#,
+        expect![[r#"
+            *ST*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            struct ST<const C: usize = {const}, T = Foo>(T)
+            ```
+
+            ---
+
+            size = 0, align = 1
+        "#]],
+    );
+}
+
+#[test]
+fn const_generic_default_value_2() {
+    check(
+        r#"
+struct Foo;
+const VAL = 1;
+struct S$0T<const C: usize = VAL, T = Foo>(T);
+"#,
+        expect![[r#"
+            *ST*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            struct ST<const C: usize = VAL, T = Foo>(T)
+            ```
+
+            ---
+
+            size = 0, align = 1
         "#]],
     );
 }
@@ -3261,8 +4510,12 @@ fn main() {
             *value*
 
             ```rust
-            let value: Const<1> // size = 0, align = 1
+            let value: Const<1>
             ```
+
+            ---
+
+            size = 0, align = 1
         "#]],
     );
 }
@@ -3281,8 +4534,12 @@ fn main() {
             *value*
 
             ```rust
-            let value: Const<0> // size = 0, align = 1
+            let value: Const<0>
             ```
+
+            ---
+
+            size = 0, align = 1
         "#]],
     );
 }
@@ -3301,8 +4558,12 @@ fn main() {
             *value*
 
             ```rust
-            let value: Const<-1> // size = 0, align = 1
+            let value: Const<-1>
             ```
+
+            ---
+
+            size = 0, align = 1
         "#]],
     );
 }
@@ -3321,8 +4582,12 @@ fn main() {
             *value*
 
             ```rust
-            let value: Const<true> // size = 0, align = 1
+            let value: Const<true>
             ```
+
+            ---
+
+            size = 0, align = 1
         "#]],
     );
 }
@@ -3341,8 +4606,12 @@ fn main() {
             *value*
 
             ```rust
-            let value: Const<'🦀'> // size = 0, align = 1
+            let value: Const<'🦀'>
             ```
+
+            ---
+
+            size = 0, align = 1
         "#]],
     );
 }
@@ -3360,8 +4629,12 @@ impl Foo {
             *self*
 
             ```rust
-            self: &Foo // size = 8, align = 8, niches = 1
+            self: &Foo
             ```
+
+            ---
+
+            size = 8, align = 8, niches = 1
         "#]],
     );
 }
@@ -3380,8 +4653,12 @@ impl Foo {
             *self*
 
             ```rust
-            self: Arc<Foo> // size = 0, align = 1
+            self: Arc<Foo>
             ```
+
+            ---
+
+            size = 0, align = 1
         "#]],
     );
 }
@@ -3399,21 +4676,21 @@ mod Foo$0 {
 }
 "#,
         expect![[r#"
-                *Foo*
+            *Foo*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                mod Foo
-                ```
+            ```rust
+            mod Foo
+            ```
 
-                ---
+            ---
 
-                Be quick;
-                time is mana
-            "#]],
+            Be quick;
+            time is mana
+        "#]],
     );
 }
 
@@ -3430,21 +4707,21 @@ mod Foo$0 {
 }
 "#,
         expect![[r#"
-                *Foo*
+            *Foo*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                mod Foo
-                ```
+            ```rust
+            mod Foo
+            ```
 
-                ---
+            ---
 
-                Be quick;
-                time is mana
-            "#]],
+            Be quick;
+            time is mana
+        "#]],
     );
 }
 
@@ -3461,24 +4738,24 @@ fn hover_doc_block_style_indent_end() {
 fn foo$0() {}
 "#,
         expect![[r#"
-                *foo*
+            *foo*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                fn foo()
-                ```
+            ```rust
+            fn foo()
+            ```
 
-                ---
+            ---
 
-                foo
+            foo
 
-                ```rust
-                let x = 3;
-                ```
-            "#]],
+            ```rust
+            let x = 3;
+            ```
+        "#]],
     );
 }
 
@@ -3508,7 +4785,7 @@ fn foo() {
             ```rust
             'label
             ```
-            "#]],
+        "#]],
     );
 }
 
@@ -3520,9 +4797,23 @@ fn hover_lifetime() {
             *'lifetime*
 
             ```rust
+            ra_test_fixture::foo
+            ```
+
+            ```rust
             'lifetime
             ```
-            "#]],
+        "#]],
+    );
+    check(
+        r#"fn foo(_: &'static$0 ()) {}"#,
+        expect![[r#"
+            *'static*
+
+            ```rust
+            'static
+            ```
+        "#]],
     );
 }
 
@@ -3537,12 +4828,16 @@ trait TraitB {}
 impl<T: TraitA + TraitB> Foo<T$0> where T: Sized {}
 "#,
         expect![[r#"
-                *T*
+            *T*
 
-                ```rust
-                T: TraitA + TraitB
-                ```
-            "#]],
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            T: TraitA + TraitB
+            ```
+        "#]],
     );
     check(
         r#"
@@ -3551,14 +4846,17 @@ struct Foo<T>(T);
 impl<T> Foo<T$0> {}
 "#,
         expect![[r#"
-                *T*
+            *T*
 
-                ```rust
-                T
-                ```
-                "#]],
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            T
+            ```
+        "#]],
     );
-    // lifetimes bounds arent being tracked yet
     check(
         r#"
 //- minicore: sized
@@ -3566,12 +4864,16 @@ struct Foo<T>(T);
 impl<T: 'static> Foo<T$0> {}
 "#,
         expect![[r#"
-                *T*
+            *T*
 
-                ```rust
-                T
-                ```
-                "#]],
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            T: 'static
+            ```
+        "#]],
     );
 }
 
@@ -3583,30 +4885,38 @@ fn hover_type_param_sized_bounds() {
 //- minicore: sized
 trait Trait {}
 struct Foo<T>(T);
-impl<T: Trait> Foo<T$0> {}
+impl<T$0: Trait> Foo<T> {}
 "#,
         expect![[r#"
-                *T*
+            *T*
 
-                ```rust
-                T: Trait
-                ```
-            "#]],
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            T: Trait
+            ```
+        "#]],
     );
     check(
         r#"
 //- minicore: sized
 trait Trait {}
 struct Foo<T>(T);
-impl<T: Trait + ?Sized> Foo<T$0> {}
+impl<T$0: Trait + ?Sized> Foo<T> {}
 "#,
         expect![[r#"
-                *T*
+            *T*
 
-                ```rust
-                T: Trait + ?Sized
-                ```
-            "#]],
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            T: Trait + ?Sized
+            ```
+        "#]],
     );
 }
 
@@ -3621,12 +4931,20 @@ mod type_param_sized_bounds {
 fn foo<T$0>() {}
 "#,
             expect![[r#"
-                    *T*
+                *T*
 
-                    ```rust
-                    T
-                    ```
-                "#]],
+                ```rust
+                ra_test_fixture::foo
+                ```
+
+                ```rust
+                T
+                ```
+
+                ---
+
+                invariant
+            "#]],
         );
     }
 
@@ -3638,12 +4956,20 @@ fn foo<T$0>() {}
 fn foo<T$0: Sized>() {}
 "#,
             expect![[r#"
-                    *T*
+                *T*
 
-                    ```rust
-                    T
-                    ```
-                "#]],
+                ```rust
+                ra_test_fixture::foo
+                ```
+
+                ```rust
+                T
+                ```
+
+                ---
+
+                invariant
+            "#]],
         );
     }
 
@@ -3655,12 +4981,20 @@ fn foo<T$0: Sized>() {}
 fn foo<T$0: ?Sized>() {}
 "#,
             expect![[r#"
-                    *T*
+                *T*
 
-                    ```rust
-                    T: ?Sized
-                    ```
-                "#]],
+                ```rust
+                ra_test_fixture::foo
+                ```
+
+                ```rust
+                T: ?Sized
+                ```
+
+                ---
+
+                invariant
+            "#]],
         );
     }
 
@@ -3673,12 +5007,20 @@ trait Trait {}
 fn foo<T$0: Trait>() {}
 "#,
             expect![[r#"
-                    *T*
+                *T*
 
-                    ```rust
-                    T: Trait
-                    ```
-                "#]],
+                ```rust
+                ra_test_fixture::foo
+                ```
+
+                ```rust
+                T: Trait
+                ```
+
+                ---
+
+                invariant
+            "#]],
         );
     }
 
@@ -3691,12 +5033,20 @@ trait Trait {}
 fn foo<T$0: Trait + Sized>() {}
 "#,
             expect![[r#"
-                    *T*
+                *T*
 
-                    ```rust
-                    T: Trait
-                    ```
-                "#]],
+                ```rust
+                ra_test_fixture::foo
+                ```
+
+                ```rust
+                T: Trait
+                ```
+
+                ---
+
+                invariant
+            "#]],
         );
     }
 
@@ -3709,12 +5059,20 @@ trait Trait {}
 fn foo<T$0: Trait + ?Sized>() {}
 "#,
             expect![[r#"
-                    *T*
+                *T*
 
-                    ```rust
-                    T: Trait + ?Sized
-                    ```
-                "#]],
+                ```rust
+                ra_test_fixture::foo
+                ```
+
+                ```rust
+                T: Trait + ?Sized
+                ```
+
+                ---
+
+                invariant
+            "#]],
         );
     }
 
@@ -3726,13 +5084,25 @@ fn foo<T$0: Trait + ?Sized>() {}
 fn foo<T$0: ?Sized + Sized + Sized>() {}
 "#,
             expect![[r#"
-                    *T*
+                *T*
 
-                    ```rust
-                    T
-                    ```
-                "#]],
+                ```rust
+                ra_test_fixture::foo
+                ```
+
+                ```rust
+                T
+                ```
+
+                ---
+
+                invariant
+            "#]],
         );
+    }
+
+    #[test]
+    fn mixed2() {
         check(
             r#"
 //- minicore: sized
@@ -3740,12 +5110,20 @@ trait Trait {}
 fn foo<T$0: Sized + ?Sized + Sized + Trait>() {}
 "#,
             expect![[r#"
-                    *T*
+                *T*
 
-                    ```rust
-                    T: Trait
-                    ```
-                "#]],
+                ```rust
+                ra_test_fixture::foo
+                ```
+
+                ```rust
+                T: Trait
+                ```
+
+                ---
+
+                invariant
+            "#]],
         );
     }
 }
@@ -3761,12 +5139,16 @@ type Fo$0o2 = Foo<2>;
             *Foo2*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
-            type Foo2 = Foo<2> // size = 0, align = 1
+            type Foo2 = Foo<2>
             ```
+
+            ---
+
+            size = 0, align = 1
         "#]],
     );
 }
@@ -3779,12 +5161,16 @@ struct Foo<const LEN: usize>;
 impl<const LEN: usize> Foo<LEN$0> {}
 "#,
         expect![[r#"
-                *LEN*
+            *LEN*
 
-                ```rust
-                const LEN: usize
-                ```
-            "#]],
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            const LEN: usize
+            ```
+        "#]],
     );
 }
 
@@ -3803,12 +5189,16 @@ enum E {
             *A*
 
             ```rust
-            test::E
+            ra_test_fixture::E
             ```
 
             ```rust
-            A = 8 // size = 1, align = 1
+            A = 8
             ```
+
+            ---
+
+            size = 1, align = 1
 
             ---
 
@@ -3828,12 +5218,16 @@ enum E {
             *A*
 
             ```rust
-            test::E
+            ra_test_fixture::E
             ```
 
             ```rust
-            A = 12 (0xC) // size = 1, align = 1
+            A = 12 (0xC)
             ```
+
+            ---
+
+            size = 1, align = 1
 
             ---
 
@@ -3854,12 +5248,16 @@ enum E {
             *B*
 
             ```rust
-            test::E
+            ra_test_fixture::E
             ```
 
             ```rust
-            B = 2 // size = 1, align = 1
+            B = 2
             ```
+
+            ---
+
+            size = 1, align = 1
 
             ---
 
@@ -3880,12 +5278,16 @@ enum E {
             *B*
 
             ```rust
-            test::E
+            ra_test_fixture::E
             ```
 
             ```rust
-            B = 5 // size = 1, align = 1
+            B = 5
             ```
+
+            ---
+
+            size = 1, align = 1
 
             ---
 
@@ -3910,20 +5312,20 @@ fn main() {
 }
 "#,
         expect![[r#"
-        *B*
+            *B*
 
-        ```rust
-        test
-        ```
+            ```rust
+            ra_test_fixture
+            ```
 
-        ```rust
-        const B: bool = true
-        ```
+            ```rust
+            const B: bool = true
+            ```
 
-        ---
+            ---
 
-        true
-    "#]],
+            true
+        "#]],
     );
 
     check(
@@ -3947,16 +5349,16 @@ fn main() {
 }
 "#,
         expect![[r#"
-        *AA*
+            *AA*
 
-        ```rust
-        test
-        ```
+            ```rust
+            ra_test_fixture
+            ```
 
-        ```rust
-        const AA: A = A { i: 5 }
-        ```
-    "#]],
+            ```rust
+            const AA: A = A { i: 5 }
+            ```
+        "#]],
     );
 
     check(
@@ -3977,7 +5379,7 @@ fn main() {
             *B*
 
             ```rust
-            test
+            ra_test_fixture::T
             ```
 
             ```rust
@@ -4006,12 +5408,16 @@ fn main() {
             *B*
 
             ```rust
-            test
+            ra_test_fixture::T
             ```
 
             ```rust
             const B: bool = false
             ```
+
+            ---
+
+            `Self` = `()`
 
             ---
 
@@ -4038,12 +5444,16 @@ fn main() {
             *B*
 
             ```rust
-            test
+            ra_test_fixture::T
             ```
 
             ```rust
             const B: bool = false
             ```
+
+            ---
+
+            `Self` = `i32`
 
             ---
 
@@ -4061,7 +5471,7 @@ const FOO$0: usize = 1 << 3;
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -4082,7 +5492,7 @@ const FOO$0: usize = (1 << 3) + (1 << 2);
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -4104,7 +5514,7 @@ const FOO$0: usize = 2 - 3;
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -4126,7 +5536,7 @@ const FOO$0: i32 = 2 - 3;
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -4147,7 +5557,7 @@ const FOO$0: &str = "bar";
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -4169,7 +5579,7 @@ const FOO$0: char = 'a';
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -4191,7 +5601,7 @@ const FOO$0: char = '\x61';
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -4213,7 +5623,7 @@ const FOO$0: u8 = b'a';
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -4235,7 +5645,7 @@ const FOO$0: u8 = b'\x61';
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -4257,7 +5667,7 @@ const FOO$0: u8 = b'\x61';
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -4279,7 +5689,7 @@ const FOO$0: f32 = 1f32;
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -4301,7 +5711,7 @@ const FOO$0: &i32 = &2;
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -4323,7 +5733,7 @@ const FOO$0: f64 = 1.0f64;
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -4351,12 +5761,77 @@ const FOO$0: f64 = expf64(1.2);
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
             const FOO: f64 = 3.3201169227365472
             ```
+        "#]],
+    );
+    // check `f32` isn't double rounded via `f64`
+    check(
+        r#"
+/// This is a doc
+const FOO$0: f32 = 1.9999999403953552_f32;
+"#,
+        expect![[r#"
+            *FOO*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            const FOO: f32 = 1.9999999
+            ```
+
+            ---
+
+            This is a doc
+        "#]],
+    );
+    // Check `f16` and `f128`
+    check(
+        r#"
+/// This is a doc
+const FOO$0: f16 = -1.0f16;
+"#,
+        expect![[r#"
+            *FOO*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            const FOO: f16 = -1.0
+            ```
+
+            ---
+
+            This is a doc
+        "#]],
+    );
+    check(
+        r#"
+/// This is a doc
+const FOO$0: f128 = -1.0f128;
+"#,
+        expect![[r#"
+            *FOO*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            const FOO: f128 = -1.0
+            ```
+
+            ---
+
+            This is a doc
         "#]],
     );
 }
@@ -4378,7 +5853,7 @@ const FOO$0: Enum = VX;
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -4395,7 +5870,7 @@ const FOO$0: Option<i32> = Some(2);
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -4412,11 +5887,34 @@ const FOO$0: Option<&i32> = Some(2).as_ref();
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
             const FOO: Option<&i32> = Some(&2)
+            ```
+        "#]],
+    );
+}
+
+#[test]
+fn hover_const_eval_dyn_trait() {
+    check(
+        r#"
+//- minicore: fmt, coerce_unsized, builtin_impls, dispatch_from_dyn
+use core::fmt::Debug;
+
+const FOO$0: &dyn Debug = &2i32;
+"#,
+        expect![[r#"
+            *FOO*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            const FOO: &dyn Debug = &2
             ```
         "#]],
     );
@@ -4433,7 +5931,7 @@ const FOO$0: &[i32] = &[1, 2, 3 + 4];
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -4450,7 +5948,7 @@ const FOO$0: &[i32; 5] = &[12; 5];
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -4471,7 +5969,7 @@ const FOO$0: (&i32, &[i32], &i32) = {
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -4494,11 +5992,31 @@ const FOO$0: Tree = {
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
             const FOO: Tree = Tree(&[Tree(&[Tree(&[]), Tree(&[Tree(&[])])]), Tree(&[Tree(&[]), Tree(&[Tree(&[])])])])
+            ```
+        "#]],
+    );
+    // FIXME: Show the data of unsized structs
+    check(
+        r#"
+//- minicore: slice, index, coerce_unsized, transmute
+#[repr(transparent)]
+struct S<T: ?Sized>(T);
+const FOO$0: &S<[u8]> = core::mem::transmute::<&[u8], _>(&[1, 2, 3]);
+"#,
+        expect![[r#"
+            *FOO*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            const FOO: &S<[u8]> = &S
             ```
         "#]],
     );
@@ -4514,7 +6032,7 @@ const FOO$0: &str = "foo";
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -4537,7 +6055,7 @@ const FOO$0: X = X {
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -4556,7 +6074,7 @@ const FOO$0: (&str, &str) = {
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -4587,7 +6105,7 @@ fn test() {
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture::S
             ```
 
             ```rust
@@ -4614,7 +6132,7 @@ fn foo() {
             *FOO*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -4643,16 +6161,42 @@ fn foo(e: E) {
             *A*
 
             ```rust
-            test::E
+            ra_test_fixture::E
             ```
 
             ```rust
-            A = 3 // size = 0, align = 1
+            A = 3
             ```
 
             ---
 
             This is a doc
+        "#]],
+    );
+}
+
+#[test]
+fn hover_const_value() {
+    check(
+        r#"
+pub enum AA {
+    BB,
+}
+const CONST: AA = AA::BB;
+pub fn the_function() -> AA {
+    CON$0ST
+}
+"#,
+        expect![[r#"
+            *CONST*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            const CONST: AA = BB
+            ```
         "#]],
     );
 }
@@ -4669,8 +6213,12 @@ fn main() {
             *tile4*
 
             ```rust
-            let tile4: [u32; 8] // size = 32 (0x20), align = 4
+            let tile4: [u32; 8]
             ```
+
+            ---
+
+            size = 32 (0x20), align = 4
         "#]],
     );
 }
@@ -4685,20 +6233,20 @@ mod foo$0;
 //! For the horde!
 "#,
         expect![[r#"
-                *foo*
+            *foo*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                mod foo
-                ```
+            ```rust
+            mod foo
+            ```
 
-                ---
+            ---
 
-                For the horde!
-            "#]],
+            For the horde!
+        "#]],
     );
 }
 
@@ -4714,20 +6262,20 @@ mod foo {
 use foo::bar::{self$0};
 "#,
         expect![[r#"
-                *self*
+            *self*
 
-                ```rust
-                test::foo
-                ```
+            ```rust
+            ra_test_fixture::foo
+            ```
 
-                ```rust
-                mod bar
-                ```
+            ```rust
+            pub mod bar
+            ```
 
-                ---
+            ---
 
-                But this should appear
-            "#]],
+            But this should appear
+        "#]],
     )
 }
 
@@ -4828,17 +6376,17 @@ const _: &str$0 = ""; }
 mod prim_str {}
 "#,
         expect![[r#"
-                *str*
+            *str*
 
-                ```rust
-                str
-                ```
+            ```rust
+            str
+            ```
 
-                ---
+            ---
 
-                Docs for prim_str
-                [`foo`](https://doc.rust-lang.org/nightly/std/keyword.foo.html)
-            "#]],
+            Docs for prim_str
+            [`foo`](https://doc.rust-lang.org/nightly/std/keyword.foo.html)
+        "#]],
     );
 }
 
@@ -4864,20 +6412,20 @@ fn main() {
 }
 "#,
         expect![[r#"
-                *bar*
+            *bar*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                fn bar<'t, T>(s: &mut S<'t, T>, t: u32) -> *mut u32
-                where
-                    T: Clone + 't,
-                    't: 't + 't,
-                    for<'a> T: Clone + 'a,
-                ```
-            "#]],
+            ```rust
+            fn bar<'t, T>(s: &mut S<'t, T>, t: u32) -> *mut u32
+            where
+                T: Clone + 't,
+                't: 't + 't,
+                for<'a> T: Clone + 'a,
+            ```
+        "#]],
     )
 }
 
@@ -4901,11 +6449,11 @@ pub fn gimme() -> theitem::TheItem {
             *[`TheItem`]*
 
             ```rust
-            test::theitem
+            ra_test_fixture::theitem
             ```
 
             ```rust
-            pub struct TheItem // size = 0, align = 1
+            pub struct TheItem
             ```
 
             ---
@@ -4946,16 +6494,16 @@ impl T1 for Foo {
 }
         "#,
         expect![[r#"
-*Bar*
+            *Bar*
 
-```rust
-test::t2
-```
+            ```rust
+            ra_test_fixture::t2::T2
+            ```
 
-```rust
-pub type Bar
-```
-"#]],
+            ```rust
+            pub type Bar
+            ```
+        "#]],
     );
 }
 #[test]
@@ -4968,16 +6516,16 @@ trait A {
     type Assoc;
 }"#,
         expect![[r#"
-                *Assoc*
+            *Assoc*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture::A
+            ```
 
-                ```rust
-                type Assoc
-                ```
-            "#]],
+            ```rust
+            type Assoc
+            ```
+        "#]],
     );
     check(
         r#"
@@ -4989,16 +6537,16 @@ trait A {
     type Assoc;
 }"#,
         expect![[r#"
-                *Assoc*
+            *Assoc*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture::A
+            ```
 
-                ```rust
-                type Assoc
-                ```
-            "#]],
+            ```rust
+            type Assoc
+            ```
+        "#]],
     );
     check(
         r#"
@@ -5008,16 +6556,16 @@ trait A where
     type Assoc;
 }"#,
         expect![[r#"
-                *Assoc*
+            *Assoc*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture::A
+            ```
 
-                ```rust
-                type Assoc
-                ```
-            "#]],
+            ```rust
+            type Assoc
+            ```
+        "#]],
     );
 }
 
@@ -5053,7 +6601,7 @@ mod string {
             ```
 
             ```rust
-            struct String // size = 0, align = 1
+            struct String
             ```
 
             ---
@@ -5086,38 +6634,107 @@ pub fn foo() {}
 #[test]
 fn hover_feature() {
     check(
-        r#"#![feature(box_syntax$0)]"#,
-        expect![[r##"
-                *box_syntax*
-                ```
-                box_syntax
-                ```
-                ___
+        r#"#![feature(intrinsics$0)]"#,
+        expect![[r#"
+            *intrinsics*
+            ```
+            intrinsics
+            ```
+            ___
 
-                # `box_syntax`
+            # `intrinsics`
 
-                The tracking issue for this feature is: [#49733]
+            The tracking issue for this feature is: None.
 
-                [#49733]: https://github.com/rust-lang/rust/issues/49733
+            Intrinsics are rarely intended to be stable directly, but are usually
+            exported in some sort of stable manner. Prefer using the stable interfaces to
+            the intrinsic directly when you can.
 
-                See also [`box_patterns`](box-patterns.md)
+            ------------------------
 
-                ------------------------
 
-                Currently the only stable way to create a `Box` is via the `Box::new` method.
-                Also it is not possible in stable Rust to destructure a `Box` in a match
-                pattern. The unstable `box` keyword can be used to create a `Box`. An example
-                usage would be:
+            ## Intrinsics with fallback logic
 
-                ```rust
-                #![feature(box_syntax)]
+            Many intrinsics can be written in pure rust, albeit inefficiently or without supporting
+            some features that only exist on some backends. Backends can simply not implement those
+            intrinsics without causing any code miscompilations or failures to compile.
+            All intrinsic fallback bodies are automatically made cross-crate inlineable (like `#[inline]`)
+            by the codegen backend, but not the MIR inliner.
 
-                fn main() {
-                    let b = box 5;
+            ```rust
+            #![feature(intrinsics)]
+            #![allow(internal_features)]
+
+            #[rustc_intrinsic]
+            const unsafe fn const_deallocate(_ptr: *mut u8, _size: usize, _align: usize) {}
+            ```
+
+            Since these are just regular functions, it is perfectly ok to create the intrinsic twice:
+
+            ```rust
+            #![feature(intrinsics)]
+            #![allow(internal_features)]
+
+            #[rustc_intrinsic]
+            const unsafe fn const_deallocate(_ptr: *mut u8, _size: usize, _align: usize) {}
+
+            mod foo {
+                #[rustc_intrinsic]
+                const unsafe fn const_deallocate(_ptr: *mut u8, _size: usize, _align: usize) {
+                    panic!("noisy const dealloc")
                 }
-                ```
+            }
 
-            "##]],
+            ```
+
+            The behaviour on backends that override the intrinsic is exactly the same. On other
+            backends, the intrinsic behaviour depends on which implementation is called, just like
+            with any regular function.
+
+            ## Intrinsics lowered to MIR instructions
+
+            Various intrinsics have native MIR operations that they correspond to. Instead of requiring
+            backends to implement both the intrinsic and the MIR operation, the `lower_intrinsics` pass
+            will convert the calls to the MIR operation. Backends do not need to know about these intrinsics
+            at all. These intrinsics only make sense without a body, and can either be declared as a "rust-intrinsic"
+            or as a `#[rustc_intrinsic]`. The body is never used, as calls to the intrinsic do not exist
+            anymore after MIR analyses.
+
+            ## Intrinsics without fallback logic
+
+            These must be implemented by all backends.
+
+            ### `#[rustc_intrinsic]` declarations
+
+            These are written like intrinsics with fallback bodies, but the body is irrelevant.
+            Use `loop {}` for the body or call the intrinsic recursively and add
+            `#[rustc_intrinsic_must_be_overridden]` to the function to ensure that backends don't
+            invoke the body.
+
+            ### Legacy extern ABI based intrinsics
+
+            These are imported as if they were FFI functions, with the special
+            `rust-intrinsic` ABI. For example, if one was in a freestanding
+            context, but wished to be able to `transmute` between types, and
+            perform efficient pointer arithmetic, one would import those functions
+            via a declaration like
+
+            ```rust
+            #![feature(intrinsics)]
+            #![allow(internal_features)]
+            # fn main() {}
+
+            extern "rust-intrinsic" {
+                fn transmute<T, U>(x: T) -> U;
+
+                fn arith_offset<T>(dst: *const T, offset: isize) -> *const T;
+            }
+            ```
+
+            As with any other FFI functions, these are by default always `unsafe` to call.
+            You can add `#[rustc_safe_intrinsic]` to the intrinsic to make it safe to call.
+
+        "#]],
     )
 }
 
@@ -5134,7 +6751,19 @@ fn hover_lint() {
 
                 arithmetic operation overflows
             "#]],
-    )
+    );
+    check(
+        r#"#![expect(arithmetic_overflow$0)]"#,
+        expect![[r#"
+                *arithmetic_overflow*
+                ```
+                arithmetic_overflow
+                ```
+                ___
+
+                arithmetic operation overflows
+            "#]],
+    );
 }
 
 #[test]
@@ -5150,7 +6779,19 @@ fn hover_clippy_lint() {
 
                 Checks for `foo = bar; bar = foo` sequences.
             "#]],
-    )
+    );
+    check(
+        r#"#![expect(clippy::almost_swapped$0)]"#,
+        expect![[r#"
+                *almost_swapped*
+                ```
+                clippy::almost_swapped
+                ```
+                ___
+
+                Checks for `foo = bar; bar = foo` sequences.
+            "#]],
+    );
 }
 
 #[test]
@@ -5180,12 +6821,12 @@ fn hover_rename() {
 use self as foo$0;
 "#,
         expect![[r#"
-                *foo*
+            *foo*
 
-                ```rust
-                extern crate test
-                ```
-            "#]],
+            ```rust
+            extern crate ra_test_fixture
+            ```
+        "#]],
     );
     check(
         r#"
@@ -5193,16 +6834,16 @@ mod bar {}
 use bar::{self as foo$0};
 "#,
         expect![[r#"
-                *foo*
+            *foo*
 
-                ```rust
-                test
-                ```
+            ```rust
+            ra_test_fixture
+            ```
 
-                ```rust
-                mod bar
-                ```
-            "#]],
+            ```rust
+            mod bar
+            ```
+        "#]],
     );
     check(
         r#"
@@ -5211,24 +6852,24 @@ mod bar {
 }
 "#,
         expect![[r#"
-                *foo*
+            *foo*
 
-                ```rust
-                extern crate test
-                ```
-            "#]],
+            ```rust
+            extern crate ra_test_fixture
+            ```
+        "#]],
     );
     check(
         r#"
 use crate as foo$0;
 "#,
         expect![[r#"
-                *foo*
+            *foo*
 
-                ```rust
-                extern crate test
-                ```
-            "#]],
+            ```rust
+            extern crate ra_test_fixture
+            ```
+        "#]],
     );
 }
 
@@ -5253,7 +6894,7 @@ identity!{
             *Copy*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -5277,7 +6918,7 @@ struct Foo;
             *Copy*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -5299,7 +6940,7 @@ struct Foo;
             *Copy*
 
             ```rust
-            test::foo
+            ra_test_fixture::foo
             ```
 
             ```rust
@@ -5514,26 +7155,26 @@ fn foo() {
 }
 "#,
         expect![[r#"
-                [
-                    GoToType(
-                        [
-                            HoverGotoTypeData {
-                                mod_path: "test::Foo",
-                                nav: NavigationTarget {
-                                    file_id: FileId(
-                                        0,
-                                    ),
-                                    full_range: 0..11,
-                                    focus_range: 7..10,
-                                    name: "Foo",
-                                    kind: Struct,
-                                    description: "struct Foo",
-                                },
+            [
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Foo",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 0..11,
+                                focus_range: 7..10,
+                                name: "Foo",
+                                kind: Struct,
+                                description: "struct Foo",
                             },
-                        ],
-                    ),
-                ]
-            "#]],
+                        },
+                    ],
+                ),
+            ]
+        "#]],
     );
 }
 
@@ -5718,16 +7359,16 @@ foo_macro!(
             *[`Foo`]*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
-            pub struct Foo // size = 0, align = 1
+            pub struct Foo
             ```
 
             ---
 
-            Doc comment for [`Foo`](https://docs.rs/test/*/test/struct.Foo.html)
+            Doc comment for [`Foo`](https://docs.rs/ra_test_fixture/*/ra_test_fixture/struct.Foo.html)
         "#]],
     );
 }
@@ -5743,16 +7384,41 @@ pub struct Foo(i32);
             *[`Foo`]*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
-            pub struct Foo // size = 4, align = 4
+            pub struct Foo(i32)
             ```
 
             ---
 
-            Doc comment for [`Foo`](https://docs.rs/test/*/test/struct.Foo.html)
+            Doc comment for [`Foo`](https://docs.rs/ra_test_fixture/*/ra_test_fixture/struct.Foo.html)
+        "#]],
+    );
+}
+
+#[test]
+fn hover_intra_generics() {
+    check(
+        r#"
+/// Doc comment for [`Foo$0<T>`]
+pub struct Foo<T>(T);
+"#,
+        expect![[r#"
+            *[`Foo<T>`]*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            pub struct Foo<T>(T)
+            ```
+
+            ---
+
+            Doc comment for [`Foo<T>`](https://docs.rs/ra_test_fixture/*/ra_test_fixture/struct.Foo.html)
         "#]],
     );
 }
@@ -5842,12 +7508,16 @@ enum Enum {
             *RecordV*
 
             ```rust
-            test::Enum
+            ra_test_fixture::Enum
             ```
 
             ```rust
-            RecordV { field: u32 } // size = 4, align = 4
+            RecordV { field: u32, }
             ```
+
+            ---
+
+            size = 4, align = 4
         "#]],
     );
 }
@@ -5864,12 +7534,16 @@ enum Enum {
             *field*
 
             ```rust
-            test::RecordV
+            ra_test_fixture::Enum::RecordV
             ```
 
             ```rust
-            field: u32 // size = 4, align = 4
+            field: u32
             ```
+
+            ---
+
+            size = 4, align = 4
         "#]],
     );
 }
@@ -5890,7 +7564,7 @@ impl T for () {
             *func*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
@@ -5900,6 +7574,151 @@ impl T for () {
             ---
 
             Trait docs
+        "#]],
+    );
+}
+
+#[test]
+fn hover_trait_show_assoc_items() {
+    check_assoc_count(
+        0,
+        r#"
+trait T {}
+impl T$0 for () {}
+"#,
+        expect![[r#"
+            *T*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            trait T {}
+            ```
+        "#]],
+    );
+
+    check_assoc_count(
+        1,
+        r#"
+trait T {}
+impl T$0 for () {}
+"#,
+        expect![[r#"
+            *T*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            trait T {}
+            ```
+        "#]],
+    );
+
+    check_assoc_count(
+        0,
+        r#"
+trait T {
+    fn func() {}
+    const FLAG: i32 = 34;
+    type Bar;
+}
+impl T$0 for () {}
+"#,
+        expect![[r#"
+            *T*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            trait T { /* … */ }
+            ```
+        "#]],
+    );
+
+    check_assoc_count(
+        2,
+        r#"
+trait T {
+    fn func() {}
+    const FLAG: i32 = 34;
+    type Bar;
+}
+impl T$0 for () {}
+"#,
+        expect![[r#"
+            *T*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            trait T {
+                fn func();
+                const FLAG: i32;
+                /* … */
+            }
+            ```
+        "#]],
+    );
+
+    check_assoc_count(
+        3,
+        r#"
+trait T {
+    fn func() {}
+    const FLAG: i32 = 34;
+    type Bar;
+}
+impl T$0 for () {}
+"#,
+        expect![[r#"
+            *T*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            trait T {
+                fn func();
+                const FLAG: i32;
+                type Bar;
+            }
+            ```
+        "#]],
+    );
+
+    check_assoc_count(
+        4,
+        r#"
+trait T {
+    fn func() {}
+    const FLAG: i32 = 34;
+    type Bar;
+}
+impl T$0 for () {}
+"#,
+        expect![[r#"
+            *T*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            trait T {
+                fn func();
+                const FLAG: i32;
+                type Bar;
+            }
+            ```
         "#]],
     );
 }
@@ -5959,7 +7778,7 @@ fn f() {
             ***
 
             ```rust
-            test::Struct
+            ra_test_fixture::Struct
             ```
 
             ```rust
@@ -5988,13 +7807,13 @@ fn main() { $0V; }
             *V*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
             pub const V: i8 = {
-              let e = 123;
-              f(e)
+                let e = 123;
+                f(e)
             }
             ```
         "#]],
@@ -6015,12 +7834,12 @@ fn main() { $0V; }
             *V*
 
             ```rust
-            test
+            ra_test_fixture
             ```
 
             ```rust
             pub static V: i8 = {
-              let e = 123;
+                let e = 123;
             }
             ```
         "#]],
@@ -6195,7 +8014,7 @@ fn test() {
             *foo*
 
             ```rust
-            test::S
+            ra_test_fixture::m::S
             ```
 
             ```rust
@@ -6224,7 +8043,7 @@ fn test() {
             *foo*
 
             ```rust
-            test::S
+            ra_test_fixture::m::S
             ```
 
             ```rust
@@ -6254,7 +8073,7 @@ mod m {
             *foo*
 
             ```rust
-            test::S
+            ra_test_fixture::m::inner::S
             ```
 
             ```rust
@@ -6284,7 +8103,7 @@ fn test() {
             *A*
 
             ```rust
-            test
+            ra_test_fixture::m::S
             ```
 
             ```rust
@@ -6313,7 +8132,7 @@ fn test() {
             *A*
 
             ```rust
-            test
+            ra_test_fixture::m::S
             ```
 
             ```rust
@@ -6343,7 +8162,7 @@ mod m {
             *A*
 
             ```rust
-            test
+            ra_test_fixture::m::inner::S
             ```
 
             ```rust
@@ -6366,12 +8185,2171 @@ fn test() {
             *f*
 
             ```rust
-            test::S
+            ra_test_fixture::S
             ```
 
             ```rust
-            f: u32 // size = 4, align = 4, offset = 0
+            f: u32
             ```
+        "#]],
+    );
+}
+
+#[test]
+fn generic_params_disabled_by_cfg() {
+    check(
+        r#"
+struct S<#[cfg(never)] T>;
+fn test() {
+    let s$0: S = S;
+}
+"#,
+        expect![[r#"
+            *s*
+
+            ```rust
+            let s: S
+            ```
+
+            ---
+
+            size = 0, align = 1
+        "#]],
+    );
+}
+
+#[test]
+fn format_args_arg() {
+    check(
+        r#"
+//- minicore: fmt
+fn test() {
+    let foo = 0;
+    format_args!("{}", foo$0);
+}
+"#,
+        expect![[r#"
+            *foo*
+
+            ```rust
+            let foo: i32
+            ```
+        "#]],
+    );
+}
+
+#[test]
+fn format_args_implicit() {
+    check(
+        r#"
+//- minicore: fmt
+fn test() {
+let aaaaa = "foo";
+format_args!("{aaaaa$0}");
+}
+"#,
+        expect![[r#"
+            *aaaaa*
+
+            ```rust
+            let aaaaa: &str
+            ```
+        "#]],
+    );
+}
+
+#[test]
+fn format_args_implicit2() {
+    check(
+        r#"
+//- minicore: fmt
+fn test() {
+let aaaaa = "foo";
+format_args!("{$0aaaaa}");
+}
+"#,
+        expect![[r#"
+            *aaaaa*
+
+            ```rust
+            let aaaaa: &str
+            ```
+        "#]],
+    );
+}
+
+#[test]
+fn format_args_implicit_raw() {
+    check(
+        r#"
+//- minicore: fmt
+fn test() {
+let aaaaa = "foo";
+format_args!(r"{$0aaaaa}");
+}
+"#,
+        expect![[r#"
+            *aaaaa*
+
+            ```rust
+            let aaaaa: &str
+            ```
+        "#]],
+    );
+}
+
+#[test]
+fn format_args_implicit_nested() {
+    check(
+        r#"
+//- minicore: fmt
+macro_rules! foo {
+    ($($tt:tt)*) => {
+        format_args!($($tt)*)
+    }
+}
+fn test() {
+let aaaaa = "foo";
+foo!(r"{$0aaaaa}");
+}
+"#,
+        expect![[r#"
+            *aaaaa*
+
+            ```rust
+            let aaaaa: &str
+            ```
+        "#]],
+    );
+}
+
+#[test]
+fn method_call_without_parens() {
+    check(
+        r#"
+struct S;
+impl S {
+    fn foo<T>(&self, t: T) {}
+}
+
+fn main() {
+    S.foo$0;
+}
+"#,
+        expect![[r#"
+            *foo*
+
+            ```rust
+            ra_test_fixture::S
+            ```
+
+            ```rust
+            fn foo<T>(&self, t: T)
+            ```
+        "#]],
+    );
+}
+
+#[test]
+fn string_literal() {
+    check(
+        r#"
+fn main() {
+    $0"🦀\u{1f980}\\\x41";
+}
+"#,
+        expect![[r#"
+            *"🦀\u{1f980}\\\x41"*
+            ```rust
+            &str
+            ```
+            ___
+
+            value of literal: ` 🦀🦀\A `
+        "#]],
+    );
+    check(
+        r#"
+fn main() {
+    $0r"🦀\u{1f980}\\\x41";
+}
+"#,
+        expect![[r#"
+            *r"🦀\u{1f980}\\\x41"*
+            ```rust
+            &str
+            ```
+            ___
+
+            value of literal: ` 🦀\u{1f980}\\\x41 `
+        "#]],
+    );
+    check(
+        r#"
+fn main() {
+    $0r"🦀\u{1f980}\\\x41
+
+
+fsdghs";
+}
+"#,
+        expect![[r#"
+            *r"🦀\u{1f980}\\\x41
+
+
+            fsdghs"*
+            ```rust
+            &str
+            ```
+            ___
+
+            value of literal (truncated up to newline): ` 🦀\u{1f980}\\\x41 `
+        "#]],
+    );
+}
+
+#[test]
+fn cstring_literal() {
+    check(
+        r#"
+fn main() {
+    $0c"🦀\u{1f980}\\\x41";
+}
+"#,
+        expect![[r#"
+            *c"🦀\u{1f980}\\\x41"*
+            ```rust
+            &{unknown}
+            ```
+            ___
+
+            value of literal: ` 🦀🦀\A `
+        "#]],
+    );
+}
+
+#[test]
+fn rawstring_literal() {
+    check(
+        r#"
+fn main() {
+    $0r"`[^`]*`";
+}"#,
+        expect![[r#"
+            *r"`[^`]*`"*
+            ```rust
+            &str
+            ```
+            ___
+
+            value of literal: ```` `[^`]*` ````
+        "#]],
+    );
+    check(
+        r#"
+fn main() {
+    $0r"`";
+}"#,
+        expect![[r#"
+            *r"`"*
+            ```rust
+            &str
+            ```
+            ___
+
+            value of literal: `` ` ``
+        "#]],
+    );
+    check(
+        r#"
+fn main() {
+    $0r"    ";
+}"#,
+        expect![[r#"
+            *r"    "*
+            ```rust
+            &str
+            ```
+            ___
+
+            value of literal: `    `
+        "#]],
+    );
+    check(
+        r#"
+fn main() {
+    $0r" Hello World ";
+
+}"#,
+        expect![[r#"
+            *r" Hello World "*
+            ```rust
+            &str
+            ```
+            ___
+
+            value of literal: `  Hello World  `
+"#]],
+    )
+}
+
+#[test]
+fn byte_string_literal() {
+    check(
+        r#"
+fn main() {
+    $0b"\xF0\x9F\xA6\x80\\";
+}
+"#,
+        expect![[r#"
+            *b"\xF0\x9F\xA6\x80\\"*
+            ```rust
+            &[u8; 5]
+            ```
+            ___
+
+            value of literal: ` [240, 159, 166, 128, 92] `
+        "#]],
+    );
+    check(
+        r#"
+fn main() {
+    $0br"\xF0\x9F\xA6\x80\\";
+}
+"#,
+        expect![[r#"
+            *br"\xF0\x9F\xA6\x80\\"*
+            ```rust
+            &[u8; 18]
+            ```
+            ___
+
+            value of literal: ` [92, 120, 70, 48, 92, 120, 57, 70, 92, 120, 65, 54, 92, 120, 56, 48, 92, 92] `
+        "#]],
+    );
+}
+
+#[test]
+fn byte_literal() {
+    check(
+        r#"
+fn main() {
+    $0b'\xF0';
+}
+"#,
+        expect![[r#"
+            *b'\xF0'*
+            ```rust
+            u8
+            ```
+            ___
+
+            value of literal: ` 0xF0 `
+        "#]],
+    );
+    check(
+        r#"
+fn main() {
+    $0b'\\';
+}
+"#,
+        expect![[r#"
+            *b'\\'*
+            ```rust
+            u8
+            ```
+            ___
+
+            value of literal: ` 0x5C `
+        "#]],
+    );
+}
+
+#[test]
+fn char_literal() {
+    check(
+        r#"
+fn main() {
+    $0'\x41';
+}
+"#,
+        expect![[r#"
+            *'\x41'*
+            ```rust
+            char
+            ```
+            ___
+
+            value of literal: ` A `
+        "#]],
+    );
+    check(
+        r#"
+fn main() {
+    $0'\\';
+}
+"#,
+        expect![[r#"
+            *'\\'*
+            ```rust
+            char
+            ```
+            ___
+
+            value of literal: ` \ `
+        "#]],
+    );
+    check(
+        r#"
+fn main() {
+    $0'\u{1f980}';
+}
+"#,
+        expect![[r#"
+            *'\u{1f980}'*
+            ```rust
+            char
+            ```
+            ___
+
+            value of literal: ` 🦀 `
+        "#]],
+    );
+}
+
+#[test]
+fn float_literal() {
+    check(
+        r#"
+fn main() {
+    $01.0;
+}
+"#,
+        expect![[r#"
+            *1.0*
+            ```rust
+            f64
+            ```
+            ___
+
+            value of literal: ` 1 (bits: 0x3FF0000000000000) `
+        "#]],
+    );
+    check(
+        r#"
+fn main() {
+    $01.0f16;
+}
+"#,
+        expect![[r#"
+            *1.0f16*
+            ```rust
+            f16
+            ```
+            ___
+
+            value of literal: ` 1 (bits: 0x3C00) `
+        "#]],
+    );
+    check(
+        r#"
+fn main() {
+    $01.0f32;
+}
+"#,
+        expect![[r#"
+            *1.0f32*
+            ```rust
+            f32
+            ```
+            ___
+
+            value of literal: ` 1 (bits: 0x3F800000) `
+        "#]],
+    );
+    check(
+        r#"
+fn main() {
+    $01.0f128;
+}
+"#,
+        expect![[r#"
+            *1.0f128*
+            ```rust
+            f128
+            ```
+            ___
+
+            value of literal: ` 1 (bits: 0x3FFF0000000000000000000000000000) `
+        "#]],
+    );
+    check(
+        r#"
+fn main() {
+    $0134e12;
+}
+"#,
+        expect![[r#"
+            *134e12*
+            ```rust
+            f64
+            ```
+            ___
+
+            value of literal: ` 134000000000000 (bits: 0x42DE77D399980000) `
+        "#]],
+    );
+    check(
+        r#"
+fn main() {
+    $01523527134274733643531312.0;
+}
+"#,
+        expect![[r#"
+            *1523527134274733643531312.0*
+            ```rust
+            f64
+            ```
+            ___
+
+            value of literal: ` 1523527134274733600000000 (bits: 0x44F429E9249F629B) `
+        "#]],
+    );
+    check(
+        r#"
+fn main() {
+    $00.1ea123;
+}
+"#,
+        expect![[r#"
+            *0.1ea123*
+            ```rust
+            f64
+            ```
+            ___
+
+            invalid literal: invalid float literal
+        "#]],
+    );
+}
+
+#[test]
+fn int_literal() {
+    check(
+        r#"
+fn main() {
+    $034325236457856836345234;
+}
+"#,
+        expect![[r#"
+            *34325236457856836345234*
+            ```rust
+            i32
+            ```
+            ___
+
+            value of literal: ` 34325236457856836345234 (0x744C659178614489D92|0b111010001001100011001011001000101111000011000010100010010001001110110010010) `
+        "#]],
+    );
+    check(
+        r#"
+fn main() {
+    $0134_123424_21;
+}
+"#,
+        expect![[r#"
+            *134_123424_21*
+            ```rust
+            i32
+            ```
+            ___
+
+            value of literal: ` 13412342421 (0x31F701A95|0b1100011111011100000001101010010101) `
+        "#]],
+    );
+    check(
+        r#"
+fn main() {
+    $00x12423423;
+}
+"#,
+        expect![[r#"
+            *0x12423423*
+            ```rust
+            i32
+            ```
+            ___
+
+            value of literal: ` 306328611 (0x12423423|0b10010010000100011010000100011) `
+        "#]],
+    );
+    check(
+        r#"
+fn main() {
+    $00b1111_1111;
+}
+"#,
+        expect![[r#"
+            *0b1111_1111*
+            ```rust
+            i32
+            ```
+            ___
+
+            value of literal: ` 255 (0xFF|0b11111111) `
+        "#]],
+    );
+    check(
+        r#"
+fn main() {
+    $00o12345;
+}
+"#,
+        expect![[r#"
+            *0o12345*
+            ```rust
+            i32
+            ```
+            ___
+
+            value of literal: ` 5349 (0x14E5|0b1010011100101) `
+        "#]],
+    );
+    check(
+        r#"
+fn main() {
+    $00xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_F;
+}
+"#,
+        expect![[r#"
+            *0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_F*
+            ```rust
+            i32
+            ```
+            ___
+
+            invalid literal: number too large to fit in target type
+        "#]],
+    );
+}
+
+#[test]
+fn notable_local() {
+    check(
+        r#"
+#[doc(notable_trait)]
+trait Notable {
+    type Assoc;
+    type Assoc2;
+}
+
+impl Notable for u32 {
+    type Assoc = &str;
+    type Assoc2 = char;
+}
+fn main(notable$0: u32) {}
+"#,
+        expect![[r#"
+            *notable*
+
+            ```rust
+            notable: u32
+            ```
+
+            ---
+
+            Implements notable traits: Notable\<Assoc = &str, Assoc2 = char>
+
+            ---
+
+            size = 4, align = 4
+        "#]],
+    );
+}
+
+#[test]
+fn notable_foreign() {
+    check(
+        r#"
+//- minicore: future, iterator
+struct S;
+#[doc(notable_trait)]
+trait Notable {}
+impl Notable for S$0 {}
+impl core::future::Future for S {
+    type Output = u32;
+}
+impl Iterator for S {
+    type Item = S;
+}
+"#,
+        expect![[r#"
+            *S*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            struct S
+            ```
+        "#]],
+    );
+}
+
+#[test]
+fn extern_items() {
+    check(
+        r#"
+extern "C" {
+    static STATIC$0: ();
+}
+"#,
+        expect![[r#"
+            *STATIC*
+
+            ```rust
+            ra_test_fixture::<extern>
+            ```
+
+            ```rust
+            static STATIC: ()
+            ```
+        "#]],
+    );
+    check(
+        r#"
+extern "C" {
+    fn fun$0();
+}
+"#,
+        expect![[r#"
+            *fun*
+
+            ```rust
+            ra_test_fixture::<extern>
+            ```
+
+            ```rust
+            unsafe fn fun()
+            ```
+        "#]],
+    );
+    check(
+        r#"
+extern "C" {
+    type Ty$0;
+}
+"#,
+        expect![[r#"
+            *Ty*
+
+            ```rust
+            ra_test_fixture::<extern>
+            ```
+
+            ```rust
+            type Ty
+            ```
+
+            ---
+
+            size = 0, align = 1
+        "#]],
+    );
+}
+
+#[test]
+fn notable_ranged() {
+    check_hover_range(
+        r#"
+//- minicore: future, iterator
+struct S;
+#[doc(notable_trait)]
+trait Notable {}
+impl Notable for S {}
+impl core::future::Future for S {
+    type Output = u32;
+}
+impl Iterator for S {
+    type Item = S;
+}
+fn main() {
+    $0S$0;
+}
+"#,
+        expect![[r#"
+            ```rust
+            S
+            ```
+            ___
+            Implements notable traits: Notable, Future<Output = u32>, Iterator<Item = S>"#]],
+    );
+}
+
+#[test]
+fn notable_actions() {
+    check_actions(
+        r#"
+//- minicore: future, iterator
+struct S;
+struct S2;
+#[doc(notable_trait)]
+trait Notable {}
+impl Notable for S$0 {}
+impl core::future::Future for S {
+    type Output = u32;
+}
+impl Iterator for S {
+    type Item = S2;
+}
+"#,
+        expect![[r#"
+            [
+                Implementation(
+                    FilePositionWrapper {
+                        file_id: FileId(
+                            0,
+                        ),
+                        offset: 7,
+                    },
+                ),
+                GoToType(
+                    [
+                        HoverGotoTypeData {
+                            mod_path: "core::future::Future",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    1,
+                                ),
+                                full_range: 4294967295..4294967295,
+                                focus_range: 4294967295..4294967295,
+                                name: "Future",
+                                kind: Trait,
+                                container_name: "future",
+                                description: "pub trait Future",
+                            },
+                        },
+                        HoverGotoTypeData {
+                            mod_path: "core::iter::traits::iterator::Iterator",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    1,
+                                ),
+                                full_range: 4294967295..4294967295,
+                                focus_range: 4294967295..4294967295,
+                                name: "Iterator",
+                                kind: Trait,
+                                container_name: "iterator",
+                                description: "pub trait Iterator",
+                            },
+                        },
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::Notable",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 21..59,
+                                focus_range: 49..56,
+                                name: "Notable",
+                                kind: Trait,
+                                description: "trait Notable",
+                            },
+                        },
+                        HoverGotoTypeData {
+                            mod_path: "ra_test_fixture::S2",
+                            nav: NavigationTarget {
+                                file_id: FileId(
+                                    0,
+                                ),
+                                full_range: 10..20,
+                                focus_range: 17..19,
+                                name: "S2",
+                                kind: Struct,
+                                description: "struct S2",
+                            },
+                        },
+                    ],
+                ),
+            ]
+        "#]],
+    );
+}
+
+#[test]
+fn hover_lifetime_regression_16963() {
+    check(
+        r#"
+struct Pedro$0<'a> {
+    hola: &'a str
+}
+"#,
+        expect![[r#"
+            *Pedro*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            struct Pedro<'a> {
+                hola: &str,
+            }
+            ```
+
+            ---
+
+            size = 16 (0x10), align = 8, niches = 1
+        "#]],
+    )
+}
+
+#[test]
+fn hover_impl_trait_arg_self() {
+    check(
+        r#"
+trait T<Rhs = Self> {}
+fn main(a$0: impl T) {}
+"#,
+        expect![[r#"
+            *a*
+
+            ```rust
+            a: impl T + ?Sized
+            ```
+        "#]],
+    );
+}
+
+#[test]
+fn hover_struct_default_arg_self() {
+    check(
+        r#"
+struct T<Rhs = Self> {}
+fn main(a$0: T) {}
+"#,
+        expect![[r#"
+            *a*
+
+            ```rust
+            a: T
+            ```
+
+            ---
+
+            size = 0, align = 1
+        "#]],
+    );
+}
+
+#[test]
+fn hover_fn_with_impl_trait_arg() {
+    check(
+        r#"
+trait Foo {}
+impl Foo for bool {}
+fn bar<const WIDTH: u8>(_: impl Foo) {}
+fn test() {
+    let f = bar::<3>;
+    f$0(true);
+}
+"#,
+        expect![[r#"
+            *f*
+
+            ```rust
+            let f: fn bar<3>(bool)
+            ```
+        "#]],
+    );
+}
+
+#[test]
+fn issue_17871() {
+    check(
+        r#"
+trait T {
+    fn f<A>();
+}
+
+struct S {}
+impl T for S {
+    fn f<A>() {}
+}
+
+fn main() {
+    let x$0 = S::f::<i32>;
+}
+"#,
+        expect![[r#"
+            *x*
+
+            ```rust
+            let x: fn f<S, i32>()
+            ```
+
+            ---
+
+            size = 0, align = 1
+        "#]],
+    );
+}
+
+#[test]
+fn raw_keyword_different_editions() {
+    check(
+        r#"
+//- /lib1.rs crate:with_edition_2015 edition:2015
+pub fn dyn() {}
+
+//- /lib2.rs crate:with_edition_2018 edition:2018 deps:with_edition_2015 new_source_root:local
+fn foo() {
+    with_edition_2015::r#dyn$0();
+}
+    "#,
+        expect![[r#"
+            *r#dyn*
+
+            ```rust
+            with_edition_2015
+            ```
+
+            ```rust
+            pub fn r#dyn()
+            ```
+        "#]],
+    );
+
+    check(
+        r#"
+//- /lib1.rs crate:with_edition_2018 edition:2018
+pub fn r#dyn() {}
+
+//- /lib2.rs crate:with_edition_2015 edition:2015 deps:with_edition_2018 new_source_root:local
+fn foo() {
+    with_edition_2018::dyn$0();
+}
+    "#,
+        expect![[r#"
+            *dyn*
+
+            ```rust
+            with_edition_2018
+            ```
+
+            ```rust
+            pub fn dyn()
+            ```
+        "#]],
+    );
+
+    check(
+        r#"
+//- /lib1.rs crate:escaping_needlessly edition:2015
+pub fn r#dyn() {}
+
+//- /lib2.rs crate:dependent edition:2015 deps:escaping_needlessly new_source_root:local
+fn foo() {
+    escaping_needlessly::dyn$0();
+}
+    "#,
+        expect![[r#"
+            *dyn*
+
+            ```rust
+            escaping_needlessly
+            ```
+
+            ```rust
+            pub fn dyn()
+            ```
+        "#]],
+    );
+}
+
+#[test]
+fn test_hover_function_with_pat_param() {
+    check(
+        r#"fn test_1$0((start_range, end_range): (u32, u32), a: i32) {}"#,
+        expect![[r#"
+            *test_1*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            fn test_1((start_range, end_range): (u32, u32), a: i32)
+            ```
+        "#]],
+    );
+
+    // Test case with tuple pattern and mutable parameters
+    check(
+        r#"fn test_2$0((mut x, y): (i32, i32)) {}"#,
+        expect![[r#"
+            *test_2*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            fn test_2((mut x, y): (i32, i32))
+            ```
+        "#]],
+    );
+
+    // Test case with a pattern in a reference type
+    check(
+        r#"fn test_3$0(&(a, b): &(i32, i32)) {}"#,
+        expect![[r#"
+            *test_3*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            fn test_3(&(a, b): &(i32, i32))
+            ```
+        "#]],
+    );
+
+    // Test case with complex pattern (struct destructuring)
+    check(
+        r#"struct Point { x: i32, y: i32 } fn test_4$0(Point { x, y }: Point) {}"#,
+        expect![[r#"
+            *test_4*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            fn test_4(Point { x, y }: Point)
+            ```
+        "#]],
+    );
+
+    // Test case with a nested pattern
+    check(
+        r#"fn test_5$0(((a, b), c): ((i32, i32), i32)) {}"#,
+        expect![[r#"
+            *test_5*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            fn test_5(((a, b), c): ((i32, i32), i32))
+            ```
+        "#]],
+    );
+
+    // Test case with an unused variable in the pattern
+    check(
+        r#"fn test_6$0((_, y): (i32, i64)) {}"#,
+        expect![[r#"
+            *test_6*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            fn test_6((_, y): (i32, i64))
+            ```
+        "#]],
+    );
+
+    // Test case with a complex pattern involving both tuple and struct
+    check(
+        r#"struct Foo { a: i32, b: i32 } fn test_7$0((x, Foo { a, b }): (i32, Foo)) {}"#,
+        expect![[r#"
+            *test_7*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            fn test_7((x, Foo { a, b }): (i32, Foo))
+            ```
+        "#]],
+    );
+
+    // Test case with Enum and Or pattern
+    check(
+        r#"enum MyEnum { A(i32), B(i32) } fn test_8$0((MyEnum::A(x) | MyEnum::B(x)): MyEnum) {}"#,
+        expect![[r#"
+            *test_8*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            fn test_8((MyEnum::A(x) | MyEnum::B(x)): MyEnum)
+            ```
+        "#]],
+    );
+
+    // Test case with a pattern as a function parameter
+    check(
+        r#"struct Foo { a: i32, b: i32 } fn test_9$0(Foo { a, b }: Foo) {}"#,
+        expect![[r#"
+            *test_9*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            fn test_9(Foo { a, b }: Foo)
+            ```
+        "#]],
+    );
+
+    // Test case with a pattern as a function parameter with a different name
+    check(
+        r#"struct Foo { a: i32, b: i32 } fn test_10$0(Foo { a, b: b1 }: Foo) {}"#,
+        expect![[r#"
+            *test_10*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            fn test_10(Foo { a, b: b1 }: Foo)
+            ```
+        "#]],
+    );
+
+    // Test case with a pattern as a function parameter with annotations
+    check(
+        r#"struct Foo { a: i32, b: i32 } fn test_10$0(Foo { a, b: mut b }: Foo) {}"#,
+        expect![[r#"
+            *test_10*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            fn test_10(Foo { a, b: mut b }: Foo)
+            ```
+        "#]],
+    );
+}
+
+#[test]
+fn hover_path_inside_block_scope() {
+    check(
+        r#"
+mod m {
+    const _: () = {
+        mod m2 {
+            const C$0: () = ();
+        }
+    };
+}
+"#,
+        expect![[r#"
+            *C*
+
+            ```rust
+            ra_test_fixture::m::m2
+            ```
+
+            ```rust
+            const C: () = ()
+            ```
+        "#]],
+    );
+}
+
+#[test]
+fn regression_18238() {
+    check(
+        r#"
+macro_rules! foo {
+    ($name:ident) => {
+        pub static $name = Foo::new(|| {
+            $crate;
+        });
+    };
+}
+
+foo!(BAR_$0);
+"#,
+        expect![[r#"
+            *BAR_*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            pub static BAR_: {error} = Foo::new(||{
+                crate;
+            })
+            ```
+        "#]],
+    );
+}
+
+#[test]
+fn type_alias_without_docs() {
+    // Simple.
+    check(
+        r#"
+/// Docs for B
+struct B;
+
+type A$0 = B;
+"#,
+        expect![[r#"
+            *A*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            type A = B
+            ```
+
+            ---
+
+            size = 0, align = 1
+
+            ---
+
+            *This is the documentation for* `struct B`
+
+            Docs for B
+        "#]],
+    );
+
+    // Nested.
+    check(
+        r#"
+/// Docs for C
+struct C;
+
+type B = C;
+
+type A$0 = B;
+"#,
+        expect![[r#"
+            *A*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            type A = B
+            ```
+
+            ---
+
+            size = 0, align = 1
+
+            ---
+
+            *This is the documentation for* `struct C`
+
+            Docs for C
+        "#]],
+    );
+
+    // Showing the docs for aliased struct instead of intermediate type.
+    check(
+        r#"
+/// Docs for C
+struct C;
+
+/// Docs for B
+type B = C;
+
+type A$0 = B;
+"#,
+        expect![[r#"
+            *A*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            type A = B
+            ```
+
+            ---
+
+            size = 0, align = 1
+
+            ---
+
+            *This is the documentation for* `struct C`
+
+            Docs for C
+        "#]],
+    );
+
+    // No docs found.
+    check(
+        r#"
+struct C;
+
+type B = C;
+
+type A$0 = B;
+"#,
+        expect![[r#"
+            *A*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            type A = B
+            ```
+
+            ---
+
+            size = 0, align = 1
+        "#]],
+    );
+
+    // Multiple nested crate.
+    check(
+        r#"
+//- /lib.rs crate:c
+/// Docs for C
+pub struct C;
+
+//- /lib.rs crate:b deps:c
+pub use c::C;
+pub type B = C;
+
+//- /lib.rs crate:a deps:b
+pub use b::B;
+pub type A = B;
+
+//- /main.rs crate:main deps:a
+use a::A$0;
+"#,
+        expect![[r#"
+            *A*
+
+            ```rust
+            a
+            ```
+
+            ```rust
+            pub type A = B
+            ```
+
+            ---
+
+            *This is the documentation for* `pub struct C`
+
+            Docs for C
+        "#]],
+    );
+}
+
+#[test]
+fn dyn_compat() {
+    check(
+        r#"
+trait Compat$0 {}
+"#,
+        expect![[r#"
+            *Compat*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            trait Compat
+            ```
+
+            ---
+
+            Is dyn-compatible
+        "#]],
+    );
+    check(
+        r#"
+trait UnCompat$0 {
+    fn f<T>() {}
+}
+"#,
+        expect![[r#"
+            *UnCompat*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            trait UnCompat
+            ```
+
+            ---
+
+            Is not dyn-compatible due to having a method `f` that is not dispatchable due to missing a receiver
+        "#]],
+    );
+    check(
+        r#"
+trait UnCompat {
+    fn f<T>() {}
+}
+fn f<T: UnCompat$0>
+"#,
+        expect![[r#"
+            *UnCompat*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            trait UnCompat
+            ```
+        "#]],
+    );
+}
+
+#[test]
+fn issue_18613() {
+    check(
+        r#"
+fn main() {
+    struct S<T, D = bool>();
+    let x$0 = S::<()>;
+}"#,
+        expect![[r#"
+            *x*
+
+            ```rust
+            let x: fn S<()>() -> S<()>
+            ```
+
+            ---
+
+            size = 0, align = 1
+        "#]],
+    );
+
+    check(
+        r#"
+pub struct Global;
+pub struct Box<T, A = Global>(T, A);
+
+impl<T> Box<T> {
+    pub fn new(x: T) -> Self { loop {} }
+}
+
+pub struct String;
+
+fn main() {
+    let box_value$0 = Box::<String>new();
+}
+"#,
+        expect![[r#"
+            *box_value*
+
+            ```rust
+            let box_value: fn Box<String>(String, Global) -> Box<String>
+            ```
+
+            ---
+
+            size = 0, align = 1
+        "#]],
+    );
+
+    check(
+        r#"
+//- minicore: eq
+pub struct RandomState;
+pub struct HashMap<K, V, S = RandomState>(K, V, S);
+
+impl<K, V> HashMap<K, V, RandomState> {
+    pub fn new() -> HashMap<K, V, RandomState> {
+        loop {}
+    }
+}
+
+impl<K, V, S> PartialEq for HashMap<K, V, S> {
+    fn eq(&self, other: &HashMap<K, V, S>) -> bool {
+        false
+    }
+}
+
+fn main() {
+    let s$0 = HashMap::<_, u64>::ne;
+}
+"#,
+        expect![[r#"
+            *s*
+
+            ```rust
+            let s: fn ne<HashMap<{unknown}, u64>>(&HashMap<{unknown}, u64>, &HashMap<{unknown}, u64>) -> bool
+            ```
+
+            ---
+
+            size = 0, align = 1
+        "#]],
+    );
+}
+
+#[test]
+fn subst_fn() {
+    check(
+        r#"
+struct Foo<T>(T);
+impl<T> Foo<T> {
+    fn foo<U>(v: T, u: U) {}
+}
+
+fn bar() {
+    Foo::fo$0o(123, false);
+}
+        "#,
+        expect![[r#"
+            *foo*
+
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            impl<T> Foo<T>
+            fn foo<U>(v: T, u: U)
+            ```
+
+            ---
+
+            `T` = `i32`, `U` = `bool`
+        "#]],
+    );
+    check(
+        r#"
+fn foo<T>(v: T) {}
+
+fn bar() {
+    fo$0o(123);
+}
+        "#,
+        expect![[r#"
+            *foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            fn foo<T>(v: T)
+            ```
+
+            ---
+
+            `T` = `i32`
+        "#]],
+    );
+}
+
+#[test]
+fn subst_record_constructor() {
+    check(
+        r#"
+struct Foo<T> { field: T }
+
+fn bar() {
+    let v = $0Foo { field: 123 };
+}
+        "#,
+        expect![[r#"
+            *Foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            struct Foo<T> {
+                field: T,
+            }
+            ```
+
+            ---
+
+            `T` = `i32`
+        "#]],
+    );
+    check(
+        r#"
+struct Foo<T> { field: T }
+
+fn bar() {
+    let v = Foo { field: 123 };
+    let $0Foo { field: _ } = v;
+}
+        "#,
+        expect![[r#"
+            *Foo*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            struct Foo<T> {
+                field: T,
+            }
+            ```
+
+            ---
+
+            `T` = `i32`
+        "#]],
+    );
+}
+
+#[test]
+fn subst_method_call() {
+    check(
+        r#"
+struct Foo<T>(T);
+
+impl<U> Foo<U> {
+    fn bar<T>(self, v: T) {}
+}
+
+fn baz() {
+    Foo(123).bar$0("hello");
+}
+    "#,
+        expect![[r#"
+            *bar*
+
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            impl<U> Foo<U>
+            fn bar<T>(self, v: T)
+            ```
+
+            ---
+
+            `U` = `i32`, `T` = `&str`
+        "#]],
+    );
+}
+
+#[test]
+fn subst_type_alias_do_not_work() {
+    // It is very hard to support subst for type aliases properly in all places because they are eagerly evaluated.
+    // We can show the user the subst for the underlying type instead but that'll be very confusing.
+    check(
+        r#"
+struct Foo<T, U> { a: T, b: U }
+type Alias<T> = Foo<T, i32>;
+
+fn foo() {
+    let _ = Alias$0 { a: true, b: 123 };
+}
+    "#,
+        expect![[r#"
+            *Alias*
+
+            ```rust
+            ra_test_fixture
+            ```
+
+            ```rust
+            type Alias<T> = Foo<T, i32>
+            ```
+        "#]],
+    );
+}
+
+#[test]
+fn subst_self() {
+    check(
+        r#"
+trait Trait<T> {
+    fn foo<U>(&self, v: U) {}
+}
+struct Struct<T>(T);
+impl<T> Trait<i64> for Struct<T> {}
+
+fn bar() {
+    Struct(123).foo$0(true);
+}
+    "#,
+        expect![[r#"
+            *foo*
+
+            ```rust
+            ra_test_fixture::Trait
+            ```
+
+            ```rust
+            trait Trait<T>
+            fn foo<U>(&self, v: U)
+            ```
+
+            ---
+
+            `Self` = `Struct<i32>`, `T` = `i64`, `U` = `bool`
+        "#]],
+    );
+}
+
+#[test]
+fn subst_with_lifetimes_and_consts() {
+    check(
+        r#"
+struct Foo<'a, const N: usize, T>(&[T; N]);
+
+impl<'a, T, const N: usize> Foo<'a, N, T> {
+    fn foo<'b, const Z: u32, U>(&self, v: U) {}
+}
+
+fn bar() {
+    Foo(&[1i8]).fo$0o::<456, _>("");
+}
+    "#,
+        expect![[r#"
+            *foo*
+
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            impl<'a, T, const N: usize> Foo<'a, N, T>
+            fn foo<'b, const Z: u32, U>(&self, v: U)
+            ```
+
+            ---
+
+            `T` = `i8`, `U` = `&str`
+        "#]],
+    );
+}
+
+#[test]
+fn subst_field() {
+    check(
+        r#"
+struct Foo<T> { field: T }
+
+fn bar() {
+    let v = Foo { $0field: 123 };
+}
+    "#,
+        expect![[r#"
+            *field*
+
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            field: T
+            ```
+
+            ---
+
+            `T` = `i32`
+        "#]],
+    );
+    check(
+        r#"
+struct Foo<T> { field: T }
+
+fn bar() {
+    let field = 123;
+    let v = Foo { field$0 };
+}
+    "#,
+        expect![[r#"
+            *field*
+
+            ```rust
+            let field: i32
+            ```
+
+            ---
+
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            field: T
+            ```
+
+            ---
+
+            `T` = `i32`
+        "#]],
+    );
+    check(
+        r#"
+struct Foo<T> { field: T }
+
+fn bar() {
+    let v = Foo { field: 123 };
+    let Foo { field$0 } = v;
+}
+    "#,
+        expect![[r#"
+            *field*
+
+            ```rust
+            let field: i32
+            ```
+
+            ---
+
+            size = 4, align = 4
+
+            ---
+
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            field: T
+            ```
+
+            ---
+
+            `T` = `i32`
+        "#]],
+    );
+    check(
+        r#"
+struct Foo<T> { field: T }
+
+fn bar() {
+    let v = Foo { field: 123 };
+    let Foo { field$0: _ } = v;
+}
+    "#,
+        expect![[r#"
+            *field*
+
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            field: T
+            ```
+
+            ---
+
+            `T` = `i32`
+        "#]],
+    );
+    check(
+        r#"
+struct Foo<T> { field: T }
+
+fn bar() {
+    let v = Foo { field: 123 };
+    let _ = (&v).$0field;
+}
+    "#,
+        expect![[r#"
+            *field*
+
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            field: T
+            ```
+
+            ---
+
+            `T` = `i32`
+        "#]],
+    );
+    check(
+        r#"
+struct Foo<T>(T);
+
+fn bar() {
+    let v = Foo(123);
+    let _ = v.$00;
+}
+    "#,
+        expect![[r#"
+            *0*
+
+            ```rust
+            ra_test_fixture::Foo
+            ```
+
+            ```rust
+            0: T
+            ```
+
+            ---
+
+            `T` = `i32`
+        "#]],
+    );
+}
+
+#[test]
+fn i128_max() {
+    check(
+        r#"
+//- /core.rs library crate:core
+#![rustc_coherence_is_core]
+impl u128 {
+    pub const MAX: Self = 340_282_366_920_938_463_463_374_607_431_768_211_455u128;
+}
+impl i128 {
+    pub const MAX: Self = (u128::MAX >> 1) as Self;
+}
+
+//- /foo.rs crate:foo deps:core
+fn foo() {
+    let _ = i128::MAX$0;
+}
+        "#,
+        expect![
+            r#"
+            *MAX*
+
+            ```rust
+            core
+            ```
+
+            ```rust
+            pub const MAX: Self = 170141183460469231731687303715884105727 (0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF)
+            ```
+        "#
+        ],
+    );
+}
+
+#[test]
+fn test_runnables_with_snapshot_tests() {
+    check_actions(
+        r#"
+//- /lib.rs crate:foo deps:expect_test,insta,snapbox
+use expect_test::expect;
+use insta::assert_debug_snapshot;
+use snapbox::Assert;
+
+#[test]
+fn test$0() {
+    let actual = "new25";
+    expect!["new25"].assert_eq(&actual);
+    Assert::new()
+        .action_env("SNAPSHOTS")
+        .eq(actual, snapbox::str!["new25"]);
+    assert_debug_snapshot!(actual);
+}
+
+//- /lib.rs crate:expect_test
+struct Expect;
+
+impl Expect {
+    fn assert_eq(&self, actual: &str) {}
+}
+
+#[macro_export]
+macro_rules! expect {
+    ($e:expr) => Expect; // dummy
+}
+
+//- /lib.rs crate:insta
+#[macro_export]
+macro_rules! assert_debug_snapshot {
+    ($e:expr) => {}; // dummy
+}
+
+//- /lib.rs crate:snapbox
+pub struct Assert;
+
+impl Assert {
+    pub fn new() -> Self { Assert }
+
+    pub fn action_env(&self, env: &str) -> &Self { self }
+
+    pub fn eq(&self, actual: &str, expected: &str) {}
+}
+
+#[macro_export]
+macro_rules! str {
+    ($e:expr) => ""; // dummy
+}
+        "#,
+        expect![[r#"
+            [
+                Reference(
+                    FilePositionWrapper {
+                        file_id: FileId(
+                            0,
+                        ),
+                        offset: 92,
+                    },
+                ),
+                Runnable(
+                    Runnable {
+                        use_name_in_title: false,
+                        nav: NavigationTarget {
+                            file_id: FileId(
+                                0,
+                            ),
+                            full_range: 81..301,
+                            focus_range: 92..96,
+                            name: "test",
+                            kind: Function,
+                        },
+                        kind: Test {
+                            test_id: Path(
+                                "test",
+                            ),
+                            attr: TestAttr {
+                                ignore: false,
+                            },
+                        },
+                        cfg: None,
+                        update_test: UpdateTest {
+                            expect_test: true,
+                            insta: true,
+                            snapbox: true,
+                        },
+                    },
+                ),
+            ]
         "#]],
     );
 }

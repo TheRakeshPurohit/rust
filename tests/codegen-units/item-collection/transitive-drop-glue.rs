@@ -1,14 +1,13 @@
-//
-// compile-flags:-Zprint-mono-items=eager
-// compile-flags:-Zinline-in-all-cgus
+//@ compile-flags:-Zprint-mono-items=eager
+//@ compile-flags: -O
 
 #![deny(dead_code)]
-#![feature(start)]
+#![crate_type = "lib"]
 
 //~ MONO_ITEM fn std::ptr::drop_in_place::<Root> - shim(Some(Root)) @@ transitive_drop_glue-cgu.0[Internal]
-struct Root(#[allow(unused_tuple_struct_fields)] Intermediate);
+struct Root(#[allow(dead_code)] Intermediate);
 //~ MONO_ITEM fn std::ptr::drop_in_place::<Intermediate> - shim(Some(Intermediate)) @@ transitive_drop_glue-cgu.0[Internal]
-struct Intermediate(#[allow(unused_tuple_struct_fields)] Leaf);
+struct Intermediate(#[allow(dead_code)] Leaf);
 //~ MONO_ITEM fn std::ptr::drop_in_place::<Leaf> - shim(Some(Leaf)) @@ transitive_drop_glue-cgu.0[Internal]
 struct Leaf;
 
@@ -17,17 +16,17 @@ impl Drop for Leaf {
     fn drop(&mut self) {}
 }
 
-struct RootGen<T>(#[allow(unused_tuple_struct_fields)] IntermediateGen<T>);
-struct IntermediateGen<T>(#[allow(unused_tuple_struct_fields)] LeafGen<T>);
-struct LeafGen<T>(#[allow(unused_tuple_struct_fields)] T);
+struct RootGen<T>(#[allow(dead_code)] IntermediateGen<T>);
+struct IntermediateGen<T>(#[allow(dead_code)] LeafGen<T>);
+struct LeafGen<T>(#[allow(dead_code)] T);
 
 impl<T> Drop for LeafGen<T> {
     fn drop(&mut self) {}
 }
 
 //~ MONO_ITEM fn start
-#[start]
-fn start(_: isize, _: *const *const u8) -> isize {
+#[no_mangle]
+pub fn start(_: isize, _: *const *const u8) -> isize {
     let _ = Root(Intermediate(Leaf));
 
     //~ MONO_ITEM fn std::ptr::drop_in_place::<RootGen<u32>> - shim(Some(RootGen<u32>)) @@ transitive_drop_glue-cgu.0[Internal]

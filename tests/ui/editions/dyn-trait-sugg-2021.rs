@@ -1,4 +1,4 @@
-// edition:2021
+//@ edition:2021
 
 trait Foo<T> {}
 
@@ -8,5 +8,5 @@ impl<T> dyn Foo<T> {
 
 fn main() {
     Foo::hi(123);
-    //~^ ERROR trait objects must include the `dyn` keyword
+    //~^ ERROR expected a type, found a trait
 }

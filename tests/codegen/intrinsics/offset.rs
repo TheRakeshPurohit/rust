@@ -1,5 +1,4 @@
-// compile-flags: -O -C no-prepopulate-passes
-// min-llvm-version: 15.0 (because we're using opaque pointers)
+//@ compile-flags: -O -C no-prepopulate-passes
 
 #![crate_type = "lib"]
 #![feature(core_intrinsics)]

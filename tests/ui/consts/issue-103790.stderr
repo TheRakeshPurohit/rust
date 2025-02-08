@@ -29,35 +29,24 @@ LL | struct S<const S: (), const S: S = { S }>;
    |                                ^
    |
    = note: ...which immediately requires computing type of `S::S` again
-note: cycle used when computing type of `S`
+note: cycle used when computing explicit predicates of `S`
   --> $DIR/issue-103790.rs:4:1
    |
 LL | struct S<const S: (), const S: S = { S }>;
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: see https://rustc-dev-guide.rust-lang.org/overview.html#queries and https://rustc-dev-guide.rust-lang.org/query.html for more information
 
-error[E0391]: cycle detected when computing type of `S`
-  --> $DIR/issue-103790.rs:4:1
+error: `()` is forbidden as the type of a const generic parameter
+  --> $DIR/issue-103790.rs:4:19
    |
 LL | struct S<const S: (), const S: S = { S }>;
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |                   ^^
    |
-note: ...which requires computing type of `S::S`...
-  --> $DIR/issue-103790.rs:4:32
+   = note: the only supported types are integers, `bool`, and `char`
+help: add `#![feature(adt_const_params)]` to the crate attributes to enable more complex and user defined types
    |
-LL | struct S<const S: (), const S: S = { S }>;
-   |                                ^
-   = note: ...which again requires computing type of `S`, completing the cycle
-note: cycle used when collecting item types in top-level module
-  --> $DIR/issue-103790.rs:1:1
+LL + #![feature(adt_const_params)]
    |
-LL | / #![feature(generic_const_exprs)]
-LL | | #![allow(incomplete_features)]
-LL | |
-LL | | struct S<const S: (), const S: S = { S }>;
-...  |
-LL | |
-LL | | fn main() {}
-   | |____________^
 
 error: aborting due to 4 previous errors
 

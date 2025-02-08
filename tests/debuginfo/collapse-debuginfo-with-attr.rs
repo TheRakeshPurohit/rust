@@ -1,10 +1,9 @@
-// ignore-lldb
-#![feature(collapse_debuginfo)]
+//@ ignore-lldb
 
 // Test that line numbers are replaced with those of the outermost expansion site when the
 // `collapse_debuginfo` feature is active and the attribute is provided.
 
-// compile-flags:-g
+//@ compile-flags:-g
 
 // === GDB TESTS ===================================================================================
 
@@ -33,7 +32,7 @@ fn four() {
     println!("four");
 }
 
-#[collapse_debuginfo]
+#[collapse_debuginfo(yes)]
 macro_rules! outer {
     ($b:block) => {
         one();
@@ -42,7 +41,7 @@ macro_rules! outer {
     };
 }
 
-#[collapse_debuginfo]
+#[collapse_debuginfo(yes)]
 macro_rules! inner {
     () => {
         two();

@@ -1,12 +1,20 @@
 //
-// no-system-llvm
-// compile-flags: -O
-#![crate_type="lib"]
+//@ compile-flags: -O
+#![crate_type = "lib"]
 
-pub enum Three { A, B, C }
+pub enum Three {
+    A,
+    B,
+    C,
+}
 
 #[repr(u16)]
-pub enum Four { A, B, C, D }
+pub enum Four {
+    A,
+    B,
+    C,
+    D,
+}
 
 #[no_mangle]
 pub fn three_valued(x: Three) -> Three {

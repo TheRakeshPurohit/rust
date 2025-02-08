@@ -1,8 +1,7 @@
-// build-pass
+//@ build-pass
 #![allow(dead_code)]
 #![allow(non_upper_case_globals)]
 
-// pretty-expanded FIXME #23616
 
 static foo: [usize; 3] = [1, 2, 3];
 

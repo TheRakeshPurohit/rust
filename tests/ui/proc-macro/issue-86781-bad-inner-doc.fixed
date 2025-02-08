@@ -1,5 +1,5 @@
-// aux-build:test-macros.rs
-// run-rustfix
+//@ proc-macro: test-macros.rs
+//@ run-rustfix
 
 #[macro_use]
 extern crate test_macros;

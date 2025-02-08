@@ -2,12 +2,6 @@
 #![feature(generic_const_exprs)]
 #![allow(incomplete_features)]
 
-#![warn(private_interfaces)]
-
-// In this test both old and new private-in-public diagnostic were emitted.
-// Old diagnostic will be deleted soon.
-// See https://rust-lang.github.io/rfcs/2145-type-privacy.html.
-
 pub struct Const<const U: u8>;
 
 pub trait Trait {
@@ -15,12 +9,14 @@ pub trait Trait {
     fn assoc_fn() -> Self::AssocTy;
 }
 
-impl<const U: u8> Trait for Const<U> // OK, trait impl predicates
+impl<const U: u8> Trait for Const<U>
 where
-    Const<{ my_const_fn(U) }>: ,
+    // OK, trait impl predicates
+    Const<{ my_const_fn(U) }>:,
 {
     type AssocTy = Const<{ my_const_fn(U) }>;
     //~^ ERROR private type
+    //~| ERROR private type
     fn assoc_fn() -> Self::AssocTy {
         Const
     }

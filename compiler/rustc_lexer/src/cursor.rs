@@ -24,6 +24,10 @@ impl<'a> Cursor<'a> {
         }
     }
 
+    pub fn as_str(&self) -> &'a str {
+        self.chars.as_str()
+    }
+
     /// Returns the last eaten symbol (or `'\0'` in release builds).
     /// (For debug assertions only.)
     pub(crate) fn prev(&self) -> char {
@@ -42,7 +46,7 @@ impl<'a> Cursor<'a> {
     /// If requested position doesn't exist, `EOF_CHAR` is returned.
     /// However, getting `EOF_CHAR` doesn't always mean actual end of file,
     /// it should be checked with `is_eof` method.
-    pub(crate) fn first(&self) -> char {
+    pub fn first(&self) -> char {
         // `.next()` optimizes better than `.nth(0)`
         self.chars.clone().next().unwrap_or(EOF_CHAR)
     }
@@ -51,6 +55,15 @@ impl<'a> Cursor<'a> {
     pub(crate) fn second(&self) -> char {
         // `.next()` optimizes better than `.nth(1)`
         let mut iter = self.chars.clone();
+        iter.next();
+        iter.next().unwrap_or(EOF_CHAR)
+    }
+
+    /// Peeks the third symbol from the input stream without consuming it.
+    pub fn third(&self) -> char {
+        // `.next()` optimizes better than `.nth(1)`
+        let mut iter = self.chars.clone();
+        iter.next();
         iter.next();
         iter.next().unwrap_or(EOF_CHAR)
     }
@@ -88,6 +101,13 @@ impl<'a> Cursor<'a> {
         // LLVM can inline all of this and compile it down to fast iteration over bytes.
         while predicate(self.first()) && !self.is_eof() {
             self.bump();
+        }
+    }
+
+    pub(crate) fn eat_until(&mut self, byte: u8) {
+        self.chars = match memchr::memchr(byte, self.as_str().as_bytes()) {
+            Some(index) => self.as_str()[index..].chars(),
+            None => "".chars(),
         }
     }
 }

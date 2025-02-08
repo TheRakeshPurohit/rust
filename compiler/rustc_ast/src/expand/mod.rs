@@ -1,10 +1,14 @@
 //! Definitions shared by macros / syntax extensions and e.g. `rustc_middle`.
 
-use rustc_span::{def_id::DefId, symbol::Ident};
+use rustc_macros::{Decodable, Encodable, HashStable_Generic};
+use rustc_span::Ident;
+use rustc_span::def_id::DefId;
 
 use crate::MetaItem;
 
 pub mod allocator;
+pub mod autodiff_attrs;
+pub mod typetree;
 
 #[derive(Debug, Clone, Encodable, Decodable, HashStable_Generic)]
 pub struct StrippedCfgItem<ModId = DefId> {

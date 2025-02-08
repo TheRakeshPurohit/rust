@@ -1,35 +1,38 @@
 //! This module contains `HashStable` implementations for various data types
 //! from `rustc_middle::ty` in no particular order.
 
-use crate::middle::region;
-use crate::mir;
-use crate::ty;
-use crate::ty::fast_reject::SimplifiedType;
+use std::cell::RefCell;
+use std::ptr;
+
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::FxHashMap;
-use rustc_data_structures::stable_hasher::HashingControls;
-use rustc_data_structures::stable_hasher::{HashStable, StableHasher, ToStableHashKey};
+use rustc_data_structures::stable_hasher::{
+    HashStable, HashingControls, StableHasher, ToStableHashKey,
+};
 use rustc_query_system::ich::StableHashingContext;
-use std::cell::RefCell;
+use tracing::trace;
 
-impl<'a, 'tcx, T> HashStable<StableHashingContext<'a>> for &'tcx ty::List<T>
+use crate::middle::region;
+use crate::{mir, ty};
+
+impl<'a, 'tcx, H, T> HashStable<StableHashingContext<'a>> for &'tcx ty::list::RawList<H, T>
 where
     T: HashStable<StableHashingContext<'a>>,
 {
     fn hash_stable(&self, hcx: &mut StableHashingContext<'a>, hasher: &mut StableHasher) {
         thread_local! {
-            static CACHE: RefCell<FxHashMap<(usize, usize, HashingControls), Fingerprint>> =
+            static CACHE: RefCell<FxHashMap<(*const (), HashingControls), Fingerprint>> =
                 RefCell::new(Default::default());
         }
 
         let hash = CACHE.with(|cache| {
-            let key = (self.as_ptr() as usize, self.len(), hcx.hashing_controls());
+            let key = (ptr::from_ref(*self).cast::<()>(), hcx.hashing_controls());
             if let Some(&hash) = cache.borrow().get(&key) {
                 return hash;
             }
 
             let mut hasher = StableHasher::new();
-            (&self[..]).hash_stable(hcx, &mut hasher);
+            self[..].hash_stable(hcx, &mut hasher);
 
             let hash: Fingerprint = hasher.finish();
             cache.borrow_mut().insert(key, hash);
@@ -40,7 +43,7 @@ where
     }
 }
 
-impl<'a, 'tcx, T> ToStableHashKey<StableHashingContext<'a>> for &'tcx ty::List<T>
+impl<'a, 'tcx, H, T> ToStableHashKey<StableHashingContext<'a>> for &'tcx ty::list::RawList<H, T>
 where
     T: HashStable<StableHashingContext<'a>>,
 {
@@ -55,19 +58,7 @@ where
     }
 }
 
-impl<'a> ToStableHashKey<StableHashingContext<'a>> for SimplifiedType {
-    type KeyType = Fingerprint;
-
-    #[inline]
-    fn to_stable_hash_key(&self, hcx: &StableHashingContext<'a>) -> Fingerprint {
-        let mut hasher = StableHasher::new();
-        let mut hcx: StableHashingContext<'a> = hcx.clone();
-        self.hash_stable(&mut hcx, &mut hasher);
-        hasher.finish()
-    }
-}
-
-impl<'a, 'tcx> HashStable<StableHashingContext<'a>> for ty::subst::GenericArg<'tcx> {
+impl<'a, 'tcx> HashStable<StableHashingContext<'a>> for ty::GenericArg<'tcx> {
     fn hash_stable(&self, hcx: &mut StableHashingContext<'a>, hasher: &mut StableHasher) {
         self.unpack().hash_stable(hcx, hasher);
     }
@@ -81,6 +72,12 @@ impl<'a> HashStable<StableHashingContext<'a>> for mir::interpret::AllocId {
             let tcx = tcx.expect("can't hash AllocIds during hir lowering");
             tcx.try_get_global_alloc(*self).hash_stable(hcx, hasher);
         });
+    }
+}
+
+impl<'a> HashStable<StableHashingContext<'a>> for mir::interpret::CtfeProvenance {
+    fn hash_stable(&self, hcx: &mut StableHashingContext<'a>, hasher: &mut StableHasher) {
+        self.into_parts().hash_stable(hcx, hasher);
     }
 }
 

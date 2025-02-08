@@ -10,8 +10,9 @@ trait Trait {
 }
 
 #[rustc_variance]
-struct Foo<T: Trait> { //~ ERROR [o]
+struct Foo<T: Trait> { //~ ERROR [T: o]
     field: [u8; <T as Trait>::Const]
+    //~^ ERROR: unconstrained generic constant
 }
 
 fn main() { }

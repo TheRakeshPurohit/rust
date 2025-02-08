@@ -1,16 +1,15 @@
-// run-pass
-// ignore-arm
-// ignore-aarch64
-// ignore-mips
-// ignore-mips64
-// ignore-sparc
-// ignore-sparc64
-// ignore-loongarch64
-// ignore-wasm
-// ignore-emscripten no processes
-// ignore-sgx no processes
-// ignore-fuchsia no exception handler registered for segfault
-// ignore-nto Crash analysis impossible at SIGSEGV in QNX Neutrino
+//@ revisions: aarch64 x32 x64
+//@ run-pass
+//@[aarch64] only-aarch64
+//@[x32] only-x86
+//@[x64] only-x86_64
+//@ needs-subprocess
+//@ ignore-fuchsia no exception handler registered for segfault
+//@ ignore-nto Crash analysis impossible at SIGSEGV in QNX Neutrino
+//@ ignore-ios Stack probes are enabled, but the SIGSEGV handler isn't
+//@ ignore-tvos Stack probes are enabled, but the SIGSEGV handler isn't
+//@ ignore-watchos Stack probes are enabled, but the SIGSEGV handler isn't
+//@ ignore-visionos Stack probes are enabled, but the SIGSEGV handler isn't
 
 use std::env;
 use std::mem::MaybeUninit;

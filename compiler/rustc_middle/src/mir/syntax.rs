@@ -3,27 +3,23 @@
 //! This is in a dedicated file so that changes to this file can be reviewed more carefully.
 //! The intention is that this file only contains datatype declarations, no code.
 
-use super::{BasicBlock, Constant, Local, SwitchTargets, UserTypeProjection};
-
-use crate::mir::coverage::{CodeRegion, CoverageKind};
-use crate::traits::Reveal;
-use crate::ty::adjustment::PointerCast;
-use crate::ty::subst::SubstsRef;
-use crate::ty::{self, List, Ty};
-use crate::ty::{Region, UserTypeAnnotationIndex};
-
-use rustc_ast::{InlineAsmOptions, InlineAsmTemplatePiece};
+use rustc_abi::{FieldIdx, VariantIdx};
+use rustc_ast::{InlineAsmOptions, InlineAsmTemplatePiece, Mutability};
+use rustc_data_structures::packed::Pu128;
+use rustc_hir::CoroutineKind;
 use rustc_hir::def_id::DefId;
-use rustc_hir::{self as hir};
-use rustc_hir::{self, GeneratorKind};
 use rustc_index::IndexVec;
-use rustc_target::abi::{FieldIdx, VariantIdx};
-
-use rustc_ast::Mutability;
+use rustc_macros::{HashStable, TyDecodable, TyEncodable, TypeFoldable, TypeVisitable};
 use rustc_span::def_id::LocalDefId;
-use rustc_span::symbol::Symbol;
-use rustc_span::Span;
+use rustc_span::source_map::Spanned;
+use rustc_span::{Span, Symbol};
 use rustc_target::asm::InlineAsmRegOrRegClass;
+use smallvec::SmallVec;
+
+use super::{BasicBlock, Const, Local, UserTypeProjection};
+use crate::mir::coverage::CoverageKind;
+use crate::ty::adjustment::PointerCoercion;
+use crate::ty::{self, GenericArgsRef, List, Region, Ty, UserTypeAnnotationIndex};
 
 /// Represents the "flavors" of MIR.
 ///
@@ -81,10 +77,10 @@ pub enum MirPhase {
     ///    that Rust itself has them. Where exactly these are is generally subject to change, and so we
     ///    don't document this here. Runtime MIR has most retags explicit (though implicit retags
     ///    can still occur at `Rvalue::{Ref,AddrOf}`).
-    ///  - Generator bodies: In analysis MIR, locals may actually be behind a pointer that user code has
-    ///    access to. This occurs in generator bodies. Such locals do not behave like other locals,
+    ///  - Coroutine bodies: In analysis MIR, locals may actually be behind a pointer that user code has
+    ///    access to. This occurs in coroutine bodies. Such locals do not behave like other locals,
     ///    because they eg may be aliased in surprising ways. Runtime MIR has no such special locals -
-    ///    all generator bodies are lowered and so all places that look like locals really are locals.
+    ///    all coroutine bodies are lowered and so all places that look like locals really are locals.
     ///
     /// Also note that the lint pass which reports eg `200_u8 + 200_u8` as an error is run as a part
     /// of analysis to runtime MIR lowering. To ensure lints are reported reliably, this means that
@@ -103,13 +99,6 @@ impl MirPhase {
             MirPhase::Runtime(RuntimePhase::Optimized) => "runtime-optimized",
         }
     }
-
-    pub fn reveal(&self) -> Reveal {
-        match *self {
-            MirPhase::Built | MirPhase::Analysis(_) => Reveal::UserFacing,
-            MirPhase::Runtime(_) => Reveal::All,
-        }
-    }
 }
 
 /// See [`MirPhase::Analysis`].
@@ -122,7 +111,11 @@ pub enum AnalysisPhase {
     /// * [`TerminatorKind::FalseEdge`]
     /// * [`StatementKind::FakeRead`]
     /// * [`StatementKind::AscribeUserType`]
-    /// * [`Rvalue::Ref`] with `BorrowKind::Shallow`
+    /// * [`StatementKind::Coverage`] with [`CoverageKind::BlockMarker`] or [`CoverageKind::SpanMarker`]
+    /// * [`Rvalue::Ref`] with `BorrowKind::Fake`
+    /// * [`CastKind::PointerCoercion`] with any of the following:
+    ///   * [`PointerCoercion::ArrayToPointer`]
+    ///   * [`PointerCoercion::MutToConstPointer`]
     ///
     /// Furthermore, `Deref` projections must be the first projection within any place (if they
     /// appear at all)
@@ -136,8 +129,9 @@ pub enum RuntimePhase {
     /// In addition to the semantic changes, beginning with this phase, the following variants are
     /// disallowed:
     /// * [`TerminatorKind::Yield`]
-    /// * [`TerminatorKind::GeneratorDrop`]
+    /// * [`TerminatorKind::CoroutineDrop`]
     /// * [`Rvalue::Aggregate`] for any `AggregateKind` except `Array`
+    /// * [`PlaceElem::OpaqueCast`]
     ///
     /// And the following variants are allowed:
     /// * [`StatementKind::Retag`]
@@ -161,13 +155,16 @@ pub enum BorrowKind {
     /// Data must be immutable and is aliasable.
     Shared,
 
-    /// The immediately borrowed place must be immutable, but projections from
-    /// it don't need to be. For example, a shallow borrow of `a.b` doesn't
-    /// conflict with a mutable borrow of `a.b.c`.
+    /// An immutable, aliasable borrow that is discarded after borrow-checking. Can behave either
+    /// like a normal shared borrow or like a special shallow borrow (see [`FakeBorrowKind`]).
     ///
-    /// This is used when lowering matches: when matching on a place we want to
-    /// ensure that place have the same value from the start of the match until
-    /// an arm is selected. This prevents this code from compiling:
+    /// This is used when lowering index expressions and matches. This is used to prevent code like
+    /// the following from compiling:
+    /// ```compile_fail,E0510
+    /// let mut x: &[_] = &[[0, 1]];
+    /// let y: &[_] = &[];
+    /// let _ = x[0][{x = y; 1}];
+    /// ```
     /// ```compile_fail,E0510
     /// let mut x = &Some(0);
     /// match *x {
@@ -176,12 +173,72 @@ pub enum BorrowKind {
     ///     Some(_) => (),
     /// }
     /// ```
-    /// This can't be a shared borrow because mutably borrowing (*x as Some).0
-    /// should not prevent `if let None = x { ... }`, for example, because the
-    /// mutating `(*x as Some).0` can't affect the discriminant of `x`.
     /// We can also report errors with this kind of borrow differently.
-    Shallow,
+    Fake(FakeBorrowKind),
 
+    /// Data is mutable and not aliasable.
+    Mut { kind: MutBorrowKind },
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, TyEncodable, TyDecodable)]
+#[derive(Hash, HashStable)]
+pub enum RawPtrKind {
+    Mut,
+    Const,
+    /// Creates a raw pointer to a place that will only be used to access its metadata,
+    /// not the data behind the pointer. Note that this limitation is *not* enforced
+    /// by the validator.
+    ///
+    /// The borrow checker allows overlap of these raw pointers with references to the
+    /// data. This is sound even if the pointer is "misused" since any such use is anyway
+    /// unsafe. In terms of the operational semantics (i.e., Miri), this is equivalent
+    /// to `RawPtrKind::Mut`, but will never incur a retag.
+    FakeForPtrMetadata,
+}
+
+impl From<Mutability> for RawPtrKind {
+    fn from(other: Mutability) -> Self {
+        match other {
+            Mutability::Mut => RawPtrKind::Mut,
+            Mutability::Not => RawPtrKind::Const,
+        }
+    }
+}
+
+impl RawPtrKind {
+    pub fn is_fake(self) -> bool {
+        match self {
+            RawPtrKind::Mut | RawPtrKind::Const => false,
+            RawPtrKind::FakeForPtrMetadata => true,
+        }
+    }
+
+    pub fn to_mutbl_lossy(self) -> Mutability {
+        match self {
+            RawPtrKind::Mut => Mutability::Mut,
+            RawPtrKind::Const => Mutability::Not,
+
+            // We have no type corresponding to a fake borrow, so use
+            // `*const` as an approximation.
+            RawPtrKind::FakeForPtrMetadata => Mutability::Not,
+        }
+    }
+
+    pub fn ptr_str(self) -> &'static str {
+        match self {
+            RawPtrKind::Mut => "mut",
+            RawPtrKind::Const => "const",
+            RawPtrKind::FakeForPtrMetadata => "const (fake)",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, TyEncodable, TyDecodable)]
+#[derive(Hash, HashStable)]
+pub enum MutBorrowKind {
+    Default,
+    /// This borrow arose from method-call auto-ref. (i.e., `adjustment::Adjust::Borrow`)
+    TwoPhaseBorrow,
     /// Data must be immutable but not aliasable. This kind of borrow
     /// cannot currently be expressed by the user and is used only in
     /// implicit closure bindings. It is needed when the closure is
@@ -216,23 +273,65 @@ pub enum BorrowKind {
     /// user code, if awkward, but extra weird for closures, since the
     /// borrow is hidden.
     ///
-    /// So we introduce a "unique imm" borrow -- the referent is
-    /// immutable, but not aliasable. This solves the problem. For
-    /// simplicity, we don't give users the way to express this
-    /// borrow, it's just used when translating closures.
+    /// So we introduce a `ClosureCapture` borrow -- user will not have to mark the variable
+    /// containing the mutable reference as `mut`, as they didn't ever
+    /// intend to mutate the mutable reference itself. We still mutable capture it in order to
+    /// mutate the pointed value through it (but not mutating the reference itself).
     ///
-    // FIXME(#112072): This is wrong. Unique borrows are mutable borrows except
-    // that they do not require their pointee to be marked as a mutable.
-    // They should still be treated as mutable borrows in every other way,
-    // e.g. for variance or overlap checking.
-    Unique,
+    /// This solves the problem. For simplicity, we don't give users the way to express this
+    /// borrow, it's just used when translating closures.
+    ClosureCapture,
+}
 
-    /// Data is mutable and not aliasable.
-    Mut {
-        /// `true` if this borrow arose from method-call auto-ref
-        /// (i.e., `adjustment::Adjust::Borrow`).
-        allow_two_phase_borrow: bool,
-    },
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, TyEncodable, TyDecodable)]
+#[derive(Hash, HashStable)]
+pub enum FakeBorrowKind {
+    /// A shared shallow borrow. The immediately borrowed place must be immutable, but projections
+    /// from it don't need to be. For example, a shallow borrow of `a.b` doesn't conflict with a
+    /// mutable borrow of `a.b.c`.
+    ///
+    /// This is used when lowering matches: when matching on a place we want to ensure that place
+    /// have the same value from the start of the match until an arm is selected. This prevents this
+    /// code from compiling:
+    /// ```compile_fail,E0510
+    /// let mut x = &Some(0);
+    /// match *x {
+    ///     None => (),
+    ///     Some(_) if { x = &None; false } => (),
+    ///     Some(_) => (),
+    /// }
+    /// ```
+    /// This can't be a shared borrow because mutably borrowing `(*x as Some).0` should not checking
+    /// the discriminant or accessing other variants, because the mutating `(*x as Some).0` can't
+    /// affect the discriminant of `x`. E.g. the following is allowed:
+    /// ```rust
+    /// let mut x = Some(0);
+    /// match x {
+    ///     Some(_)
+    ///         if {
+    ///             if let Some(ref mut y) = x {
+    ///                 *y += 1;
+    ///             };
+    ///             true
+    ///         } => {}
+    ///     _ => {}
+    /// }
+    /// ```
+    Shallow,
+    /// A shared (deep) borrow. Data must be immutable and is aliasable.
+    ///
+    /// This is used when lowering deref patterns, where shallow borrows wouldn't prevent something
+    /// like:
+    // ```compile_fail
+    // let mut b = Box::new(false);
+    // match b {
+    //     deref!(true) => {} // not reached because `*b == false`
+    //     _ if { *b = true; false } => {} // not reached because the guard is `false`
+    //     deref!(false) => {} // not reached because the guard changed it
+    //     // UB because we reached the unreachable.
+    // }
+    // ```
+    Deep,
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -289,7 +388,7 @@ pub enum StatementKind<'tcx> {
 
     /// Write the discriminant for a variant to the enum Place.
     ///
-    /// This is permitted for both generators and ADTs. This does not necessarily write to the
+    /// This is permitted for both coroutines and ADTs. This does not necessarily write to the
     /// entire place; instead, it writes to the minimum set of bytes as required by the layout for
     /// the type.
     SetDiscriminant { place: Box<Place<'tcx>>, variant_index: VariantIdx },
@@ -304,16 +403,19 @@ pub enum StatementKind<'tcx> {
     /// At any point during the execution of a function, each local is either allocated or
     /// unallocated. Except as noted below, all locals except function parameters are initially
     /// unallocated. `StorageLive` statements cause memory to be allocated for the local while
-    /// `StorageDead` statements cause the memory to be freed. Using a local in any way (not only
-    /// reading/writing from it) while it is unallocated is UB.
+    /// `StorageDead` statements cause the memory to be freed. In other words,
+    /// `StorageLive`/`StorageDead` act like the heap operations `allocate`/`deallocate`, but for
+    /// stack-allocated local variables. Using a local in any way (not only reading/writing from it)
+    /// while it is unallocated is UB.
     ///
     /// Some locals have no `StorageLive` or `StorageDead` statements within the entire MIR body.
     /// These locals are implicitly allocated for the full duration of the function. There is a
     /// convenience method at `rustc_mir_dataflow::storage::always_storage_live_locals` for
     /// computing these locals.
     ///
-    /// If the local is already allocated, calling `StorageLive` again is UB. However, for an
-    /// unallocated local an additional `StorageDead` all is simply a nop.
+    /// If the local is already allocated, calling `StorageLive` again will implicitly free the
+    /// local and then allocate fresh uninitilized memory. If a local is already deallocated,
+    /// calling `StorageDead` again is a NOP.
     StorageLive(Local),
 
     /// See `StorageLive` above.
@@ -337,7 +439,7 @@ pub enum StatementKind<'tcx> {
     /// `PlaceMention(PLACE)`.
     ///
     /// When executed at runtime, this computes the given place, but then discards
-    /// it without doing a load. It is UB if the place is not pointing to live memory.
+    /// it without doing a load. `let _ = *ptr;` is fine even if the pointer is dangling.
     PlaceMention(Box<Place<'tcx>>),
 
     /// Encodes a user's type ascription. These need to be preserved
@@ -358,12 +460,24 @@ pub enum StatementKind<'tcx> {
     /// Disallowed after drop elaboration.
     AscribeUserType(Box<(Place<'tcx>, UserTypeProjection)>, ty::Variance),
 
-    /// Marks the start of a "coverage region", injected with '-Cinstrument-coverage'. A
-    /// `Coverage` statement carries metadata about the coverage region, used to inject a coverage
-    /// map into the binary. If `Coverage::kind` is a `Counter`, the statement also generates
-    /// executable code, to increment a counter variable at runtime, each time the code region is
-    /// executed.
-    Coverage(Box<Coverage>),
+    /// Carries control-flow-sensitive information injected by `-Cinstrument-coverage`,
+    /// such as where to generate physical coverage-counter-increments during codegen.
+    ///
+    /// Coverage statements are used in conjunction with the coverage mappings and other
+    /// information stored in the function's
+    /// [`mir::Body::function_coverage_info`](crate::mir::Body::function_coverage_info).
+    /// (For inlined MIR, take care to look up the *original function's* coverage info.)
+    ///
+    /// Interpreters and codegen backends that don't support coverage instrumentation
+    /// can usually treat this as a no-op.
+    Coverage(
+        // Coverage statements are unlikely to ever contain type information in
+        // the foreseeable future, so excluding them from TypeFoldable/TypeVisitable
+        // avoids some unhelpful derive boilerplate.
+        #[type_foldable(identity)]
+        #[type_visitable(ignore)]
+        CoverageKind,
+    ),
 
     /// Denotes a call to an intrinsic that does not require an unwind path and always returns.
     /// This avoids adding a new block and a terminator for simple intrinsics.
@@ -377,6 +491,41 @@ pub enum StatementKind<'tcx> {
 
     /// No-op. Useful for deleting instructions without affecting statement indices.
     Nop,
+
+    /// Marker statement indicating where `place` would be dropped.
+    /// This is semantically equivalent to `Nop`, so codegen and MIRI should interpret this
+    /// statement as such.
+    /// The only use case of this statement is for linting in MIR to detect temporary lifetime
+    /// changes.
+    BackwardIncompatibleDropHint {
+        /// Place to drop
+        place: Box<Place<'tcx>>,
+        /// Reason for backward incompatibility
+        reason: BackwardIncompatibleDropReason,
+    },
+}
+
+impl StatementKind<'_> {
+    /// Returns a simple string representation of a `StatementKind` variant, independent of any
+    /// values it might hold (e.g. `StatementKind::Assign` always returns `"Assign"`).
+    pub const fn name(&self) -> &'static str {
+        match self {
+            StatementKind::Assign(..) => "Assign",
+            StatementKind::FakeRead(..) => "FakeRead",
+            StatementKind::SetDiscriminant { .. } => "SetDiscriminant",
+            StatementKind::Deinit(..) => "Deinit",
+            StatementKind::StorageLive(..) => "StorageLive",
+            StatementKind::StorageDead(..) => "StorageDead",
+            StatementKind::Retag(..) => "Retag",
+            StatementKind::PlaceMention(..) => "PlaceMention",
+            StatementKind::AscribeUserType(..) => "AscribeUserType",
+            StatementKind::Coverage(..) => "Coverage",
+            StatementKind::Intrinsic(..) => "Intrinsic",
+            StatementKind::ConstEvalCounter => "ConstEvalCounter",
+            StatementKind::Nop => "Nop",
+            StatementKind::BackwardIncompatibleDropHint { .. } => "BackwardIncompatibleDropHint",
+        }
+    }
 }
 
 #[derive(
@@ -413,17 +562,6 @@ pub enum NonDivergingIntrinsic<'tcx> {
     /// **Needs clarification**: Is this typed or not, ie is there a typed load and store involved?
     /// I vaguely remember Ralf saying somewhere that he thought it should not be.
     CopyNonOverlapping(CopyNonOverlapping<'tcx>),
-}
-
-impl std::fmt::Display for NonDivergingIntrinsic<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Assume(op) => write!(f, "assume({op:?})"),
-            Self::CopyNonOverlapping(CopyNonOverlapping { src, dst, count }) => {
-                write!(f, "copy_nonoverlapping(dst = {dst:?}, src = {src:?}, count = {count:?})")
-            }
-        }
-    }
 }
 
 /// Describes what kind of retag is to be performed.
@@ -498,18 +636,56 @@ pub enum FakeReadCause {
 
 #[derive(Clone, Debug, PartialEq, TyEncodable, TyDecodable, Hash, HashStable)]
 #[derive(TypeFoldable, TypeVisitable)]
-pub struct Coverage {
-    pub kind: CoverageKind,
-    pub code_region: Option<CodeRegion>,
-}
-
-#[derive(Clone, Debug, PartialEq, TyEncodable, TyDecodable, Hash, HashStable)]
-#[derive(TypeFoldable, TypeVisitable)]
 pub struct CopyNonOverlapping<'tcx> {
     pub src: Operand<'tcx>,
     pub dst: Operand<'tcx>,
     /// Number of elements to copy from src to dest, not bytes.
     pub count: Operand<'tcx>,
+}
+
+/// Represents how a [`TerminatorKind::Call`] was constructed.
+/// Used only for diagnostics.
+#[derive(Clone, Copy, TyEncodable, TyDecodable, Debug, PartialEq, Hash, HashStable)]
+#[derive(TypeFoldable, TypeVisitable)]
+pub enum CallSource {
+    /// This came from something such as `a > b` or `a + b`. In THIR, if `from_hir_call`
+    /// is false then this is the desugaring.
+    OverloadedOperator,
+    /// This was from comparison generated by a match, used by const-eval for better errors
+    /// when the comparison cannot be done in compile time.
+    ///
+    /// (see <https://github.com/rust-lang/rust/issues/90237>)
+    MatchCmp,
+    /// Other types of desugaring that did not come from the HIR, but we don't care about
+    /// for diagnostics (yet).
+    Misc,
+    /// Normal function call, no special source
+    Normal,
+}
+
+impl CallSource {
+    pub fn from_hir_call(self) -> bool {
+        matches!(self, CallSource::Normal)
+    }
+}
+
+#[derive(Clone, Copy, Debug, TyEncodable, TyDecodable, Hash, HashStable, PartialEq)]
+#[derive(TypeFoldable, TypeVisitable)]
+/// The macro that an inline assembly block was created by
+pub enum InlineAsmMacro {
+    /// The `asm!` macro
+    Asm,
+    /// The `naked_asm!` macro
+    NakedAsm,
+}
+
+impl InlineAsmMacro {
+    pub const fn diverges(self, options: InlineAsmOptions) -> bool {
+        match self {
+            InlineAsmMacro::Asm => options.contains(InlineAsmOptions::NORETURN),
+            InlineAsmMacro::NakedAsm => true,
+        }
+    }
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -567,13 +743,13 @@ pub enum TerminatorKind<'tcx> {
     ///
     /// Only permitted in cleanup blocks. `Resume` is not permitted with `-C unwind=abort` after
     /// deaggregation runs.
-    Resume,
+    UnwindResume,
 
     /// Indicates that the landing pad is finished and that the process should terminate.
     ///
     /// Used to prevent unwinding for foreign items or with `-C unwind=abort`. Only permitted in
     /// cleanup blocks.
-    Terminate,
+    UnwindTerminate(UnwindTerminateReason),
 
     /// Returns from the function.
     ///
@@ -583,8 +759,8 @@ pub enum TerminatorKind<'tcx> {
     /// `dest = move _0`. It might additionally do other things, like have side-effects in the
     /// aliasing model.
     ///
-    /// If the body is a generator body, this has slightly different semantics; it instead causes a
-    /// `GeneratorState::Returned(_0)` to be created (as if by an `Aggregate` rvalue) and assigned
+    /// If the body is a coroutine body, this has slightly different semantics; it instead causes a
+    /// `CoroutineState::Returned(_0)` to be created (as if by an `Aggregate` rvalue) and assigned
     /// to the return place.
     Return,
 
@@ -631,16 +807,47 @@ pub enum TerminatorKind<'tcx> {
         /// These are owned by the callee, which is free to modify them.
         /// This allows the memory occupied by "by-value" arguments to be
         /// reused across function calls without duplicating the contents.
-        args: Vec<Operand<'tcx>>,
+        /// The span for each arg is also included
+        /// (e.g. `a` and `b` in `x.foo(a, b)`).
+        args: Box<[Spanned<Operand<'tcx>>]>,
         /// Where the returned value will be written
         destination: Place<'tcx>,
         /// Where to go after this call returns. If none, the call necessarily diverges.
         target: Option<BasicBlock>,
         /// Action to be taken if the call unwinds.
         unwind: UnwindAction,
-        /// `true` if this is from a call in HIR rather than from an overloaded
-        /// operator. True for overloaded function call.
-        from_hir_call: bool,
+        /// Where this call came from in HIR/THIR.
+        call_source: CallSource,
+        /// This `Span` is the span of the function, without the dot and receiver
+        /// e.g. `foo(a, b)` in `x.foo(a, b)`
+        fn_span: Span,
+    },
+
+    /// Tail call.
+    ///
+    /// Roughly speaking this is a chimera of [`Call`] and [`Return`], with some caveats.
+    /// Semantically tail calls consists of two actions:
+    /// - pop of the current stack frame
+    /// - a call to the `func`, with the return address of the **current** caller
+    ///   - so that a `return` inside `func` returns to the caller of the caller
+    ///     of the function that is currently being executed
+    ///
+    /// Note that in difference with [`Call`] this is missing
+    /// - `destination` (because it's always the return place)
+    /// - `target` (because it's always taken from the current stack frame)
+    /// - `unwind` (because it's always taken from the current stack frame)
+    ///
+    /// [`Call`]: TerminatorKind::Call
+    /// [`Return`]: TerminatorKind::Return
+    TailCall {
+        /// The function that’s being called.
+        func: Operand<'tcx>,
+        /// Arguments the function is called with.
+        /// These are owned by the callee, which is free to modify them.
+        /// This allows the memory occupied by "by-value" arguments to be
+        /// reused across function calls without duplicating the contents.
+        args: Box<[Spanned<Operand<'tcx>>]>,
+        // FIXME(explicit_tail_calls): should we have the span for `become`? is this span accurate? do we need it?
         /// This `Span` is the span of the function, without the dot and receiver
         /// (e.g. `foo(a, b)` in `x.foo(a, b)`
         fn_span: Span,
@@ -667,14 +874,19 @@ pub enum TerminatorKind<'tcx> {
 
     /// Marks a suspend point.
     ///
-    /// Like `Return` terminators in generator bodies, this computes `value` and then a
-    /// `GeneratorState::Yielded(value)` as if by `Aggregate` rvalue. That value is then assigned to
+    /// Like `Return` terminators in coroutine bodies, this computes `value` and then a
+    /// `CoroutineState::Yielded(value)` as if by `Aggregate` rvalue. That value is then assigned to
     /// the return place of the function calling this one, and execution continues in the calling
     /// function. When next invoked with the same first argument, execution of this function
     /// continues at the `resume` basic block, with the second argument written to the `resume_arg`
-    /// place. If the generator is dropped before then, the `drop` basic block is invoked.
+    /// place. If the coroutine is dropped before then, the `drop` basic block is invoked.
     ///
-    /// Not permitted in bodies that are not generator bodies, or after generator lowering.
+    /// Note that coroutines can be (unstably) cloned under certain conditions, which means that
+    /// this terminator can **return multiple times**! MIR optimizations that reorder code into
+    /// different basic blocks needs to be aware of that.
+    /// See <https://github.com/rust-lang/rust/issues/95360>.
+    ///
+    /// Not permitted in bodies that are not coroutine bodies, or after coroutine lowering.
     ///
     /// **Needs clarification**: What about the evaluation order of the `resume_arg` and `value`?
     Yield {
@@ -684,21 +896,21 @@ pub enum TerminatorKind<'tcx> {
         resume: BasicBlock,
         /// The place to store the resume argument in.
         resume_arg: Place<'tcx>,
-        /// Cleanup to be done if the generator is dropped at this suspend point.
+        /// Cleanup to be done if the coroutine is dropped at this suspend point.
         drop: Option<BasicBlock>,
     },
 
-    /// Indicates the end of dropping a generator.
+    /// Indicates the end of dropping a coroutine.
     ///
-    /// Semantically just a `return` (from the generators drop glue). Only permitted in the same situations
+    /// Semantically just a `return` (from the coroutines drop glue). Only permitted in the same situations
     /// as `yield`.
     ///
-    /// **Needs clarification**: Is that even correct? The generator drop code is always confusing
+    /// **Needs clarification**: Is that even correct? The coroutine drop code is always confusing
     /// to me, because it's not even really in the current body.
     ///
     /// **Needs clarification**: Are there type system constraints on these terminators? Should
     /// there be a "block type" like `cleanup` blocks for them?
-    GeneratorDrop,
+    CoroutineDrop,
 
     /// A block where control flow only ever takes one real path, but borrowck needs to be more
     /// conservative.
@@ -735,11 +947,14 @@ pub enum TerminatorKind<'tcx> {
     /// Block ends with an inline assembly block. This is a terminator since
     /// inline assembly is allowed to diverge.
     InlineAsm {
+        /// Macro used to create this inline asm: one of `asm!` or `naked_asm!`
+        asm_macro: InlineAsmMacro,
+
         /// The template for the inline assembly, with placeholders.
         template: &'tcx [InlineAsmTemplatePiece],
 
         /// The operands for the inline assembly, as `Operand`s or `Place`s.
-        operands: Vec<InlineAsmOperand<'tcx>>,
+        operands: Box<[InlineAsmOperand<'tcx>]>,
 
         /// Miscellaneous options for the inline assembly.
         options: InlineAsmOptions,
@@ -748,14 +963,30 @@ pub enum TerminatorKind<'tcx> {
         /// used to map assembler errors back to the line in the source code.
         line_spans: &'tcx [Span],
 
-        /// Destination block after the inline assembly returns, unless it is
-        /// diverging (InlineAsmOptions::NORETURN).
-        destination: Option<BasicBlock>,
+        /// Valid targets for the inline assembly.
+        /// The first element is the fallthrough destination, unless
+        /// asm_macro == InlineAsmMacro::NakedAsm or InlineAsmOptions::NORETURN is set.
+        targets: Box<[BasicBlock]>,
 
         /// Action to be taken if the inline assembly unwinds. This is present
         /// if and only if InlineAsmOptions::MAY_UNWIND is set.
         unwind: UnwindAction,
     },
+}
+
+#[derive(
+    Clone,
+    Debug,
+    TyEncodable,
+    TyDecodable,
+    Hash,
+    HashStable,
+    PartialEq,
+    TypeFoldable,
+    TypeVisitable
+)]
+pub enum BackwardIncompatibleDropReason {
+    Edition2024,
 }
 
 impl TerminatorKind<'_> {
@@ -765,20 +996,42 @@ impl TerminatorKind<'_> {
         match self {
             TerminatorKind::Goto { .. } => "Goto",
             TerminatorKind::SwitchInt { .. } => "SwitchInt",
-            TerminatorKind::Resume => "Resume",
-            TerminatorKind::Terminate => "Terminate",
+            TerminatorKind::UnwindResume => "UnwindResume",
+            TerminatorKind::UnwindTerminate(_) => "UnwindTerminate",
             TerminatorKind::Return => "Return",
             TerminatorKind::Unreachable => "Unreachable",
             TerminatorKind::Drop { .. } => "Drop",
             TerminatorKind::Call { .. } => "Call",
+            TerminatorKind::TailCall { .. } => "TailCall",
             TerminatorKind::Assert { .. } => "Assert",
             TerminatorKind::Yield { .. } => "Yield",
-            TerminatorKind::GeneratorDrop => "GeneratorDrop",
+            TerminatorKind::CoroutineDrop => "CoroutineDrop",
             TerminatorKind::FalseEdge { .. } => "FalseEdge",
             TerminatorKind::FalseUnwind { .. } => "FalseUnwind",
             TerminatorKind::InlineAsm { .. } => "InlineAsm",
         }
     }
+}
+
+#[derive(Debug, Clone, TyEncodable, TyDecodable, Hash, HashStable, PartialEq)]
+pub struct SwitchTargets {
+    /// Possible values. The locations to branch to in each case
+    /// are found in the corresponding indices from the `targets` vector.
+    pub(super) values: SmallVec<[Pu128; 1]>,
+
+    /// Possible branch sites. The last element of this vector is used
+    /// for the otherwise branch, so targets.len() == values.len() + 1
+    /// should hold.
+    //
+    // This invariant is quite non-obvious and also could be improved.
+    // One way to make this invariant is to have something like this instead:
+    //
+    // branches: Vec<(ConstInt, BasicBlock)>,
+    // otherwise: Option<BasicBlock> // exhaustive if None
+    //
+    // However we’ve decided to keep this as-is until we figure a case
+    // where some other approach seems to be strictly better than other.
+    pub(super) targets: SmallVec<[BasicBlock; 2]>,
 }
 
 /// Action to be taken when a stack unwind happens.
@@ -795,9 +1048,20 @@ pub enum UnwindAction {
     /// Terminates the execution if unwind happens.
     ///
     /// Depending on the platform and situation this may cause a non-unwindable panic or abort.
-    Terminate,
+    Terminate(UnwindTerminateReason),
     /// Cleanups to be done.
     Cleanup(BasicBlock),
+}
+
+/// The reason we are terminating the process during unwinding.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, TyEncodable, TyDecodable, Hash, HashStable)]
+#[derive(TypeFoldable, TypeVisitable)]
+pub enum UnwindTerminateReason {
+    /// Unwinding is just not possible given the ABI of this function.
+    Abi,
+    /// We were already cleaning up for an ongoing unwind, and a *second*, *nested* unwind was
+    /// triggered by the drop glue.
+    InCleanup,
 }
 
 /// Information about an assertion failure.
@@ -809,9 +1073,10 @@ pub enum AssertKind<O> {
     OverflowNeg(O),
     DivisionByZero(O),
     RemainderByZero(O),
-    ResumedAfterReturn(GeneratorKind),
-    ResumedAfterPanic(GeneratorKind),
+    ResumedAfterReturn(CoroutineKind),
+    ResumedAfterPanic(CoroutineKind),
     MisalignedPointerDereference { required: O, found: O },
+    NullPointerDereference,
 }
 
 #[derive(Clone, Debug, PartialEq, TyEncodable, TyDecodable, Hash, HashStable)]
@@ -833,13 +1098,17 @@ pub enum InlineAsmOperand<'tcx> {
         out_place: Option<Place<'tcx>>,
     },
     Const {
-        value: Box<Constant<'tcx>>,
+        value: Box<ConstOperand<'tcx>>,
     },
     SymFn {
-        value: Box<Constant<'tcx>>,
+        value: Box<ConstOperand<'tcx>>,
     },
     SymStatic {
         def_id: DefId,
+    },
+    Label {
+        /// This represents the index into the `targets` array in `TerminatorKind::InlineAsm`.
+        target_index: usize,
     },
 }
 
@@ -879,16 +1148,16 @@ pub type AssertMessage<'tcx> = AssertKind<Operand<'tcx>>;
 /// element:
 ///
 ///  - [`Downcast`](ProjectionElem::Downcast): This projection sets the place's variant index to the
-///    given one, and makes no other changes. A `Downcast` projection on a place with its variant
-///    index already set is not well-formed.
+///    given one, and makes no other changes. A `Downcast` projection must always be followed
+///    immediately by a `Field` projection.
 ///  - [`Field`](ProjectionElem::Field): `Field` projections take their parent place and create a
 ///    place referring to one of the fields of the type. The resulting address is the parent
 ///    address, plus the offset of the field. The type becomes the type of the field. If the parent
 ///    was unsized and so had metadata associated with it, then the metadata is retained if the
 ///    field is unsized and thrown out if it is sized.
 ///
-///    These projections are only legal for tuples, ADTs, closures, and generators. If the ADT or
-///    generator has more than one variant, the parent place's variant index must be set, indicating
+///    These projections are only legal for tuples, ADTs, closures, and coroutines. If the ADT or
+///    coroutine has more than one variant, the parent place's variant index must be set, indicating
 ///    which variant is being used. If it has just one variant, the variant index may or may not be
 ///    included - the single possible variant is inferred if it is not included.
 ///  - [`OpaqueCast`](ProjectionElem::OpaqueCast): This projection changes the place's type to the
@@ -916,18 +1185,15 @@ pub type AssertMessage<'tcx> = AssertKind<Operand<'tcx>>;
 ///    pointee's type. The resulting address is the address that was stored in the pointer. If the
 ///    pointee type is unsized, the pointer additionally stored the value of the metadata.
 ///
-/// Computing a place may cause UB. One possibility is that the pointer used for a `Deref` may not
-/// be suitably aligned. Another possibility is that the place is not in bounds, meaning it does not
-/// point to an actual allocation.
-///
-/// However, if this is actually UB and when the UB kicks in is undecided. This is being discussed
-/// in [UCG#319]. The options include that every place must obey those rules, that only some places
-/// must obey them, or that places impose no rules of their own.
-///
-/// [UCG#319]: https://github.com/rust-lang/unsafe-code-guidelines/issues/319
-///
-/// Rust currently requires that every place obey those two rules. This is checked by MIRI and taken
-/// advantage of by codegen (via `gep inbounds`). That is possibly subject to change.
+/// The "validity invariant" of places is the same as that of raw pointers, meaning that e.g.
+/// `*ptr` on a dangling or unaligned pointer is never UB. (Later doing a load/store on that place
+/// or turning it into a reference can be UB though!) The only ways for a place computation can
+/// cause UB are:
+/// - On a `Deref` projection, we do an actual load of the inner place, with all the usual
+///   consequences (the inner place must be based on an aligned pointer, it must point to allocated
+///   memory, the aliasig model must allow reads, this must not be a data race).
+/// - For the projections that perform pointer arithmetic, the offset must in-bounds of an
+///   allocation (i.e., the preconditions of `ptr::offset` must be met).
 #[derive(Copy, Clone, PartialEq, Eq, Hash, TyEncodable, HashStable, TypeFoldable, TypeVisitable)]
 pub struct Place<'tcx> {
     pub local: Local,
@@ -936,7 +1202,7 @@ pub struct Place<'tcx> {
     pub projection: &'tcx List<PlaceElem<'tcx>>,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[derive(TyEncodable, TyDecodable, HashStable, TypeFoldable, TypeVisitable)]
 pub enum ProjectionElem<V, T> {
     Deref,
@@ -976,8 +1242,10 @@ pub enum ProjectionElem<V, T> {
     ConstantIndex {
         /// index or -index (in Python terms), depending on from_end
         offset: u64,
-        /// The thing being indexed must be at least this long. For arrays this
-        /// is always the exact length.
+        /// The thing being indexed must be at least this long -- otherwise, the
+        /// projection is UB.
+        ///
+        /// For arrays this is always the exact length.
         min_length: u64,
         /// Counting backwards from end? This is always false when indexing an
         /// array.
@@ -997,14 +1265,32 @@ pub enum ProjectionElem<V, T> {
         from_end: bool,
     },
 
-    /// "Downcast" to a variant of an enum or a generator.
+    /// "Downcast" to a variant of an enum or a coroutine.
     ///
     /// The included Symbol is the name of the variant, used for printing MIR.
+    ///
+    /// This operation itself is never UB, all it does is change the type of the place.
     Downcast(Option<Symbol>, VariantIdx),
 
     /// Like an explicit cast from an opaque type to a concrete type, but without
     /// requiring an intermediate variable.
     OpaqueCast(T),
+
+    /// A transmute from an unsafe binder to the type that it wraps. This is a projection
+    /// of a place, so it doesn't necessarily constitute a move out of the binder.
+    UnwrapUnsafeBinder(T),
+
+    /// A `Subtype(T)` projection is applied to any `StatementKind::Assign` where
+    /// type of lvalue doesn't match the type of rvalue, the primary goal is making subtyping
+    /// explicit during optimizations and codegen.
+    ///
+    /// This projection doesn't impact the runtime behavior of the program except for potentially changing
+    /// some type metadata of the interpreter or codegen backend.
+    ///
+    /// This goal is achieved with mir_transform pass `Subtyper`, which runs right after
+    /// borrowchecker, as we only care about subtyping that can affect trait selection and
+    /// `TypeId`.
+    Subtype(T),
 }
 
 /// Alias for projections as they appear in places, where the base is a place
@@ -1025,10 +1311,6 @@ pub type PlaceElem<'tcx> = ProjectionElem<Local, Ty<'tcx>>;
 /// there may be other effects: if the type has a validity constraint loading the place might be UB
 /// if the validity constraint is not met.
 ///
-/// **Needs clarification:** Ralf proposes that loading a place not have side-effects.
-/// This is what is implemented in miri today. Are these the semantics we want for MIR? Is this
-/// something we can even decide without knowing more about Rust's memory model?
-///
 /// **Needs clarification:** Is loading a place that has its variant index set well-formed? Miri
 /// currently implements it, but it seems like this may be something to check against in the
 /// validator.
@@ -1046,11 +1328,36 @@ pub enum Operand<'tcx> {
     /// in [UCG#188]. You should not emit MIR that may attempt a subsequent second load of this
     /// place without first re-initializing it.
     ///
+    /// **Needs clarification:** The operational impact of `Move` is unclear. Currently (both in
+    /// Miri and codegen) it has no effect at all unless it appears in an argument to `Call`; for
+    /// `Call` it allows the argument to be passed to the callee "in-place", i.e. the callee might
+    /// just get a reference to this place instead of a full copy. Miri implements this with a
+    /// combination of aliasing model "protectors" and putting `uninit` into the place. Ralf
+    /// proposes that we don't want these semantics for `Move` in regular assignments, because
+    /// loading a place should not have side-effects, and the aliasing model "protectors" are
+    /// inherently tied to a function call. Are these the semantics we want for MIR? Is this
+    /// something we can even decide without knowing more about Rust's memory model?
+    ///
     /// [UCG#188]: https://github.com/rust-lang/unsafe-code-guidelines/issues/188
     Move(Place<'tcx>),
 
     /// Constants are already semantically values, and remain unchanged.
-    Constant(Box<Constant<'tcx>>),
+    Constant(Box<ConstOperand<'tcx>>),
+}
+
+#[derive(Clone, Copy, PartialEq, TyEncodable, TyDecodable, Hash, HashStable)]
+#[derive(TypeFoldable, TypeVisitable)]
+pub struct ConstOperand<'tcx> {
+    pub span: Span,
+
+    /// Optional user-given type: for something like
+    /// `collect::<Vec<_>>`, this would be present and would
+    /// indicate that `Vec<_>` was explicitly specified.
+    ///
+    /// Needed for NLL to impose user-given type constraints.
+    pub user_ty: Option<UserTypeAnnotationIndex>,
+
+    pub const_: Const<'tcx>,
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -1100,28 +1407,30 @@ pub enum Rvalue<'tcx> {
     /// nature of this operation?
     ThreadLocalRef(DefId),
 
-    /// Creates a pointer with the indicated mutability to the place.
+    /// Creates a raw pointer with the indicated mutability to the place.
     ///
-    /// This is generated by pointer casts like `&v as *const _` or raw address of expressions like
-    /// `&raw v` or `addr_of!(v)`.
+    /// This is generated by pointer casts like `&v as *const _` or raw borrow expressions like
+    /// `&raw const v`.
     ///
     /// Like with references, the semantics of this operation are heavily dependent on the aliasing
     /// model.
-    AddressOf(Mutability, Place<'tcx>),
+    RawPtr(RawPtrKind, Place<'tcx>),
 
     /// Yields the length of the place, as a `usize`.
     ///
     /// If the type of the place is an array, this is the array length. For slices (`[T]`, not
     /// `&[T]`) this accesses the place's metadata to determine the length. This rvalue is
     /// ill-formed for places of other types.
+    ///
+    /// This cannot be a `UnOp(PtrMetadata, _)` because that expects a value, and we only
+    /// have a place, and `UnOp(PtrMetadata, RawPtr(place))` is not a thing.
     Len(Place<'tcx>),
 
     /// Performs essentially all of the casts that can be performed via `as`.
     ///
     /// This allows for casts from/to a variety of types.
     ///
-    /// **FIXME**: Document exactly which `CastKind`s allow which types of casts. Figure out why
-    /// `ArrayToPointer` and `MutToConstPointer` are special.
+    /// **FIXME**: Document exactly which `CastKind`s allow which types of casts.
     Cast(CastKind, Operand<'tcx>, Ty<'tcx>),
 
     /// * `Offset` has the same semantics as [`offset`](pointer::offset), except that the second
@@ -1134,17 +1443,11 @@ pub enum Rvalue<'tcx> {
     ///   truncated as needed.
     /// * The `Bit*` operations accept signed integers, unsigned integers, or bools with matching
     ///   types and return a value of that type.
+    /// * The `FooWithOverflow` are like the `Foo`, but returning `(T, bool)` instead of just `T`,
+    ///   where the `bool` is true if the result is not equal to the infinite-precision result.
     /// * The remaining operations accept signed integers, unsigned integers, or floats with
     ///   matching types and return a value of that type.
     BinaryOp(BinOp, Box<(Operand<'tcx>, Operand<'tcx>)>),
-
-    /// Same as `BinaryOp`, but yields `(T, bool)` with a `bool` indicating an error condition.
-    ///
-    /// For addition, subtraction, and multiplication on integers the error condition is set when
-    /// the infinite precision result would not be equal to the actual result.
-    ///
-    /// Other combinations of types and operators are unsupported.
-    CheckedBinaryOp(BinOp, Box<(Operand<'tcx>, Operand<'tcx>)>),
 
     /// Computes a value as described by the operation.
     NullaryOp(NullOp<'tcx>, Ty<'tcx>),
@@ -1174,8 +1477,8 @@ pub enum Rvalue<'tcx> {
     /// `dest = Foo { x: ..., y: ... }` from `dest.x = ...; dest.y = ...;` in the case that `Foo`
     /// has a destructor.
     ///
-    /// Disallowed after deaggregation for all aggregate kinds except `Array` and `Generator`. After
-    /// generator lowering, `Generator` aggregate kinds are disallowed too.
+    /// Disallowed after deaggregation for all aggregate kinds except `Array` and `Coroutine`. After
+    /// coroutine lowering, `Coroutine` aggregate kinds are disallowed too.
     Aggregate(Box<AggregateKind<'tcx>>, IndexVec<FieldIdx, Operand<'tcx>>),
 
     /// Transmutes a `*mut u8` into shallow-initialized `Box<T>`.
@@ -1194,22 +1497,30 @@ pub enum Rvalue<'tcx> {
     /// optimizations and codegen backends that previously had to handle deref operations anywhere
     /// in a place.
     CopyForDeref(Place<'tcx>),
+
+    /// Wraps a value in an unsafe binder.
+    WrapUnsafeBinder(Operand<'tcx>, Ty<'tcx>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, TyEncodable, TyDecodable, Hash, HashStable)]
 pub enum CastKind {
     /// An exposing pointer to address cast. A cast between a pointer and an integer type, or
     /// between a function pointer and an integer type.
-    /// See the docs on `expose_addr` for more details.
-    PointerExposeAddress,
+    /// See the docs on `expose_provenance` for more details.
+    PointerExposeProvenance,
     /// An address-to-pointer cast that picks up an exposed provenance.
-    /// See the docs on `from_exposed_addr` for more details.
-    PointerFromExposedAddress,
-    /// All sorts of pointer-to-pointer casts. Note that reference-to-raw-ptr casts are
+    /// See the docs on `with_exposed_provenance` for more details.
+    PointerWithExposedProvenance,
+    /// Pointer related casts that are done by coercions. Note that reference-to-raw-ptr casts are
     /// translated into `&raw mut/const *r`, i.e., they are not actually casts.
-    Pointer(PointerCast),
-    /// Cast into a dyn* object.
-    DynStar,
+    ///
+    /// The following are allowed in [`AnalysisPhase::Initial`] as they're needed for borrowck,
+    /// but after that are forbidden (including in all phases of runtime MIR):
+    /// * [`PointerCoercion::ArrayToPointer`]
+    /// * [`PointerCoercion::MutToConstPointer`]
+    ///
+    /// Both are runtime nops, so should be [`CastKind::PtrToPtr`] instead in runtime MIR.
+    PointerCoercion(PointerCoercion, CoercionSource),
     IntToInt,
     FloatToInt,
     FloatToFloat,
@@ -1225,6 +1536,16 @@ pub enum CastKind {
     Transmute,
 }
 
+/// Represents how a [`CastKind::PointerCoercion`] was constructed.
+/// Used only for diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, TyEncodable, TyDecodable, Hash, HashStable)]
+pub enum CoercionSource {
+    /// The coercion was manually written by the user with an `as` cast.
+    AsCast,
+    /// The coercion was automatically inserted by the compiler.
+    Implicit,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, TyEncodable, TyDecodable, Hash, HashStable)]
 #[derive(TypeFoldable, TypeVisitable)]
 pub enum AggregateKind<'tcx> {
@@ -1237,40 +1558,86 @@ pub enum AggregateKind<'tcx> {
     /// active field number and is present only for union expressions
     /// -- e.g., for a union expression `SomeUnion { c: .. }`, the
     /// active field index would identity the field `c`
-    Adt(DefId, VariantIdx, SubstsRef<'tcx>, Option<UserTypeAnnotationIndex>, Option<FieldIdx>),
+    Adt(DefId, VariantIdx, GenericArgsRef<'tcx>, Option<UserTypeAnnotationIndex>, Option<FieldIdx>),
 
-    Closure(DefId, SubstsRef<'tcx>),
-    Generator(DefId, SubstsRef<'tcx>, hir::Movability),
+    Closure(DefId, GenericArgsRef<'tcx>),
+    Coroutine(DefId, GenericArgsRef<'tcx>),
+    CoroutineClosure(DefId, GenericArgsRef<'tcx>),
+
+    /// Construct a raw pointer from the data pointer and metadata.
+    ///
+    /// The `Ty` here is the type of the *pointee*, not the pointer itself.
+    /// The `Mutability` indicates whether this produces a `*const` or `*mut`.
+    ///
+    /// The [`Rvalue::Aggregate`] operands for thus must be
+    ///
+    /// 0. A raw pointer of matching mutability with any [`core::ptr::Thin`] pointee
+    /// 1. A value of the appropriate [`core::ptr::Pointee::Metadata`] type
+    ///
+    /// *Both* operands must always be included, even the unit value if this is
+    /// creating a thin pointer. If you're just converting between thin pointers,
+    /// you may want an [`Rvalue::Cast`] with [`CastKind::PtrToPtr`] instead.
+    RawPtr(Ty<'tcx>, Mutability),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, TyEncodable, TyDecodable, Hash, HashStable)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, TyEncodable, TyDecodable, Hash, HashStable)]
 pub enum NullOp<'tcx> {
     /// Returns the size of a value of that type
     SizeOf,
     /// Returns the minimum alignment of a type
     AlignOf,
     /// Returns the offset of a field
-    OffsetOf(&'tcx List<FieldIdx>),
+    OffsetOf(&'tcx List<(VariantIdx, FieldIdx)>),
+    /// Returns whether we should perform some UB-checking at runtime.
+    /// See the `ub_checks` intrinsic docs for details.
+    UbChecks,
+    /// Returns whether we should perform contract-checking at runtime.
+    /// See the `contract_checks` intrinsic docs for details.
+    ContractChecks,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[derive(HashStable, TyEncodable, TyDecodable, TypeFoldable, TypeVisitable)]
 pub enum UnOp {
     /// The `!` operator for logical inversion
     Not,
     /// The `-` operator for negation
     Neg,
+    /// Gets the metadata `M` from a `*const`/`*mut`/`&`/`&mut` to
+    /// `impl Pointee<Metadata = M>`.
+    ///
+    /// For example, this will give a `()` from `*const i32`, a `usize` from
+    /// `&mut [u8]`, or a `ptr::DynMetadata<dyn Foo>` (internally a pointer)
+    /// from a `*mut dyn Foo`.
+    ///
+    /// Allowed only in [`MirPhase::Runtime`]; earlier it's an intrinsic.
+    PtrMetadata,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, PartialOrd, Ord, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[derive(TyEncodable, TyDecodable, HashStable, TypeFoldable, TypeVisitable)]
 pub enum BinOp {
     /// The `+` operator (addition)
     Add,
+    /// Like `Add`, but with UB on overflow.  (Integers only.)
+    AddUnchecked,
+    /// Like `Add`, but returns `(T, bool)` of both the wrapped result
+    /// and a bool indicating whether it overflowed.
+    AddWithOverflow,
     /// The `-` operator (subtraction)
     Sub,
+    /// Like `Sub`, but with UB on overflow.  (Integers only.)
+    SubUnchecked,
+    /// Like `Sub`, but returns `(T, bool)` of both the wrapped result
+    /// and a bool indicating whether it overflowed.
+    SubWithOverflow,
     /// The `*` operator (multiplication)
     Mul,
+    /// Like `Mul`, but with UB on overflow.  (Integers only.)
+    MulUnchecked,
+    /// Like `Mul`, but returns `(T, bool)` of both the wrapped result
+    /// and a bool indicating whether it overflowed.
+    MulWithOverflow,
     /// The `/` operator (division)
     ///
     /// For integer types, division by zero is UB, as is `MIN / -1` for signed.
@@ -1294,12 +1661,25 @@ pub enum BinOp {
     BitOr,
     /// The `<<` operator (shift left)
     ///
-    /// The offset is truncated to the size of the first operand before shifting.
+    /// The offset is given by `RHS.rem_euclid(LHS::BITS)`.
+    /// In other words, it is (uniquely) determined as follows:
+    /// - it is "equal modulo LHS::BITS" to the RHS
+    /// - it is in the range `0..LHS::BITS`
     Shl,
+    /// Like `Shl`, but is UB if the RHS >= LHS::BITS or RHS < 0
+    ShlUnchecked,
     /// The `>>` operator (shift right)
     ///
-    /// The offset is truncated to the size of the first operand before shifting.
+    /// The offset is given by `RHS.rem_euclid(LHS::BITS)`.
+    /// In other words, it is (uniquely) determined as follows:
+    /// - it is "equal modulo LHS::BITS" to the RHS
+    /// - it is in the range `0..LHS::BITS`
+    ///
+    /// This is an arithmetic shift if the LHS is signed
+    /// and a logical shift if the LHS is unsigned.
     Shr,
+    /// Like `Shl`, but is UB if the RHS >= LHS::BITS or RHS < 0
+    ShrUnchecked,
     /// The `==` operator (equality)
     Eq,
     /// The `<` operator (less than)
@@ -1312,13 +1692,25 @@ pub enum BinOp {
     Ge,
     /// The `>` operator (greater than)
     Gt,
+    /// The `<=>` operator (three-way comparison, like `Ord::cmp`)
+    ///
+    /// This is supported only on the integer types and `char`, always returning
+    /// [`rustc_hir::LangItem::OrderingEnum`] (aka [`std::cmp::Ordering`]).
+    ///
+    /// [`Rvalue::BinaryOp`]`(BinOp::Cmp, A, B)` returns
+    /// - `Ordering::Less` (`-1_i8`, as a Scalar) if `A < B`
+    /// - `Ordering::Equal` (`0_i8`, as a Scalar) if `A == B`
+    /// - `Ordering::Greater` (`+1_i8`, as a Scalar) if `A > B`
+    Cmp,
     /// The `ptr.offset` operator
     Offset,
 }
 
 // Some nodes are used a lot. Make sure they don't unintentionally get bigger.
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+#[cfg(target_pointer_width = "64")]
 mod size_asserts {
+    use rustc_data_structures::static_assert_size;
+
     use super::*;
     // tidy-alphabetical-start
     static_assert_size!(AggregateKind<'_>, 32);
@@ -1326,5 +1718,7 @@ mod size_asserts {
     static_assert_size!(Place<'_>, 16);
     static_assert_size!(PlaceElem<'_>, 24);
     static_assert_size!(Rvalue<'_>, 40);
+    static_assert_size!(StatementKind<'_>, 16);
+    static_assert_size!(TerminatorKind<'_>, 80);
     // tidy-alphabetical-end
 }

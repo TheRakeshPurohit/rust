@@ -1,14 +1,14 @@
-//@run-rustfix
 //@aux-build:proc_macros.rs
 #![feature(let_chains)]
 #![allow(unused)]
 #![allow(
     clippy::assign_op_pattern,
-    clippy::blocks_in_if_conditions,
+    clippy::blocks_in_conditions,
     clippy::let_and_return,
     clippy::let_unit_value,
     clippy::nonminimal_bool,
-    clippy::uninlined_format_args
+    clippy::uninlined_format_args,
+    clippy::useless_vec
 )]
 
 extern crate proc_macros;
@@ -230,7 +230,9 @@ fn does_not_lint() {
     }
 
     let x;
-    if true && let Some(n) = Some("let chains too") {
+    if true
+        && let Some(n) = Some("let chains too")
+    {
         x = 1;
     } else {
         x = 2;
@@ -267,4 +269,15 @@ fn issue8911() -> u32 {
     }
 
     3
+}
+
+macro_rules! issue13776_mac {
+    ($var:expr, $val:literal) => {
+        $var = $val;
+    };
+}
+
+fn issue13776() {
+    let x;
+    issue13776_mac!(x, 10); // should not lint
 }

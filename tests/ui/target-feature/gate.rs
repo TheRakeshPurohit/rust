@@ -1,16 +1,5 @@
-// ignore-arm
-// ignore-aarch64
-// ignore-wasm
-// ignore-emscripten
-// ignore-mips
-// ignore-mips64
-// ignore-powerpc
-// ignore-powerpc64
-// ignore-riscv64
-// ignore-sparc
-// ignore-sparc64
-// ignore-s390x
-// ignore-loongarch64
+//@ only-x86_64
+//
 // gate-test-sse4a_target_feature
 // gate-test-powerpc_target_feature
 // gate-test-avx512_target_feature
@@ -28,6 +17,15 @@
 // gate-test-ermsb_target_feature
 // gate-test-bpf_target_feature
 // gate-test-aarch64_ver_target_feature
+// gate-test-aarch64_unstable_target_feature
+// gate-test-csky_target_feature
+// gate-test-loongarch_target_feature
+// gate-test-lahfsahf_target_feature
+// gate-test-prfchw_target_feature
+// gate-test-s390x_target_feature
+// gate-test-sparc_target_feature
+// gate-test-x87_target_feature
+// gate-test-m68k_target_feature
 
 #[target_feature(enable = "avx512bw")]
 //~^ ERROR: currently unstable

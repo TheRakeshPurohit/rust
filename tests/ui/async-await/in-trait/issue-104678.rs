@@ -1,15 +1,11 @@
-// edition:2021
-// check-pass
-// [next] compile-flags: -Zlower-impl-trait-in-trait-to-assoc-ty
-// revisions: current next
-
-#![feature(async_fn_in_trait)]
-#![allow(incomplete_features)]
+//@ edition:2021
+//@ check-pass
 
 use std::future::Future;
 pub trait Pool {
     type Conn;
 
+    #[allow(async_fn_in_trait)]
     async fn async_callback<'a, F: FnOnce(&'a Self::Conn) -> Fut, Fut: Future<Output = ()>>(
         &'a self,
         callback: F,

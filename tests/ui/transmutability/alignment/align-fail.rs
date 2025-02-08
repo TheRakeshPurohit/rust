@@ -1,13 +1,12 @@
-// check-fail
+//@ check-fail
 #![feature(transmutability)]
 
 mod assert {
-    use std::mem::{Assume, BikeshedIntrinsicFrom};
-    pub struct Context;
+    use std::mem::{Assume, TransmuteFrom};
 
     pub fn is_maybe_transmutable<Src, Dst>()
     where
-        Dst: BikeshedIntrinsicFrom<Src, Context, {
+        Dst: TransmuteFrom<Src, {
             Assume {
                 alignment: false,
                 lifetimes: true,

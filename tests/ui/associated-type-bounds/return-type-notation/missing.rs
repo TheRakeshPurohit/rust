@@ -1,13 +1,12 @@
-// edition: 2021
+//@ edition: 2021
 
-#![feature(return_type_notation, async_fn_in_trait)]
-//~^ WARN the feature `return_type_notation` is incomplete
+#![feature(return_type_notation)]
 
 trait Trait {
     async fn method() {}
 }
 
-fn bar<T: Trait<methid(): Send>>() {}
-//~^ ERROR cannot find associated function `methid` for `Trait`
+fn bar<T: Trait<methid(..): Send>>() {}
+//~^ ERROR associated function `methid` not found for `Trait`
 
 fn main() {}

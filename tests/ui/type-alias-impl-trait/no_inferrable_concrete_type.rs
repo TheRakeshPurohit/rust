@@ -5,14 +5,16 @@
 
 mod foo {
     pub type Foo = impl Copy;
-    //~^ ERROR unconstrained opaque type
 
     // make compiler happy about using 'Foo'
     pub fn bar(x: Foo) -> Foo {
+        //~^ ERROR: item does not constrain `Foo::{opaque#0}`
         x
     }
 }
 
 fn main() {
-    let _: foo::Foo = std::mem::transmute(0u8);
+    unsafe {
+        let _: foo::Foo = std::mem::transmute(0u8);
+    }
 }

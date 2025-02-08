@@ -1,10 +1,13 @@
 //@revisions: stack tree
 //@[tree]compile-flags: -Zmiri-tree-borrows
 //@compile-flags: -Zmiri-strict-provenance
-#![feature(strict_provenance, strict_provenance_atomic_ptr)]
-use std::sync::atomic::{
-    compiler_fence, fence, AtomicBool, AtomicIsize, AtomicPtr, AtomicU64, Ordering::*,
-};
+
+#![feature(strict_provenance_atomic_ptr)]
+// FIXME(static_mut_refs): Do not allow `static_mut_refs` lint
+#![allow(static_mut_refs)]
+
+use std::sync::atomic::Ordering::*;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicPtr, AtomicU64, compiler_fence, fence};
 
 fn main() {
     atomic_bool();
@@ -137,7 +140,7 @@ fn atomic_ptr() {
 
     let ptr = AtomicPtr::<i32>::new(ptr::null_mut());
     assert!(ptr.load(Relaxed).addr() == 0);
-    ptr.store(ptr::invalid_mut(13), SeqCst);
+    ptr.store(ptr::without_provenance_mut(13), SeqCst);
     assert!(ptr.swap(x, Relaxed).addr() == 13);
     unsafe { assert!(*ptr.load(Acquire) == 0) };
 
@@ -145,7 +148,7 @@ fn atomic_ptr() {
     assert_eq!(
         ptr.compare_exchange(
             (&mut 0 as *mut i32).with_addr(x.addr()),
-            ptr::invalid_mut(0),
+            ptr::without_provenance_mut(0),
             SeqCst,
             SeqCst
         )
@@ -156,7 +159,7 @@ fn atomic_ptr() {
     assert_eq!(
         ptr.compare_exchange(
             (&mut 0 as *mut i32).with_addr(x.addr()),
-            ptr::invalid_mut(0),
+            ptr::without_provenance_mut(0),
             SeqCst,
             SeqCst
         )

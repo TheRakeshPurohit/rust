@@ -1,6 +1,6 @@
-// run-fail
-// error-pattern:test
-// ignore-emscripten no processes
+//@ run-fail
+//@ error-pattern:test
+//@ needs-subprocess
 
 fn main() {
     panic!("test");

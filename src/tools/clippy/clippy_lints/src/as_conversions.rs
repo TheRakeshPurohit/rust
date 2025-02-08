@@ -1,8 +1,8 @@
-use clippy_utils::diagnostics::span_lint_and_help;
-use rustc_ast::ast::{Expr, ExprKind};
-use rustc_lint::{EarlyContext, EarlyLintPass, LintContext};
-use rustc_middle::lint::in_external_macro;
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::is_from_proc_macro;
+use rustc_hir::{Expr, ExprKind};
+use rustc_lint::{LateContext, LateLintPass, LintContext};
+use rustc_session::declare_lint_pass;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -16,7 +16,7 @@ declare_clippy_lint! {
     /// There is a good explanation the reason why this lint should work in this way and how it is useful
     /// [in this issue](https://github.com/rust-lang/rust-clippy/issues/5122).
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// `as` conversions will perform many kinds of
     /// conversions, including silently lossy conversions and dangerous coercions.
     /// There are cases when it makes sense to use `as`, so the lint is
@@ -45,20 +45,21 @@ declare_clippy_lint! {
 
 declare_lint_pass!(AsConversions => [AS_CONVERSIONS]);
 
-impl EarlyLintPass for AsConversions {
-    fn check_expr(&mut self, cx: &EarlyContext<'_>, expr: &Expr) {
-        if in_external_macro(cx.sess(), expr.span) {
-            return;
-        }
-
-        if let ExprKind::Cast(_, _) = expr.kind {
-            span_lint_and_help(
+impl<'tcx> LateLintPass<'tcx> for AsConversions {
+    fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &Expr<'tcx>) {
+        if let ExprKind::Cast(_, _) = expr.kind
+            && !expr.span.in_external_macro(cx.sess().source_map())
+            && !is_from_proc_macro(cx, expr)
+        {
+            #[expect(clippy::collapsible_span_lint_calls, reason = "rust-clippy#7797")]
+            span_lint_and_then(
                 cx,
                 AS_CONVERSIONS,
                 expr.span,
                 "using a potentially dangerous silent `as` conversion",
-                None,
-                "consider using a safe wrapper for this conversion",
+                |diag| {
+                    diag.help("consider using a safe wrapper for this conversion");
+                },
             );
         }
     }

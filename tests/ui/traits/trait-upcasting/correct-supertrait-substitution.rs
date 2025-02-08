@@ -1,5 +1,4 @@
-// run-pass
-#![feature(trait_upcasting)]
+//@ run-pass
 
 trait Foo<T: Default + ToString>: Bar<i32> + Bar<T> {}
 trait Bar<T: Default + ToString> {

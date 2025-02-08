@@ -1,4 +1,4 @@
-// check-pass
+//@ check-pass
 
 #[cfg(FALSE)]
 fn simple_attr() {
@@ -25,7 +25,7 @@ fn bar() {
         let x: () = true; // Should not error due to the #[cfg(FALSE)]
     }
 
-    #[cfg_attr(not(unset_attr), cfg(FALSE))]
+    #[cfg_attr(not(FALSE), cfg(FALSE))]
     if true {
         let a: () = true; // Should not error due to the applied #[cfg(FALSE)]
     }

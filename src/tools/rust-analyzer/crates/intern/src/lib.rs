@@ -6,11 +6,11 @@ use std::{
     fmt::{self, Debug, Display},
     hash::{BuildHasherDefault, Hash, Hasher},
     ops::Deref,
+    sync::OnceLock,
 };
 
 use dashmap::{DashMap, SharedValue};
 use hashbrown::{hash_map::RawEntryMut, HashMap};
-use once_cell::sync::OnceCell;
 use rustc_hash::FxHasher;
 use triomphe::Arc;
 
@@ -19,6 +19,9 @@ type Guard<T> = dashmap::RwLockWriteGuard<
     'static,
     HashMap<Arc<T>, SharedValue<()>, BuildHasherDefault<FxHasher>>,
 >;
+
+mod symbol;
+pub use self::symbol::{symbols as sym, Symbol};
 
 pub struct Interned<T: Internable + ?Sized> {
     arc: Arc<T>,
@@ -33,13 +36,10 @@ impl<T: Internable> Interned<T> {
         //   - if not, box it up, insert it, and return a clone
         // This needs to be atomic (locking the shard) to avoid races with other thread, which could
         // insert the same object between us looking it up and inserting it.
-        match shard.raw_entry_mut().from_key_hashed_nocheck(hash as u64, &obj) {
+        match shard.raw_entry_mut().from_key_hashed_nocheck(hash, &obj) {
             RawEntryMut::Occupied(occ) => Self { arc: occ.key().clone() },
             RawEntryMut::Vacant(vac) => Self {
-                arc: vac
-                    .insert_hashed_nocheck(hash as u64, Arc::new(obj), SharedValue::new(()))
-                    .0
-                    .clone(),
+                arc: vac.insert_hashed_nocheck(hash, Arc::new(obj), SharedValue::new(())).0.clone(),
             },
         }
     }
@@ -54,13 +54,10 @@ impl Interned<str> {
         //   - if not, box it up, insert it, and return a clone
         // This needs to be atomic (locking the shard) to avoid races with other thread, which could
         // insert the same object between us looking it up and inserting it.
-        match shard.raw_entry_mut().from_key_hashed_nocheck(hash as u64, s) {
+        match shard.raw_entry_mut().from_key_hashed_nocheck(hash, s) {
             RawEntryMut::Occupied(occ) => Self { arc: occ.key().clone() },
             RawEntryMut::Vacant(vac) => Self {
-                arc: vac
-                    .insert_hashed_nocheck(hash as u64, Arc::from(s), SharedValue::new(()))
-                    .0
-                    .clone(),
+                arc: vac.insert_hashed_nocheck(hash, Arc::from(s), SharedValue::new(())).0.clone(),
             },
         }
     }
@@ -177,12 +174,13 @@ impl<T: Display + Internable + ?Sized> Display for Interned<T> {
 }
 
 pub struct InternStorage<T: ?Sized> {
-    map: OnceCell<InternMap<T>>,
+    map: OnceLock<InternMap<T>>,
 }
 
+#[allow(clippy::new_without_default)] // this a const fn, so it can't be default
 impl<T: ?Sized> InternStorage<T> {
     pub const fn new() -> Self {
-        Self { map: OnceCell::new() }
+        Self { map: OnceLock::new() }
     }
 }
 

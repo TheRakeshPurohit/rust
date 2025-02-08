@@ -1,6 +1,6 @@
-// run-fail
-// error-pattern:overflow
-// ignore-emscripten no processes
+//@ run-fail
+//@ error-pattern:overflow
+//@ needs-subprocess
 
 use std::time::{Duration, SystemTime};
 

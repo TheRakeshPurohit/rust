@@ -1,12 +1,10 @@
-// run-pass
+//@ run-pass
 
-// revisions: default nomiropt
-//[nomiropt]compile-flags: -Z mir-opt-level=0
+//@ revisions: default nomiropt
+//@[nomiropt]compile-flags: -Z mir-opt-level=0
 
-// edition:2018
-// aux-build:arc_wake.rs
-
-#![feature(async_closure)]
+//@ edition:2018
+//@ aux-build:arc_wake.rs
 
 extern crate arc_wake;
 

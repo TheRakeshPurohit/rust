@@ -1,7 +1,5 @@
-// build-pass
-// edition:2018
-
-#![feature(async_closure)]
+//@ build-pass
+//@ edition:2018
 
 macro_rules! match_expr {
     ($x:expr) => {}

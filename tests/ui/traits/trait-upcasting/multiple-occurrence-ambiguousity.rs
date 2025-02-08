@@ -1,5 +1,4 @@
-// check-fail
-#![feature(trait_upcasting)]
+//@ check-fail
 
 trait Bar<T> {
     fn bar(&self, _: T) {}

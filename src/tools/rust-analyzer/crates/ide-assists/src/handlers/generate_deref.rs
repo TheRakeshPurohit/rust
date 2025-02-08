@@ -4,7 +4,7 @@ use hir::{ModPath, ModuleDef};
 use ide_db::{famous_defs::FamousDefs, RootDatabase};
 use syntax::{
     ast::{self, HasName},
-    AstNode, SyntaxNode,
+    AstNode, Edition, SyntaxNode,
 };
 
 use crate::{
@@ -59,7 +59,7 @@ fn generate_record_deref(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<(
     let module = ctx.sema.to_def(&strukt)?.module(ctx.db());
     let trait_ = deref_type_to_generate.to_trait(&ctx.sema, module.krate())?;
     let trait_path =
-        module.find_use_path(ctx.db(), ModuleDef::Trait(trait_), ctx.config.prefer_no_std)?;
+        module.find_path(ctx.db(), ModuleDef::Trait(trait_), ctx.config.import_path_config())?;
 
     let field_type = field.ty()?;
     let field_name = field.name()?;
@@ -77,6 +77,7 @@ fn generate_record_deref(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<(
                 field_name.syntax(),
                 deref_type_to_generate,
                 trait_path,
+                module.krate().edition(ctx.db()),
             )
         },
     )
@@ -100,7 +101,7 @@ fn generate_tuple_deref(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()
     let module = ctx.sema.to_def(&strukt)?.module(ctx.db());
     let trait_ = deref_type_to_generate.to_trait(&ctx.sema, module.krate())?;
     let trait_path =
-        module.find_use_path(ctx.db(), ModuleDef::Trait(trait_), ctx.config.prefer_no_std)?;
+        module.find_path(ctx.db(), ModuleDef::Trait(trait_), ctx.config.import_path_config())?;
 
     let field_type = field.ty()?;
     let target = field.syntax().text_range();
@@ -117,6 +118,7 @@ fn generate_tuple_deref(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()
                 field_list_index,
                 deref_type_to_generate,
                 trait_path,
+                module.krate().edition(ctx.db()),
             )
         },
     )
@@ -130,6 +132,7 @@ fn generate_edit(
     field_name: impl Display,
     deref_type: DerefType,
     trait_path: ModPath,
+    edition: Edition,
 ) {
     let start_offset = strukt.syntax().text_range().end();
     let impl_code = match deref_type {
@@ -147,8 +150,11 @@ fn generate_edit(
         ),
     };
     let strukt_adt = ast::Adt::Struct(strukt);
-    let deref_impl =
-        generate_trait_impl_text(&strukt_adt, &trait_path.display(db).to_string(), &impl_code);
+    let deref_impl = generate_trait_impl_text(
+        &strukt_adt,
+        &trait_path.display(db, edition).to_string(),
+        &impl_code,
+    );
     edit.insert(start_offset, deref_impl);
 }
 

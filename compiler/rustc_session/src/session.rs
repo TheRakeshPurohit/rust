@@ -1,59 +1,48 @@
-use crate::cgu_reuse_tracker::CguReuseTracker;
-use crate::code_stats::CodeStats;
-pub use crate::code_stats::{DataTypeKind, FieldInfo, FieldKind, SizeKind, VariantInfo};
-use crate::config::Input;
-use crate::config::{
-    self, CrateType, InstrumentCoverage, OptLevel, OutFileName, OutputType, SwitchWithOptPath,
-};
-use crate::errors;
-use crate::parse::{add_feature_diagnostics, ParseSess};
-use crate::search_paths::{PathKind, SearchPath};
-use crate::{filesearch, lint};
-
-pub use rustc_ast::attr::MarkedAttrs;
-pub use rustc_ast::Attribute;
-use rustc_data_structures::flock;
-use rustc_data_structures::fx::{FxHashMap, FxIndexSet};
-use rustc_data_structures::jobserver::{self, Client};
-use rustc_data_structures::profiling::{duration_to_secs_str, SelfProfiler, SelfProfilerRef};
-use rustc_data_structures::sync::{
-    self, AtomicU64, AtomicUsize, Lock, Lrc, OnceCell, OneThread, Ordering, Ordering::SeqCst,
-};
-use rustc_errors::annotate_snippet_emitter_writer::AnnotateSnippetEmitterWriter;
-use rustc_errors::emitter::{Emitter, EmitterWriter, HumanReadableErrorType};
-use rustc_errors::json::JsonEmitter;
-use rustc_errors::registry::Registry;
-use rustc_errors::{
-    error_code, fallback_fluent_bundle, DiagnosticBuilder, DiagnosticId, DiagnosticMessage,
-    ErrorGuaranteed, FluentBundle, IntoDiagnostic, LazyFallbackBundle, MultiSpan, Noted,
-    TerminalUrl,
-};
-use rustc_macros::HashStable_Generic;
-pub use rustc_span::def_id::StableCrateId;
-use rustc_span::edition::Edition;
-use rustc_span::source_map::{FileLoader, RealFileLoader, SourceMap, Span};
-use rustc_span::{SourceFileHashAlgorithm, Symbol};
-use rustc_target::asm::InlineAsmArch;
-use rustc_target::spec::{CodeModel, PanicStrategy, RelocModel, RelroLevel};
-use rustc_target::spec::{
-    DebuginfoKind, SanitizerSet, SplitDebuginfo, StackProtector, Target, TargetTriple, TlsModel,
-};
-
-use std::cell::{self, RefCell};
-use std::env;
-use std::fmt;
+use std::any::Any;
 use std::ops::{Div, Mul};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::AtomicBool;
+use std::{env, fmt, io};
 
-pub struct OptimizationFuel {
-    /// If `-zfuel=crate=n` is specified, initially set to `n`, otherwise `0`.
-    remaining: u64,
-    /// We're rejecting all further optimizations.
-    out_of_fuel: bool,
-}
+use rustc_data_structures::flock;
+use rustc_data_structures::fx::{FxHashMap, FxIndexSet};
+use rustc_data_structures::profiling::{SelfProfiler, SelfProfilerRef};
+use rustc_data_structures::sync::{DynSend, DynSync, Lock, MappedReadGuard, ReadGuard, RwLock};
+use rustc_errors::annotate_snippet_emitter_writer::AnnotateSnippetEmitter;
+use rustc_errors::codes::*;
+use rustc_errors::emitter::{
+    DynEmitter, HumanEmitter, HumanReadableErrorType, OutputTheme, stderr_destination,
+};
+use rustc_errors::json::JsonEmitter;
+use rustc_errors::{
+    Diag, DiagCtxt, DiagCtxtHandle, DiagMessage, Diagnostic, ErrorGuaranteed, FatalAbort,
+    FluentBundle, LazyFallbackBundle, TerminalUrl, fallback_fluent_bundle,
+};
+use rustc_macros::HashStable_Generic;
+pub use rustc_span::def_id::StableCrateId;
+use rustc_span::edition::Edition;
+use rustc_span::source_map::{FilePathMapping, SourceMap};
+use rustc_span::{FileNameDisplayPreference, RealFileName, Span, Symbol};
+use rustc_target::asm::InlineAsmArch;
+use rustc_target::spec::{
+    CodeModel, DebuginfoKind, PanicStrategy, RelocModel, RelroLevel, SanitizerSet,
+    SmallDataThresholdSupport, SplitDebuginfo, StackProtector, SymbolVisibility, Target,
+    TargetTuple, TlsModel,
+};
+
+use crate::code_stats::CodeStats;
+pub use crate::code_stats::{DataTypeKind, FieldInfo, FieldKind, SizeKind, VariantInfo};
+use crate::config::{
+    self, CoverageLevel, CrateType, DebugInfo, ErrorOutputType, FunctionReturn, Input,
+    InstrumentCoverage, OptLevel, OutFileName, OutputType, RemapPathScopeComponents,
+    SwitchWithOptPath,
+};
+use crate::filesearch::FileSearch;
+use crate::parse::{ParseSess, add_feature_diagnostics};
+use crate::search_paths::SearchPath;
+use crate::{errors, filesearch, lint};
 
 /// The behavior of the CTFE engine when an error occurs with regards to backtraces.
 #[derive(Clone, Copy)]
@@ -114,9 +103,9 @@ impl Mul<usize> for Limit {
     }
 }
 
-impl rustc_errors::IntoDiagnosticArg for Limit {
-    fn into_diagnostic_arg(self) -> rustc_errors::DiagnosticArgValue<'static> {
-        self.to_string().into_diagnostic_arg()
+impl rustc_errors::IntoDiagArg for Limit {
+    fn into_diag_arg(self) -> rustc_errors::DiagArgValue {
+        self.to_string().into_diag_arg()
     }
 }
 
@@ -139,52 +128,31 @@ pub struct CompilerIO {
     pub temps_dir: Option<PathBuf>,
 }
 
+pub trait LintStoreMarker: Any + DynSync + DynSend {}
+
 /// Represents the data associated with a compilation
 /// session for a single crate.
 pub struct Session {
     pub target: Target,
     pub host: Target,
     pub opts: config::Options,
-    pub host_tlib_path: Lrc<SearchPath>,
-    pub target_tlib_path: Lrc<SearchPath>,
-    pub parse_sess: ParseSess,
+    pub host_tlib_path: Arc<SearchPath>,
+    pub target_tlib_path: Arc<SearchPath>,
+    pub psess: ParseSess,
     pub sysroot: PathBuf,
     /// Input, input file path and output file path to this compilation process.
     pub io: CompilerIO,
 
-    crate_types: OnceCell<Vec<CrateType>>,
-    /// The `stable_crate_id` is constructed out of the crate name and all the
-    /// `-C metadata` arguments passed to the compiler. Its value forms a unique
-    /// global identifier for the crate. It is used to allow multiple crates
-    /// with the same name to coexist. See the
-    /// `rustc_symbol_mangling` crate for more information.
-    pub stable_crate_id: OnceCell<StableCrateId>,
-
-    features: OnceCell<rustc_feature::Features>,
-
-    incr_comp_session: OneThread<RefCell<IncrCompSession>>,
-    /// Used for incremental compilation tests. Will only be populated if
-    /// `-Zquery-dep-graph` is specified.
-    pub cgu_reuse_tracker: CguReuseTracker,
+    incr_comp_session: RwLock<IncrCompSession>,
 
     /// Used by `-Z self-profile`.
     pub prof: SelfProfilerRef,
 
-    /// Some measurements that are being gathered during compilation.
-    pub perf_stats: PerfStats,
-
     /// Data about code being compiled, gathered during compilation.
     pub code_stats: CodeStats,
 
-    /// Tracks fuel info if `-zfuel=crate=n` is specified.
-    optimization_fuel: Lock<OptimizationFuel>,
-
-    /// Always set to zero and incremented so that we can print fuel expended by a crate.
-    pub print_fuel: AtomicU64,
-
-    /// Loaded up early on in the initialization of this `Session` to avoid
-    /// false positives about a job server in our environment.
-    pub jobserver: Client,
+    /// This only ever stores a `LintStore` but we don't want a dependency on that type here.
+    pub lint_store: Option<Arc<dyn LintStoreMarker>>,
 
     /// Cap lint level specified by a driver specifically.
     pub driver_lint_caps: FxHashMap<lint::LintId, lint::Level>,
@@ -214,17 +182,21 @@ pub struct Session {
 
     /// The version of the rustc process, possibly including a commit hash and description.
     pub cfg_version: &'static str,
-}
 
-pub struct PerfStats {
-    /// The accumulated time spent on computing symbol hashes.
-    pub symbol_hash_time: Lock<Duration>,
-    /// Total number of values canonicalized queries constructed.
-    pub queries_canonicalized: AtomicUsize,
-    /// Number of times this query is invoked.
-    pub normalize_generic_arg_after_erasing_regions: AtomicUsize,
-    /// Number of times this query is invoked.
-    pub normalize_projection_ty: AtomicUsize,
+    /// The inner atomic value is set to true when a feature marked as `internal` is
+    /// enabled. Makes it so that "please report a bug" is hidden, as ICEs with
+    /// internal features are wontfix, and they are usually the cause of the ICEs.
+    /// None signifies that this is not tracked.
+    pub using_internal_features: &'static AtomicBool,
+
+    /// All commandline args used to invoke the compiler, with @file args fully expanded.
+    /// This will only be used within debug info, e.g. in the pdb file on windows
+    /// This is mainly useful for other tools that reads that debuginfo to figure out
+    /// how to call the compiler with the same arguments.
+    pub expanded_args: Vec<String>,
+
+    target_filesearch: FileSearch,
+    host_filesearch: FileSearch,
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
@@ -260,17 +232,17 @@ impl Session {
         self.miri_unleashed_features.lock().push((span, feature_gate));
     }
 
-    pub fn local_crate_source_file(&self) -> Option<PathBuf> {
-        let path = self.io.input.opt_path()?;
-        Some(self.opts.file_path_mapping().map_prefix(path).0.into_owned())
+    pub fn local_crate_source_file(&self) -> Option<RealFileName> {
+        Some(self.source_map().path_mapping().to_real_filename(self.io.input.opt_path()?))
     }
 
-    fn check_miri_unleashed_features(&self) {
+    fn check_miri_unleashed_features(&self) -> Option<ErrorGuaranteed> {
+        let mut guar = None;
         let unleashed_features = self.miri_unleashed_features.lock();
         if !unleashed_features.is_empty() {
             let mut must_err = false;
             // Create a diagnostic pointing at where things got unleashed.
-            self.emit_warning(errors::SkippingConstChecks {
+            self.dcx().emit_warn(errors::SkippingConstChecks {
                 unleashed_features: unleashed_features
                     .iter()
                     .map(|(span, gate)| {
@@ -284,38 +256,24 @@ impl Session {
             });
 
             // If we should err, make sure we did.
-            if must_err && self.has_errors().is_none() {
+            if must_err && self.dcx().has_errors().is_none() {
                 // We have skipped a feature gate, and not run into other errors... reject.
-                self.emit_err(errors::NotCircumventFeature);
+                guar = Some(self.dcx().emit_err(errors::NotCircumventFeature));
             }
         }
+        guar
     }
 
     /// Invoked all the way at the end to finish off diagnostics printing.
-    pub fn finish_diagnostics(&self, registry: &Registry) {
-        self.check_miri_unleashed_features();
-        self.diagnostic().print_error_count(registry);
-        self.emit_future_breakage();
-    }
-
-    fn emit_future_breakage(&self) {
-        if !self.opts.json_future_incompat {
-            return;
+    pub fn finish_diagnostics(&self) -> Option<ErrorGuaranteed> {
+        let mut guar = None;
+        guar = guar.or(self.check_miri_unleashed_features());
+        guar = guar.or(self.dcx().emit_stashed_diagnostics());
+        self.dcx().print_error_count();
+        if self.opts.json_future_incompat {
+            self.dcx().emit_future_breakage_report();
         }
-
-        let diags = self.diagnostic().take_future_breakage_diagnostics();
-        if diags.is_empty() {
-            return;
-        }
-        self.parse_sess.span_diagnostic.emit_future_breakage_report(diags);
-    }
-
-    pub fn local_stable_crate_id(&self) -> StableCrateId {
-        self.stable_crate_id.get().copied().unwrap()
-    }
-
-    pub fn crate_types(&self) -> &[CrateType] {
-        self.crate_types.get().unwrap().as_slice()
+        guar
     }
 
     /// Returns true if the crate is a testing one.
@@ -323,369 +281,21 @@ impl Session {
         self.opts.test
     }
 
-    pub fn needs_crate_hash(&self) -> bool {
-        // Why is the crate hash needed for these configurations?
-        // - debug_assertions: for the "fingerprint the result" check in
-        //   `rustc_query_system::query::plumbing::execute_job`.
-        // - incremental: for query lookups.
-        // - needs_metadata: for putting into crate metadata.
-        // - instrument_coverage: for putting into coverage data (see
-        //   `hash_mir_source`).
-        cfg!(debug_assertions)
-            || self.opts.incremental.is_some()
-            || self.needs_metadata()
-            || self.instrument_coverage()
-    }
-
-    pub fn metadata_kind(&self) -> MetadataKind {
-        self.crate_types()
-            .iter()
-            .map(|ty| match *ty {
-                CrateType::Executable | CrateType::Staticlib | CrateType::Cdylib => {
-                    MetadataKind::None
-                }
-                CrateType::Rlib => MetadataKind::Uncompressed,
-                CrateType::Dylib | CrateType::ProcMacro => MetadataKind::Compressed,
-            })
-            .max()
-            .unwrap_or(MetadataKind::None)
-    }
-
-    pub fn needs_metadata(&self) -> bool {
-        self.metadata_kind() != MetadataKind::None
-    }
-
-    pub fn init_crate_types(&self, crate_types: Vec<CrateType>) {
-        self.crate_types.set(crate_types).expect("`crate_types` was initialized twice")
-    }
-
-    #[rustc_lint_diagnostics]
+    /// `feature` must be a language feature.
     #[track_caller]
-    pub fn struct_span_warn<S: Into<MultiSpan>>(
-        &self,
-        sp: S,
-        msg: impl Into<DiagnosticMessage>,
-    ) -> DiagnosticBuilder<'_, ()> {
-        self.diagnostic().struct_span_warn(sp, msg)
-    }
-    #[rustc_lint_diagnostics]
-    #[track_caller]
-    pub fn struct_span_warn_with_expectation<S: Into<MultiSpan>>(
-        &self,
-        sp: S,
-        msg: impl Into<DiagnosticMessage>,
-        id: lint::LintExpectationId,
-    ) -> DiagnosticBuilder<'_, ()> {
-        self.diagnostic().struct_span_warn_with_expectation(sp, msg, id)
-    }
-    #[rustc_lint_diagnostics]
-    #[track_caller]
-    pub fn struct_span_warn_with_code<S: Into<MultiSpan>>(
-        &self,
-        sp: S,
-        msg: impl Into<DiagnosticMessage>,
-        code: DiagnosticId,
-    ) -> DiagnosticBuilder<'_, ()> {
-        self.diagnostic().struct_span_warn_with_code(sp, msg, code)
-    }
-    #[rustc_lint_diagnostics]
-    #[track_caller]
-    pub fn struct_warn(&self, msg: impl Into<DiagnosticMessage>) -> DiagnosticBuilder<'_, ()> {
-        self.diagnostic().struct_warn(msg)
-    }
-    #[rustc_lint_diagnostics]
-    #[track_caller]
-    pub fn struct_warn_with_expectation(
-        &self,
-        msg: impl Into<DiagnosticMessage>,
-        id: lint::LintExpectationId,
-    ) -> DiagnosticBuilder<'_, ()> {
-        self.diagnostic().struct_warn_with_expectation(msg, id)
-    }
-    #[rustc_lint_diagnostics]
-    #[track_caller]
-    pub fn struct_span_allow<S: Into<MultiSpan>>(
-        &self,
-        sp: S,
-        msg: impl Into<DiagnosticMessage>,
-    ) -> DiagnosticBuilder<'_, ()> {
-        self.diagnostic().struct_span_allow(sp, msg)
-    }
-    #[rustc_lint_diagnostics]
-    #[track_caller]
-    pub fn struct_allow(&self, msg: impl Into<DiagnosticMessage>) -> DiagnosticBuilder<'_, ()> {
-        self.diagnostic().struct_allow(msg)
-    }
-    #[rustc_lint_diagnostics]
-    #[track_caller]
-    pub fn struct_expect(
-        &self,
-        msg: impl Into<DiagnosticMessage>,
-        id: lint::LintExpectationId,
-    ) -> DiagnosticBuilder<'_, ()> {
-        self.diagnostic().struct_expect(msg, id)
-    }
-    #[rustc_lint_diagnostics]
-    #[track_caller]
-    pub fn struct_span_err<S: Into<MultiSpan>>(
-        &self,
-        sp: S,
-        msg: impl Into<DiagnosticMessage>,
-    ) -> DiagnosticBuilder<'_, ErrorGuaranteed> {
-        self.diagnostic().struct_span_err(sp, msg)
-    }
-    #[rustc_lint_diagnostics]
-    #[track_caller]
-    pub fn struct_span_err_with_code<S: Into<MultiSpan>>(
-        &self,
-        sp: S,
-        msg: impl Into<DiagnosticMessage>,
-        code: DiagnosticId,
-    ) -> DiagnosticBuilder<'_, ErrorGuaranteed> {
-        self.diagnostic().struct_span_err_with_code(sp, msg, code)
-    }
-    // FIXME: This method should be removed (every error should have an associated error code).
-    #[rustc_lint_diagnostics]
-    #[track_caller]
-    pub fn struct_err(
-        &self,
-        msg: impl Into<DiagnosticMessage>,
-    ) -> DiagnosticBuilder<'_, ErrorGuaranteed> {
-        self.parse_sess.struct_err(msg)
-    }
-    #[track_caller]
-    #[rustc_lint_diagnostics]
-    pub fn struct_err_with_code(
-        &self,
-        msg: impl Into<DiagnosticMessage>,
-        code: DiagnosticId,
-    ) -> DiagnosticBuilder<'_, ErrorGuaranteed> {
-        self.diagnostic().struct_err_with_code(msg, code)
-    }
-    #[rustc_lint_diagnostics]
-    #[track_caller]
-    pub fn struct_warn_with_code(
-        &self,
-        msg: impl Into<DiagnosticMessage>,
-        code: DiagnosticId,
-    ) -> DiagnosticBuilder<'_, ()> {
-        self.diagnostic().struct_warn_with_code(msg, code)
-    }
-    #[rustc_lint_diagnostics]
-    #[track_caller]
-    pub fn struct_span_fatal<S: Into<MultiSpan>>(
-        &self,
-        sp: S,
-        msg: impl Into<DiagnosticMessage>,
-    ) -> DiagnosticBuilder<'_, !> {
-        self.diagnostic().struct_span_fatal(sp, msg)
-    }
-    #[rustc_lint_diagnostics]
-    pub fn struct_span_fatal_with_code<S: Into<MultiSpan>>(
-        &self,
-        sp: S,
-        msg: impl Into<DiagnosticMessage>,
-        code: DiagnosticId,
-    ) -> DiagnosticBuilder<'_, !> {
-        self.diagnostic().struct_span_fatal_with_code(sp, msg, code)
-    }
-    #[rustc_lint_diagnostics]
-    pub fn struct_fatal(&self, msg: impl Into<DiagnosticMessage>) -> DiagnosticBuilder<'_, !> {
-        self.diagnostic().struct_fatal(msg)
-    }
-
-    #[rustc_lint_diagnostics]
-    #[track_caller]
-    pub fn span_fatal<S: Into<MultiSpan>>(&self, sp: S, msg: impl Into<DiagnosticMessage>) -> ! {
-        self.diagnostic().span_fatal(sp, msg)
-    }
-    #[rustc_lint_diagnostics]
-    pub fn span_fatal_with_code<S: Into<MultiSpan>>(
-        &self,
-        sp: S,
-        msg: impl Into<DiagnosticMessage>,
-        code: DiagnosticId,
-    ) -> ! {
-        self.diagnostic().span_fatal_with_code(sp, msg, code)
-    }
-    #[rustc_lint_diagnostics]
-    pub fn fatal(&self, msg: impl Into<DiagnosticMessage>) -> ! {
-        self.diagnostic().fatal(msg).raise()
-    }
-    #[rustc_lint_diagnostics]
-    #[track_caller]
-    pub fn span_err<S: Into<MultiSpan>>(
-        &self,
-        sp: S,
-        msg: impl Into<DiagnosticMessage>,
-    ) -> ErrorGuaranteed {
-        self.diagnostic().span_err(sp, msg)
-    }
-    #[rustc_lint_diagnostics]
-    pub fn span_err_with_code<S: Into<MultiSpan>>(
-        &self,
-        sp: S,
-        msg: impl Into<DiagnosticMessage>,
-        code: DiagnosticId,
-    ) {
-        self.diagnostic().span_err_with_code(sp, msg, code)
-    }
-    #[rustc_lint_diagnostics]
-    #[allow(rustc::untranslatable_diagnostic)]
-    #[allow(rustc::diagnostic_outside_of_impl)]
-    pub fn err(&self, msg: impl Into<DiagnosticMessage>) -> ErrorGuaranteed {
-        self.diagnostic().err(msg)
-    }
-    #[track_caller]
-    pub fn create_err<'a>(
-        &'a self,
-        err: impl IntoDiagnostic<'a>,
-    ) -> DiagnosticBuilder<'a, ErrorGuaranteed> {
-        self.parse_sess.create_err(err)
-    }
-    #[track_caller]
-    pub fn create_feature_err<'a>(
-        &'a self,
-        err: impl IntoDiagnostic<'a>,
-        feature: Symbol,
-    ) -> DiagnosticBuilder<'a, ErrorGuaranteed> {
-        let mut err = self.parse_sess.create_err(err);
+    pub fn create_feature_err<'a>(&'a self, err: impl Diagnostic<'a>, feature: Symbol) -> Diag<'a> {
+        let mut err = self.dcx().create_err(err);
         if err.code.is_none() {
-            err.code = std::option::Option::Some(error_code!(E0658));
+            #[allow(rustc::diagnostic_outside_of_impl)]
+            err.code(E0658);
         }
-        add_feature_diagnostics(&mut err, &self.parse_sess, feature);
+        add_feature_diagnostics(&mut err, self, feature);
         err
     }
-    #[track_caller]
-    pub fn emit_err<'a>(&'a self, err: impl IntoDiagnostic<'a>) -> ErrorGuaranteed {
-        self.parse_sess.emit_err(err)
-    }
-    #[track_caller]
-    pub fn create_warning<'a>(
-        &'a self,
-        err: impl IntoDiagnostic<'a, ()>,
-    ) -> DiagnosticBuilder<'a, ()> {
-        self.parse_sess.create_warning(err)
-    }
-    #[track_caller]
-    pub fn emit_warning<'a>(&'a self, warning: impl IntoDiagnostic<'a, ()>) {
-        self.parse_sess.emit_warning(warning)
-    }
-    #[track_caller]
-    pub fn create_note<'a>(
-        &'a self,
-        note: impl IntoDiagnostic<'a, Noted>,
-    ) -> DiagnosticBuilder<'a, Noted> {
-        self.parse_sess.create_note(note)
-    }
-    #[track_caller]
-    pub fn emit_note<'a>(&'a self, note: impl IntoDiagnostic<'a, Noted>) -> Noted {
-        self.parse_sess.emit_note(note)
-    }
-    #[track_caller]
-    pub fn create_fatal<'a>(
-        &'a self,
-        fatal: impl IntoDiagnostic<'a, !>,
-    ) -> DiagnosticBuilder<'a, !> {
-        self.parse_sess.create_fatal(fatal)
-    }
-    #[track_caller]
-    pub fn emit_fatal<'a>(&'a self, fatal: impl IntoDiagnostic<'a, !>) -> ! {
-        self.parse_sess.emit_fatal(fatal)
-    }
-    #[inline]
-    pub fn err_count(&self) -> usize {
-        self.diagnostic().err_count()
-    }
-    pub fn has_errors(&self) -> Option<ErrorGuaranteed> {
-        self.diagnostic().has_errors()
-    }
-    pub fn has_errors_or_delayed_span_bugs(&self) -> Option<ErrorGuaranteed> {
-        self.diagnostic().has_errors_or_delayed_span_bugs()
-    }
-    pub fn is_compilation_going_to_fail(&self) -> Option<ErrorGuaranteed> {
-        self.diagnostic().is_compilation_going_to_fail()
-    }
-    pub fn abort_if_errors(&self) {
-        self.diagnostic().abort_if_errors();
-    }
-    pub fn compile_status(&self) -> Result<(), ErrorGuaranteed> {
-        if let Some(reported) = self.diagnostic().has_errors_or_lint_errors() {
-            let _ = self.diagnostic().emit_stashed_diagnostics();
-            Err(reported)
-        } else {
-            Ok(())
-        }
-    }
-    // FIXME(matthewjasper) Remove this method, it should never be needed.
-    pub fn track_errors<F, T>(&self, f: F) -> Result<T, ErrorGuaranteed>
-    where
-        F: FnOnce() -> T,
-    {
-        let old_count = self.err_count();
-        let result = f();
-        if self.err_count() == old_count {
-            Ok(result)
-        } else {
-            Err(self.delay_span_bug(
-                rustc_span::DUMMY_SP,
-                "`self.err_count()` changed but an error was not emitted",
-            ))
-        }
-    }
 
-    #[rustc_lint_diagnostics]
-    #[allow(rustc::untranslatable_diagnostic)]
-    #[allow(rustc::diagnostic_outside_of_impl)]
-    #[track_caller]
-    pub fn span_warn<S: Into<MultiSpan>>(&self, sp: S, msg: impl Into<DiagnosticMessage>) {
-        self.diagnostic().span_warn(sp, msg)
-    }
-
-    #[rustc_lint_diagnostics]
-    #[allow(rustc::untranslatable_diagnostic)]
-    #[allow(rustc::diagnostic_outside_of_impl)]
-    pub fn span_warn_with_code<S: Into<MultiSpan>>(
-        &self,
-        sp: S,
-        msg: impl Into<DiagnosticMessage>,
-        code: DiagnosticId,
-    ) {
-        self.diagnostic().span_warn_with_code(sp, msg, code)
-    }
-
-    #[rustc_lint_diagnostics]
-    #[allow(rustc::untranslatable_diagnostic)]
-    #[allow(rustc::diagnostic_outside_of_impl)]
-    pub fn warn(&self, msg: impl Into<DiagnosticMessage>) {
-        self.diagnostic().warn(msg)
-    }
-
-    /// Ensures that compilation cannot succeed.
-    ///
-    /// If this function has been called but no errors have been emitted and
-    /// compilation succeeds, it will cause an internal compiler error (ICE).
-    ///
-    /// This can be used in code paths that should never run on successful compilations.
-    /// For example, it can be used to create an [`ErrorGuaranteed`]
-    /// (but you should prefer threading through the [`ErrorGuaranteed`] from an error emission directly).
-    ///
-    /// If no span is available, use [`DUMMY_SP`].
-    ///
-    /// [`DUMMY_SP`]: rustc_span::DUMMY_SP
-    #[track_caller]
-    pub fn delay_span_bug<S: Into<MultiSpan>>(
-        &self,
-        sp: S,
-        msg: impl Into<DiagnosticMessage>,
-    ) -> ErrorGuaranteed {
-        self.diagnostic().delay_span_bug(sp, msg)
-    }
-
-    /// Used for code paths of expensive computations that should only take place when
-    /// warnings or errors are emitted. If no messages are emitted ("good path"), then
-    /// it's likely a bug.
-    pub fn delay_good_path_bug(&self, msg: impl Into<DiagnosticMessage>) {
+    /// Record the fact that we called `trimmed_def_paths`, and do some
+    /// checking about whether its cost was justified.
+    pub fn record_trimmed_def_paths(&self) {
         if self.opts.unstable_opts.print_type_sizes
             || self.opts.unstable_opts.query_dep_graph
             || self.opts.unstable_opts.dump_mir.is_some()
@@ -696,46 +306,17 @@ impl Session {
             return;
         }
 
-        self.diagnostic().delay_good_path_bug(msg)
-    }
-
-    #[rustc_lint_diagnostics]
-    #[allow(rustc::untranslatable_diagnostic)]
-    #[allow(rustc::diagnostic_outside_of_impl)]
-    pub fn note_without_error(&self, msg: impl Into<DiagnosticMessage>) {
-        self.diagnostic().note_without_error(msg)
-    }
-
-    #[track_caller]
-    #[rustc_lint_diagnostics]
-    #[allow(rustc::untranslatable_diagnostic)]
-    #[allow(rustc::diagnostic_outside_of_impl)]
-    pub fn span_note_without_error<S: Into<MultiSpan>>(
-        &self,
-        sp: S,
-        msg: impl Into<DiagnosticMessage>,
-    ) {
-        self.diagnostic().span_note_without_error(sp, msg)
-    }
-
-    #[rustc_lint_diagnostics]
-    #[allow(rustc::untranslatable_diagnostic)]
-    #[allow(rustc::diagnostic_outside_of_impl)]
-    pub fn struct_note_without_error(
-        &self,
-        msg: impl Into<DiagnosticMessage>,
-    ) -> DiagnosticBuilder<'_, ()> {
-        self.diagnostic().struct_note_without_error(msg)
+        self.dcx().set_must_produce_diag()
     }
 
     #[inline]
-    pub fn diagnostic(&self) -> &rustc_errors::Handler {
-        &self.parse_sess.span_diagnostic
+    pub fn dcx(&self) -> DiagCtxtHandle<'_> {
+        self.psess.dcx()
     }
 
     #[inline]
     pub fn source_map(&self) -> &SourceMap {
-        self.parse_sess.source_map()
+        self.psess.source_map()
     }
 
     /// Returns `true` if internal lints should be added to the lint store - i.e. if
@@ -746,30 +327,32 @@ impl Session {
     }
 
     pub fn instrument_coverage(&self) -> bool {
-        self.opts.cg.instrument_coverage() != InstrumentCoverage::Off
+        self.opts.cg.instrument_coverage() != InstrumentCoverage::No
     }
 
-    pub fn instrument_coverage_except_unused_generics(&self) -> bool {
-        self.opts.cg.instrument_coverage() == InstrumentCoverage::ExceptUnusedGenerics
+    pub fn instrument_coverage_branch(&self) -> bool {
+        self.instrument_coverage()
+            && self.opts.unstable_opts.coverage_options.level >= CoverageLevel::Branch
     }
 
-    pub fn instrument_coverage_except_unused_functions(&self) -> bool {
-        self.opts.cg.instrument_coverage() == InstrumentCoverage::ExceptUnusedFunctions
+    pub fn instrument_coverage_condition(&self) -> bool {
+        self.instrument_coverage()
+            && self.opts.unstable_opts.coverage_options.level >= CoverageLevel::Condition
     }
 
-    /// Gets the features enabled for the current compilation session.
-    /// DO NOT USE THIS METHOD if there is a TyCtxt available, as it circumvents
-    /// dependency tracking. Use tcx.features() instead.
-    #[inline]
-    pub fn features_untracked(&self) -> &rustc_feature::Features {
-        self.features.get().unwrap()
+    pub fn instrument_coverage_mcdc(&self) -> bool {
+        self.instrument_coverage()
+            && self.opts.unstable_opts.coverage_options.level >= CoverageLevel::Mcdc
     }
 
-    pub fn init_features(&self, features: rustc_feature::Features) {
-        match self.features.set(features) {
-            Ok(()) => {}
-            Err(_) => panic!("`features` was initialized twice"),
-        }
+    /// True if `-Zcoverage-options=no-mir-spans` was passed.
+    pub fn coverage_no_mir_spans(&self) -> bool {
+        self.opts.unstable_opts.coverage_options.no_mir_spans
+    }
+
+    /// True if `-Zcoverage-options=discard-all-spans-in-codegen` was passed.
+    pub fn coverage_discard_all_spans_in_codegen(&self) -> bool {
+        self.opts.unstable_opts.coverage_options.discard_all_spans_in_codegen
     }
 
     pub fn is_sanitizer_cfi_enabled(&self) -> bool {
@@ -844,42 +427,36 @@ impl Session {
         format!("__rustc_proc_macro_decls_{:08x}__", stable_crate_id.as_u64())
     }
 
-    pub fn target_filesearch(&self, kind: PathKind) -> filesearch::FileSearch<'_> {
-        filesearch::FileSearch::new(
-            &self.sysroot,
-            self.opts.target_triple.triple(),
-            &self.opts.search_paths,
-            &self.target_tlib_path,
-            kind,
-        )
+    pub fn target_filesearch(&self) -> &filesearch::FileSearch {
+        &self.target_filesearch
     }
-    pub fn host_filesearch(&self, kind: PathKind) -> filesearch::FileSearch<'_> {
-        filesearch::FileSearch::new(
-            &self.sysroot,
-            config::host_triple(),
-            &self.opts.search_paths,
-            &self.host_tlib_path,
-            kind,
-        )
+    pub fn host_filesearch(&self) -> &filesearch::FileSearch {
+        &self.host_filesearch
     }
 
-    /// Returns a list of directories where target-specific tool binaries are located.
+    /// Returns a list of directories where target-specific tool binaries are located. Some fallback
+    /// directories are also returned, for example if `--sysroot` is used but tools are missing
+    /// (#125246): we also add the bin directories to the sysroot where rustc is located.
     pub fn get_tools_search_paths(&self, self_contained: bool) -> Vec<PathBuf> {
-        let rustlib_path = rustc_target::target_rustlib_path(&self.sysroot, &config::host_triple());
-        let p = PathBuf::from_iter([
-            Path::new(&self.sysroot),
-            Path::new(&rustlib_path),
-            Path::new("bin"),
-        ]);
-        if self_contained { vec![p.clone(), p.join("self-contained")] } else { vec![p] }
+        let bin_path = filesearch::make_target_bin_path(&self.sysroot, config::host_tuple());
+        let fallback_sysroot_paths = filesearch::sysroot_candidates()
+            .into_iter()
+            // Ignore sysroot candidate if it was the same as the sysroot path we just used.
+            .filter(|sysroot| *sysroot != self.sysroot)
+            .map(|sysroot| filesearch::make_target_bin_path(&sysroot, config::host_tuple()));
+        let search_paths = std::iter::once(bin_path).chain(fallback_sysroot_paths);
+
+        if self_contained {
+            // The self-contained tools are expected to be e.g. in `bin/self-contained` in the
+            // sysroot's `rustlib` path, so we add such a subfolder to the bin path, and the
+            // fallback paths.
+            search_paths.flat_map(|path| [path.clone(), path.join("self-contained")]).collect()
+        } else {
+            search_paths.collect()
+        }
     }
 
-    pub fn init_incr_comp_session(
-        &self,
-        session_dir: PathBuf,
-        lock_file: flock::Lock,
-        load_dep_graph: bool,
-    ) {
+    pub fn init_incr_comp_session(&self, session_dir: PathBuf, lock_file: flock::Lock) {
         let mut incr_comp_session = self.incr_comp_session.borrow_mut();
 
         if let IncrCompSession::NotInitialized = *incr_comp_session {
@@ -888,7 +465,7 @@ impl Session {
         }
 
         *incr_comp_session =
-            IncrCompSession::Active { session_directory: session_dir, lock_file, load_dep_graph };
+            IncrCompSession::Active { session_directory: session_dir, _lock_file: lock_file };
     }
 
     pub fn finalize_incr_comp_session(&self, new_directory_path: PathBuf) {
@@ -916,9 +493,9 @@ impl Session {
         *incr_comp_session = IncrCompSession::InvalidBecauseOfErrors { session_directory };
     }
 
-    pub fn incr_comp_session_dir(&self) -> cell::Ref<'_, PathBuf> {
+    pub fn incr_comp_session_dir(&self) -> MappedReadGuard<'_, PathBuf> {
         let incr_comp_session = self.incr_comp_session.borrow();
-        cell::Ref::map(incr_comp_session, |incr_comp_session| match *incr_comp_session {
+        ReadGuard::map(incr_comp_session, |incr_comp_session| match *incr_comp_session {
             IncrCompSession::NotInitialized => panic!(
                 "trying to get session directory from `IncrCompSession`: {:?}",
                 *incr_comp_session,
@@ -931,62 +508,8 @@ impl Session {
         })
     }
 
-    pub fn incr_comp_session_dir_opt(&self) -> Option<cell::Ref<'_, PathBuf>> {
+    pub fn incr_comp_session_dir_opt(&self) -> Option<MappedReadGuard<'_, PathBuf>> {
         self.opts.incremental.as_ref().map(|_| self.incr_comp_session_dir())
-    }
-
-    pub fn print_perf_stats(&self) {
-        eprintln!(
-            "Total time spent computing symbol hashes:      {}",
-            duration_to_secs_str(*self.perf_stats.symbol_hash_time.lock())
-        );
-        eprintln!(
-            "Total queries canonicalized:                   {}",
-            self.perf_stats.queries_canonicalized.load(Ordering::Relaxed)
-        );
-        eprintln!(
-            "normalize_generic_arg_after_erasing_regions:   {}",
-            self.perf_stats.normalize_generic_arg_after_erasing_regions.load(Ordering::Relaxed)
-        );
-        eprintln!(
-            "normalize_projection_ty:                       {}",
-            self.perf_stats.normalize_projection_ty.load(Ordering::Relaxed)
-        );
-    }
-
-    /// We want to know if we're allowed to do an optimization for crate foo from -z fuel=foo=n.
-    /// This expends fuel if applicable, and records fuel if applicable.
-    pub fn consider_optimizing(
-        &self,
-        get_crate_name: impl Fn() -> Symbol,
-        msg: impl Fn() -> String,
-    ) -> bool {
-        let mut ret = true;
-        if let Some((ref c, _)) = self.opts.unstable_opts.fuel {
-            if c == get_crate_name().as_str() {
-                assert_eq!(self.threads(), 1);
-                let mut fuel = self.optimization_fuel.lock();
-                ret = fuel.remaining != 0;
-                if fuel.remaining == 0 && !fuel.out_of_fuel {
-                    if self.diagnostic().can_emit_warnings() {
-                        // We only call `msg` in case we can actually emit warnings.
-                        // Otherwise, this could cause a `delay_good_path_bug` to
-                        // trigger (issue #79546).
-                        self.emit_warning(errors::OptimisationFuelExhausted { msg: msg() });
-                    }
-                    fuel.out_of_fuel = true;
-                } else if fuel.remaining > 0 {
-                    fuel.remaining -= 1;
-                }
-            }
-        }
-        if let Some(ref c) = self.opts.unstable_opts.print_fuel {
-            if c == get_crate_name().as_str() {
-                assert_eq!(self.threads(), 1);
-                self.print_fuel.fetch_add(1, SeqCst);
-            }
-        }
-        ret
     }
 
     /// Is this edition 2015?
@@ -995,29 +518,29 @@ impl Session {
     }
 
     /// Are we allowed to use features from the Rust 2018 edition?
-    pub fn rust_2018(&self) -> bool {
-        self.edition().rust_2018()
+    pub fn at_least_rust_2018(&self) -> bool {
+        self.edition().at_least_rust_2018()
     }
 
     /// Are we allowed to use features from the Rust 2021 edition?
-    pub fn rust_2021(&self) -> bool {
-        self.edition().rust_2021()
+    pub fn at_least_rust_2021(&self) -> bool {
+        self.edition().at_least_rust_2021()
     }
 
     /// Are we allowed to use features from the Rust 2024 edition?
-    pub fn rust_2024(&self) -> bool {
-        self.edition().rust_2024()
+    pub fn at_least_rust_2024(&self) -> bool {
+        self.edition().at_least_rust_2024()
     }
 
-    /// Returns `true` if we cannot skip the PLT for shared library calls.
+    /// Returns `true` if we should use the PLT for shared library calls.
     pub fn needs_plt(&self) -> bool {
-        // Check if the current target usually needs PLT to be enabled.
+        // Check if the current target usually wants PLT to be enabled.
         // The user can use the command line flag to override it.
-        let needs_plt = self.target.needs_plt;
+        let want_plt = self.target.plt_by_default;
 
         let dbg_opts = &self.opts.unstable_opts;
 
-        let relro_level = dbg_opts.relro_level.unwrap_or(self.target.relro_level);
+        let relro_level = self.opts.cg.relro_level.unwrap_or(self.target.relro_level);
 
         // Only enable this optimization by default if full relro is also enabled.
         // In this case, lazy binding was already unavailable, so nothing is lost.
@@ -1025,8 +548,8 @@ impl Session {
         let full_relro = RelroLevel::Full == relro_level;
 
         // If user didn't explicitly forced us to use / skip the PLT,
-        // then try to skip it where possible.
-        dbg_opts.plt.unwrap_or(needs_plt || !full_relro)
+        // then use it unless the target doesn't want it by default or the full relro forces it on.
+        dbg_opts.plt.unwrap_or(want_plt || !full_relro)
     }
 
     /// Checks if LLVM lifetime markers should be emitted.
@@ -1048,13 +571,26 @@ impl Session {
             termize::dimensions().map_or(default_column_width, |(w, _)| w)
         }
     }
+
+    /// Returns the default symbol visibility.
+    pub fn default_visibility(&self) -> SymbolVisibility {
+        self.opts
+            .unstable_opts
+            .default_visibility
+            .or(self.target.options.default_visibility)
+            .unwrap_or(SymbolVisibility::Interposable)
+    }
 }
 
 // JUSTIFICATION: defn of the suggested wrapper fns
 #[allow(rustc::bad_opt_access)]
 impl Session {
-    pub fn verbose(&self) -> bool {
-        self.opts.unstable_opts.verbose
+    pub fn verbose_internals(&self) -> bool {
+        self.opts.unstable_opts.verbose_internals
+    }
+
+    pub fn print_llvm_stats(&self) -> bool {
+        self.opts.unstable_opts.print_codegen_stats
     }
 
     pub fn verify_llvm_ir(&self) -> bool {
@@ -1167,6 +703,14 @@ impl Session {
         self.opts.cg.overflow_checks.unwrap_or(self.opts.debug_assertions)
     }
 
+    pub fn ub_checks(&self) -> bool {
+        self.opts.unstable_opts.ub_checks.unwrap_or(self.opts.debug_assertions)
+    }
+
+    pub fn contract_checks(&self) -> bool {
+        self.opts.unstable_opts.contract_checks.unwrap_or(false)
+    }
+
     pub fn relocation_model(&self) -> RelocModel {
         self.opts.cg.relocation_model.unwrap_or(self.target.relocation_model)
     }
@@ -1179,8 +723,20 @@ impl Session {
         self.opts.unstable_opts.tls_model.unwrap_or(self.target.tls_model)
     }
 
+    pub fn direct_access_external_data(&self) -> Option<bool> {
+        self.opts
+            .unstable_opts
+            .direct_access_external_data
+            .or(self.target.direct_access_external_data)
+    }
+
     pub fn split_debuginfo(&self) -> SplitDebuginfo {
         self.opts.cg.split_debuginfo.unwrap_or(self.target.split_debuginfo)
+    }
+
+    /// Returns the DWARF version passed on the CLI or the default for the target.
+    pub fn dwarf_version(&self) -> u32 {
+        self.opts.unstable_opts.dwarf_version.unwrap_or(self.target.default_dwarf_version)
     }
 
     pub fn stack_protector(&self) -> StackProtector {
@@ -1295,8 +851,8 @@ impl Session {
         CodegenUnits::Default(16)
     }
 
-    pub fn teach(&self, code: &DiagnosticId) -> bool {
-        self.opts.unstable_opts.teach && self.diagnostic().must_teach(code)
+    pub fn teach(&self, code: ErrCode) -> bool {
+        self.opts.unstable_opts.teach && self.dcx().must_teach(code)
     }
 
     pub fn edition(&self) -> Edition {
@@ -1306,17 +862,31 @@ impl Session {
     pub fn link_dead_code(&self) -> bool {
         self.opts.cg.link_dead_code.unwrap_or(false)
     }
+
+    pub fn filename_display_preference(
+        &self,
+        scope: RemapPathScopeComponents,
+    ) -> FileNameDisplayPreference {
+        assert!(
+            scope.bits().count_ones() == 1,
+            "one and only one scope should be passed to `Session::filename_display_preference`"
+        );
+        if self.opts.unstable_opts.remap_path_scope.contains(scope) {
+            FileNameDisplayPreference::Remapped
+        } else {
+            FileNameDisplayPreference::Local
+        }
+    }
 }
 
 // JUSTIFICATION: part of session construction
 #[allow(rustc::bad_opt_access)]
 fn default_emitter(
     sopts: &config::Options,
-    registry: rustc_errors::registry::Registry,
-    source_map: Lrc<SourceMap>,
-    bundle: Option<Lrc<FluentBundle>>,
+    source_map: Arc<SourceMap>,
+    bundle: Option<Arc<FluentBundle>>,
     fallback_bundle: LazyFallbackBundle,
-) -> Box<dyn Emitter + sync::Send> {
+) -> Box<DynEmitter> {
     let macro_backtrace = sopts.unstable_opts.macro_backtrace;
     let track_diagnostics = sopts.unstable_opts.track_diagnostics;
     let terminal_url = match sopts.unstable_opts.terminal_urls {
@@ -1332,13 +902,16 @@ fn default_emitter(
         }
         t => t,
     };
-    match sopts.error_format {
-        config::ErrorOutputType::HumanReadable(kind) => {
-            let (short, color_config) = kind.unzip();
 
-            if let HumanReadableErrorType::AnnotateSnippet(_) = kind {
-                let emitter = AnnotateSnippetEmitterWriter::new(
-                    Some(source_map),
+    let source_map = if sopts.unstable_opts.link_only { None } else { Some(source_map) };
+
+    match sopts.error_format {
+        config::ErrorOutputType::HumanReadable(kind, color_config) => {
+            let short = kind.short();
+
+            if let HumanReadableErrorType::AnnotateSnippet = kind {
+                let emitter = AnnotateSnippetEmitter::new(
+                    source_map,
                     bundle,
                     fallback_bundle,
                     short,
@@ -1346,51 +919,64 @@ fn default_emitter(
                 );
                 Box::new(emitter.ui_testing(sopts.unstable_opts.ui_testing))
             } else {
-                let emitter = EmitterWriter::stderr(
-                    color_config,
-                    Some(source_map),
-                    bundle,
-                    fallback_bundle,
-                    short,
-                    sopts.unstable_opts.teach,
-                    sopts.diagnostic_width,
-                    macro_backtrace,
-                    track_diagnostics,
-                    terminal_url,
-                );
+                let emitter = HumanEmitter::new(stderr_destination(color_config), fallback_bundle)
+                    .fluent_bundle(bundle)
+                    .sm(source_map)
+                    .short_message(short)
+                    .teach(sopts.unstable_opts.teach)
+                    .diagnostic_width(sopts.diagnostic_width)
+                    .macro_backtrace(macro_backtrace)
+                    .track_diagnostics(track_diagnostics)
+                    .terminal_url(terminal_url)
+                    .theme(if let HumanReadableErrorType::Unicode = kind {
+                        OutputTheme::Unicode
+                    } else {
+                        OutputTheme::Ascii
+                    })
+                    .ignored_directories_in_source_blocks(
+                        sopts.unstable_opts.ignore_directory_in_diagnostics_source_blocks.clone(),
+                    );
                 Box::new(emitter.ui_testing(sopts.unstable_opts.ui_testing))
             }
         }
-        config::ErrorOutputType::Json { pretty, json_rendered } => Box::new(
-            JsonEmitter::stderr(
-                Some(registry),
+        config::ErrorOutputType::Json { pretty, json_rendered, color_config } => Box::new(
+            JsonEmitter::new(
+                Box::new(io::BufWriter::new(io::stderr())),
                 source_map,
-                bundle,
                 fallback_bundle,
                 pretty,
                 json_rendered,
-                sopts.diagnostic_width,
-                macro_backtrace,
-                track_diagnostics,
-                terminal_url,
+                color_config,
             )
-            .ui_testing(sopts.unstable_opts.ui_testing),
+            .fluent_bundle(bundle)
+            .ui_testing(sopts.unstable_opts.ui_testing)
+            .ignored_directories_in_source_blocks(
+                sopts.unstable_opts.ignore_directory_in_diagnostics_source_blocks.clone(),
+            )
+            .diagnostic_width(sopts.diagnostic_width)
+            .macro_backtrace(macro_backtrace)
+            .track_diagnostics(track_diagnostics)
+            .terminal_url(terminal_url),
         ),
     }
 }
 
 // JUSTIFICATION: literally session construction
 #[allow(rustc::bad_opt_access)]
+#[allow(rustc::untranslatable_diagnostic)] // FIXME: make this translatable
 pub fn build_session(
     sopts: config::Options,
     io: CompilerIO,
-    bundle: Option<Lrc<rustc_errors::FluentBundle>>,
+    bundle: Option<Arc<rustc_errors::FluentBundle>>,
     registry: rustc_errors::registry::Registry,
     fluent_resources: Vec<&'static str>,
     driver_lint_caps: FxHashMap<lint::LintId, lint::Level>,
-    file_loader: Option<Box<dyn FileLoader + Send + Sync + 'static>>,
-    target_override: Option<Target>,
+    target: Target,
+    sysroot: PathBuf,
     cfg_version: &'static str,
+    ice_file: Option<PathBuf>,
+    using_internal_features: &'static AtomicBool,
+    expanded_args: Vec<String>,
 ) -> Session {
     // FIXME: This is not general enough to make the warning lint completely override
     // normal diagnostic warnings, since the warning lint can also be denied and changed
@@ -1403,44 +989,26 @@ pub fn build_session(
     let cap_lints_allow = sopts.lint_cap.is_some_and(|cap| cap == lint::Allow);
     let can_emit_warnings = !(warnings_allow || cap_lints_allow);
 
-    let sysroot = match &sopts.maybe_sysroot {
-        Some(sysroot) => sysroot.clone(),
-        None => filesearch::get_or_default_sysroot().expect("Failed finding sysroot"),
-    };
-
-    let target_cfg = config::build_target_config(&sopts, target_override, &sysroot);
-    let host_triple = TargetTriple::from_triple(config::host_triple());
-    let (host, target_warnings) = Target::search(&host_triple, &sysroot).unwrap_or_else(|e| {
-        early_error(sopts.error_format, format!("Error loading host specification: {e}"))
-    });
-    for warning in target_warnings.warning_messages() {
-        early_warn(sopts.error_format, warning)
-    }
-
-    let loader = file_loader.unwrap_or_else(|| Box::new(RealFileLoader));
-    let hash_kind = sopts.unstable_opts.src_hash_algorithm.unwrap_or_else(|| {
-        if target_cfg.is_like_msvc {
-            SourceFileHashAlgorithm::Sha1
-        } else {
-            SourceFileHashAlgorithm::Md5
-        }
-    });
-    let source_map = Lrc::new(SourceMap::with_file_loader_and_hash_kind(
-        loader,
-        sopts.file_path_mapping(),
-        hash_kind,
-    ));
-
     let fallback_bundle = fallback_fluent_bundle(
         fluent_resources,
         sopts.unstable_opts.translate_directionality_markers,
     );
-    let emitter = default_emitter(&sopts, registry, source_map.clone(), bundle, fallback_bundle);
+    let source_map = rustc_span::source_map::get_source_map().unwrap();
+    let emitter = default_emitter(&sopts, Arc::clone(&source_map), bundle, fallback_bundle);
 
-    let span_diagnostic = rustc_errors::Handler::with_emitter_and_flags(
-        emitter,
-        sopts.unstable_opts.diagnostic_handler_flags(can_emit_warnings),
-    );
+    let mut dcx = DiagCtxt::new(emitter)
+        .with_flags(sopts.unstable_opts.dcx_flags(can_emit_warnings))
+        .with_registry(registry);
+    if let Some(ice_file) = ice_file {
+        dcx = dcx.with_ice_file(ice_file);
+    }
+
+    let host_triple = TargetTuple::from_tuple(config::host_tuple());
+    let (host, target_warnings) = Target::search(&host_triple, &sysroot)
+        .unwrap_or_else(|e| dcx.handle().fatal(format!("Error loading host specification: {e}")));
+    for warning in target_warnings.warning_messages() {
+        dcx.handle().warn(warning)
+    }
 
     let self_profiler = if let SwitchWithOptPath::Enabled(ref d) = sopts.unstable_opts.self_profile
     {
@@ -1456,7 +1024,7 @@ pub fn build_session(
         match profiler {
             Ok(profiler) => Some(Arc::new(profiler)),
             Err(e) => {
-                early_warn(sopts.error_format, format!("failed to create profiler: {e}"));
+                dcx.handle().emit_warn(errors::FailedToCreateProfiler { err: e.to_string() });
                 None
             }
         }
@@ -1464,30 +1032,18 @@ pub fn build_session(
         None
     };
 
-    let mut parse_sess = ParseSess::with_span_handler(span_diagnostic, source_map);
-    parse_sess.assume_incomplete_release = sopts.unstable_opts.assume_incomplete_release;
+    let mut psess = ParseSess::with_dcx(dcx, source_map);
+    psess.assume_incomplete_release = sopts.unstable_opts.assume_incomplete_release;
 
-    let host_triple = config::host_triple();
-    let target_triple = sopts.target_triple.triple();
-    let host_tlib_path = Lrc::new(SearchPath::from_sysroot_and_triple(&sysroot, host_triple));
+    let host_triple = config::host_tuple();
+    let target_triple = sopts.target_triple.tuple();
+    let host_tlib_path = Arc::new(SearchPath::from_sysroot_and_triple(&sysroot, host_triple));
     let target_tlib_path = if host_triple == target_triple {
         // Use the same `SearchPath` if host and target triple are identical to avoid unnecessary
         // rescanning of the target lib path and an unnecessary allocation.
-        host_tlib_path.clone()
+        Arc::clone(&host_tlib_path)
     } else {
-        Lrc::new(SearchPath::from_sysroot_and_triple(&sysroot, target_triple))
-    };
-
-    let optimization_fuel = Lock::new(OptimizationFuel {
-        remaining: sopts.unstable_opts.fuel.as_ref().map_or(0, |&(_, i)| i),
-        out_of_fuel: false,
-    });
-    let print_fuel = AtomicU64::new(0);
-
-    let cgu_reuse_tracker = if sopts.unstable_opts.query_dep_graph {
-        CguReuseTracker::new()
-    } else {
-        CguReuseTracker::new_disabled()
+        Arc::new(SearchPath::from_sysroot_and_triple(&sysroot, target_triple))
     };
 
     let prof = SelfProfilerRef::new(
@@ -1501,34 +1057,23 @@ pub fn build_session(
         _ => CtfeBacktrace::Disabled,
     });
 
-    let asm_arch =
-        if target_cfg.allow_asm { InlineAsmArch::from_str(&target_cfg.arch).ok() } else { None };
-
+    let asm_arch = if target.allow_asm { InlineAsmArch::from_str(&target.arch).ok() } else { None };
+    let target_filesearch =
+        filesearch::FileSearch::new(&sopts.search_paths, &target_tlib_path, &target);
+    let host_filesearch = filesearch::FileSearch::new(&sopts.search_paths, &host_tlib_path, &host);
     let sess = Session {
-        target: target_cfg,
+        target,
         host,
         opts: sopts,
         host_tlib_path,
         target_tlib_path,
-        parse_sess,
+        psess,
         sysroot,
         io,
-        crate_types: OnceCell::new(),
-        stable_crate_id: OnceCell::new(),
-        features: OnceCell::new(),
-        incr_comp_session: OneThread::new(RefCell::new(IncrCompSession::NotInitialized)),
-        cgu_reuse_tracker,
+        incr_comp_session: RwLock::new(IncrCompSession::NotInitialized),
         prof,
-        perf_stats: PerfStats {
-            symbol_hash_time: Lock::new(Duration::from_secs(0)),
-            queries_canonicalized: AtomicUsize::new(0),
-            normalize_generic_arg_after_erasing_regions: AtomicUsize::new(0),
-            normalize_projection_ty: AtomicUsize::new(0),
-        },
         code_stats: Default::default(),
-        optimization_fuel,
-        print_fuel,
-        jobserver: jobserver::client(),
+        lint_store: None,
         driver_lint_caps,
         ctfe_backtrace,
         miri_unleashed_features: Lock::new(Default::default()),
@@ -1536,6 +1081,10 @@ pub fn build_session(
         target_features: Default::default(),
         unstable_target_features: Default::default(),
         cfg_version,
+        using_internal_features,
+        expanded_args,
+        target_filesearch,
+        host_filesearch,
     };
 
     validate_commandline_args_with_session_available(&sess);
@@ -1561,94 +1110,106 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
         && sess.opts.cg.prefer_dynamic
         && sess.target.is_like_windows
     {
-        sess.emit_err(errors::LinkerPluginToWindowsNotSupported);
+        sess.dcx().emit_err(errors::LinkerPluginToWindowsNotSupported);
     }
 
     // Make sure that any given profiling data actually exists so LLVM can't
     // decide to silently skip PGO.
     if let Some(ref path) = sess.opts.cg.profile_use {
         if !path.exists() {
-            sess.emit_err(errors::ProfileUseFileDoesNotExist { path });
+            sess.dcx().emit_err(errors::ProfileUseFileDoesNotExist { path });
         }
     }
 
     // Do the same for sample profile data.
     if let Some(ref path) = sess.opts.unstable_opts.profile_sample_use {
         if !path.exists() {
-            sess.emit_err(errors::ProfileSampleUseFileDoesNotExist { path });
+            sess.dcx().emit_err(errors::ProfileSampleUseFileDoesNotExist { path });
         }
     }
 
     // Unwind tables cannot be disabled if the target requires them.
     if let Some(include_uwtables) = sess.opts.cg.force_unwind_tables {
         if sess.target.requires_uwtable && !include_uwtables {
-            sess.emit_err(errors::TargetRequiresUnwindTables);
+            sess.dcx().emit_err(errors::TargetRequiresUnwindTables);
         }
     }
 
     // Sanitizers can only be used on platforms that we know have working sanitizer codegen.
     let supported_sanitizers = sess.target.options.supported_sanitizers;
-    let unsupported_sanitizers = sess.opts.unstable_opts.sanitizer - supported_sanitizers;
+    let mut unsupported_sanitizers = sess.opts.unstable_opts.sanitizer - supported_sanitizers;
+    // Niche: if `fixed-x18`, or effectively switching on `reserved-x18` flag, is enabled
+    // we should allow Shadow Call Stack sanitizer.
+    if sess.opts.unstable_opts.fixed_x18 && sess.target.arch == "aarch64" {
+        unsupported_sanitizers -= SanitizerSet::SHADOWCALLSTACK;
+    }
     match unsupported_sanitizers.into_iter().count() {
         0 => {}
         1 => {
-            sess.emit_err(errors::SanitizerNotSupported { us: unsupported_sanitizers.to_string() });
+            sess.dcx()
+                .emit_err(errors::SanitizerNotSupported { us: unsupported_sanitizers.to_string() });
         }
         _ => {
-            sess.emit_err(errors::SanitizersNotSupported {
+            sess.dcx().emit_err(errors::SanitizersNotSupported {
                 us: unsupported_sanitizers.to_string(),
             });
         }
     }
-    // Cannot mix and match sanitizers.
-    let mut sanitizer_iter = sess.opts.unstable_opts.sanitizer.into_iter();
-    if let (Some(first), Some(second)) = (sanitizer_iter.next(), sanitizer_iter.next()) {
-        sess.emit_err(errors::CannotMixAndMatchSanitizers {
+
+    // Cannot mix and match mutually-exclusive sanitizers.
+    if let Some((first, second)) = sess.opts.unstable_opts.sanitizer.mutually_exclusive() {
+        sess.dcx().emit_err(errors::CannotMixAndMatchSanitizers {
             first: first.to_string(),
             second: second.to_string(),
         });
     }
 
     // Cannot enable crt-static with sanitizers on Linux
-    if sess.crt_static(None) && !sess.opts.unstable_opts.sanitizer.is_empty() {
-        sess.emit_err(errors::CannotEnableCrtStaticLinux);
+    if sess.crt_static(None)
+        && !sess.opts.unstable_opts.sanitizer.is_empty()
+        && !sess.target.is_like_msvc
+    {
+        sess.dcx().emit_err(errors::CannotEnableCrtStaticLinux);
     }
 
     // LLVM CFI requires LTO.
     if sess.is_sanitizer_cfi_enabled()
-        && !(sess.lto() == config::Lto::Fat
-            || sess.lto() == config::Lto::Thin
-            || sess.opts.cg.linker_plugin_lto.enabled())
+        && !(sess.lto() == config::Lto::Fat || sess.opts.cg.linker_plugin_lto.enabled())
     {
-        sess.emit_err(errors::SanitizerCfiRequiresLto);
+        sess.dcx().emit_err(errors::SanitizerCfiRequiresLto);
     }
 
-    // LLVM CFI is incompatible with LLVM KCFI.
-    if sess.is_sanitizer_cfi_enabled() && sess.is_sanitizer_kcfi_enabled() {
-        sess.emit_err(errors::CannotMixAndMatchSanitizers {
-            first: "cfi".to_string(),
-            second: "kcfi".to_string(),
-        });
+    // KCFI requires panic=abort
+    if sess.is_sanitizer_kcfi_enabled() && sess.panic_strategy() != PanicStrategy::Abort {
+        sess.dcx().emit_err(errors::SanitizerKcfiRequiresPanicAbort);
+    }
+
+    // LLVM CFI using rustc LTO requires a single codegen unit.
+    if sess.is_sanitizer_cfi_enabled()
+        && sess.lto() == config::Lto::Fat
+        && (sess.codegen_units().as_usize() != 1)
+    {
+        sess.dcx().emit_err(errors::SanitizerCfiRequiresSingleCodegenUnit);
     }
 
     // Canonical jump tables requires CFI.
     if sess.is_sanitizer_cfi_canonical_jump_tables_disabled() {
         if !sess.is_sanitizer_cfi_enabled() {
-            sess.emit_err(errors::SanitizerCfiCanonicalJumpTablesRequiresCfi);
+            sess.dcx().emit_err(errors::SanitizerCfiCanonicalJumpTablesRequiresCfi);
         }
     }
 
     // LLVM CFI pointer generalization requires CFI or KCFI.
     if sess.is_sanitizer_cfi_generalize_pointers_enabled() {
         if !(sess.is_sanitizer_cfi_enabled() || sess.is_sanitizer_kcfi_enabled()) {
-            sess.emit_err(errors::SanitizerCfiGeneralizePointersRequiresCfi);
+            sess.dcx().emit_err(errors::SanitizerCfiGeneralizePointersRequiresCfi);
         }
     }
 
     // LLVM CFI integer normalization requires CFI or KCFI.
     if sess.is_sanitizer_cfi_normalize_integers_enabled() {
         if !(sess.is_sanitizer_cfi_enabled() || sess.is_sanitizer_kcfi_enabled()) {
-            sess.emit_err(errors::SanitizerCfiNormalizeIntegersRequiresCfi);
+            sess.dcx().emit_err(errors::SanitizerCfiNormalizeIntegersRequiresCfi);
         }
     }
 
@@ -1658,62 +1219,131 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
             || sess.lto() == config::Lto::Thin
             || sess.opts.cg.linker_plugin_lto.enabled())
     {
-        sess.emit_err(errors::SplitLtoUnitRequiresLto);
+        sess.dcx().emit_err(errors::SplitLtoUnitRequiresLto);
     }
 
     // VFE requires LTO.
     if sess.lto() != config::Lto::Fat {
         if sess.opts.unstable_opts.virtual_function_elimination {
-            sess.emit_err(errors::UnstableVirtualFunctionElimination);
+            sess.dcx().emit_err(errors::UnstableVirtualFunctionElimination);
         }
     }
 
     if sess.opts.unstable_opts.stack_protector != StackProtector::None {
         if !sess.target.options.supports_stack_protector {
-            sess.emit_warning(errors::StackProtectorNotSupportedForTarget {
+            sess.dcx().emit_warn(errors::StackProtectorNotSupportedForTarget {
                 stack_protector: sess.opts.unstable_opts.stack_protector,
                 target_triple: &sess.opts.target_triple,
             });
         }
     }
 
+    if sess.opts.unstable_opts.small_data_threshold.is_some() {
+        if sess.target.small_data_threshold_support() == SmallDataThresholdSupport::None {
+            sess.dcx().emit_warn(errors::SmallDataThresholdNotSupportedForTarget {
+                target_triple: &sess.opts.target_triple,
+            })
+        }
+    }
+
     if sess.opts.unstable_opts.branch_protection.is_some() && sess.target.arch != "aarch64" {
-        sess.emit_err(errors::BranchProtectionRequiresAArch64);
+        sess.dcx().emit_err(errors::BranchProtectionRequiresAArch64);
     }
 
     if let Some(dwarf_version) = sess.opts.unstable_opts.dwarf_version {
         if dwarf_version > 5 {
-            sess.emit_err(errors::UnsupportedDwarfVersion { dwarf_version });
+            sess.dcx().emit_err(errors::UnsupportedDwarfVersion { dwarf_version });
         }
     }
 
     if !sess.target.options.supported_split_debuginfo.contains(&sess.split_debuginfo())
         && !sess.opts.unstable_opts.unstable_options
     {
-        sess.emit_err(errors::SplitDebugInfoUnstablePlatform { debuginfo: sess.split_debuginfo() });
+        sess.dcx()
+            .emit_err(errors::SplitDebugInfoUnstablePlatform { debuginfo: sess.split_debuginfo() });
+    }
+
+    if sess.opts.unstable_opts.embed_source {
+        let dwarf_version = sess.dwarf_version();
+
+        if dwarf_version < 5 {
+            sess.dcx().emit_warn(errors::EmbedSourceInsufficientDwarfVersion { dwarf_version });
+        }
+
+        if sess.opts.debuginfo == DebugInfo::None {
+            sess.dcx().emit_warn(errors::EmbedSourceRequiresDebugInfo);
+        }
     }
 
     if sess.opts.unstable_opts.instrument_xray.is_some() && !sess.target.options.supports_xray {
-        sess.emit_err(errors::InstrumentationNotSupported { us: "XRay".to_string() });
+        sess.dcx().emit_err(errors::InstrumentationNotSupported { us: "XRay".to_string() });
     }
 
     if let Some(flavor) = sess.opts.cg.linker_flavor {
         if let Some(compatible_list) = sess.target.linker_flavor.check_compatibility(flavor) {
             let flavor = flavor.desc();
-            sess.emit_err(errors::IncompatibleLinkerFlavor { flavor, compatible_list });
+            sess.dcx().emit_err(errors::IncompatibleLinkerFlavor { flavor, compatible_list });
+        }
+    }
+
+    if sess.opts.unstable_opts.function_return != FunctionReturn::default() {
+        if sess.target.arch != "x86" && sess.target.arch != "x86_64" {
+            sess.dcx().emit_err(errors::FunctionReturnRequiresX86OrX8664);
+        }
+    }
+
+    if let Some(regparm) = sess.opts.unstable_opts.regparm {
+        if regparm > 3 {
+            sess.dcx().emit_err(errors::UnsupportedRegparm { regparm });
+        }
+        if sess.target.arch != "x86" {
+            sess.dcx().emit_err(errors::UnsupportedRegparmArch);
+        }
+    }
+    if sess.opts.unstable_opts.reg_struct_return {
+        if sess.target.arch != "x86" {
+            sess.dcx().emit_err(errors::UnsupportedRegStructReturnArch);
+        }
+    }
+
+    // The code model check applies to `thunk` and `thunk-extern`, but not `thunk-inline`, so it is
+    // kept as a `match` to force a change if new ones are added, even if we currently only support
+    // `thunk-extern` like Clang.
+    match sess.opts.unstable_opts.function_return {
+        FunctionReturn::Keep => (),
+        FunctionReturn::ThunkExtern => {
+            // FIXME: In principle, the inherited base LLVM target code model could be large,
+            // but this only checks whether we were passed one explicitly (like Clang does).
+            if let Some(code_model) = sess.code_model()
+                && code_model == CodeModel::Large
+            {
+                sess.dcx().emit_err(errors::FunctionReturnThunkExternRequiresNonLargeCodeModel);
+            }
+        }
+    }
+
+    if sess.opts.cg.soft_float {
+        if sess.target.arch == "arm" {
+            sess.dcx().emit_warn(errors::SoftFloatDeprecated);
+        } else {
+            // All `use_softfp` does is the equivalent of `-mfloat-abi` in GCC/clang, which only exists on ARM targets.
+            // We document this flag to only affect `*eabihf` targets, so let's show a warning for all other targets.
+            sess.dcx().emit_warn(errors::SoftFloatIgnored);
         }
     }
 }
 
 /// Holds data on the current incremental compilation session, if there is one.
 #[derive(Debug)]
-pub enum IncrCompSession {
+enum IncrCompSession {
     /// This is the state the session will be in until the incr. comp. dir is
     /// needed.
     NotInitialized,
     /// This is the state during which the session directory is private and can
-    /// be modified.
-    Active { session_directory: PathBuf, lock_file: flock::Lock, load_dep_graph: bool },
+    /// be modified. `_lock_file` is never directly used, but its presence
+    /// alone has an effect, because the file will unlock when the session is
+    /// dropped.
+    Active { session_directory: PathBuf, _lock_file: flock::Lock },
     /// This is the state after the session directory has been finalized. In this
     /// state, the contents of the directory must not be modified any more.
     Finalized { session_directory: PathBuf },
@@ -1723,59 +1353,141 @@ pub enum IncrCompSession {
     InvalidBecauseOfErrors { session_directory: PathBuf },
 }
 
-fn early_error_handler(output: config::ErrorOutputType) -> rustc_errors::Handler {
+/// A wrapper around an [`DiagCtxt`] that is used for early error emissions.
+pub struct EarlyDiagCtxt {
+    dcx: DiagCtxt,
+}
+
+impl EarlyDiagCtxt {
+    pub fn new(output: ErrorOutputType) -> Self {
+        let emitter = mk_emitter(output);
+        Self { dcx: DiagCtxt::new(emitter) }
+    }
+
+    /// Swap out the underlying dcx once we acquire the user's preference on error emission
+    /// format. If `early_err` was previously called this will panic.
+    pub fn set_error_format(&mut self, output: ErrorOutputType) {
+        assert!(self.dcx.handle().has_errors().is_none());
+
+        let emitter = mk_emitter(output);
+        self.dcx = DiagCtxt::new(emitter);
+    }
+
+    #[allow(rustc::untranslatable_diagnostic)]
+    #[allow(rustc::diagnostic_outside_of_impl)]
+    pub fn early_note(&self, msg: impl Into<DiagMessage>) {
+        self.dcx.handle().note(msg)
+    }
+
+    #[allow(rustc::untranslatable_diagnostic)]
+    #[allow(rustc::diagnostic_outside_of_impl)]
+    pub fn early_help(&self, msg: impl Into<DiagMessage>) {
+        self.dcx.handle().struct_help(msg).emit()
+    }
+
+    #[allow(rustc::untranslatable_diagnostic)]
+    #[allow(rustc::diagnostic_outside_of_impl)]
+    #[must_use = "raise_fatal must be called on the returned ErrorGuaranteed in order to exit with a non-zero status code"]
+    pub fn early_err(&self, msg: impl Into<DiagMessage>) -> ErrorGuaranteed {
+        self.dcx.handle().err(msg)
+    }
+
+    #[allow(rustc::untranslatable_diagnostic)]
+    #[allow(rustc::diagnostic_outside_of_impl)]
+    pub fn early_fatal(&self, msg: impl Into<DiagMessage>) -> ! {
+        self.dcx.handle().fatal(msg)
+    }
+
+    #[allow(rustc::untranslatable_diagnostic)]
+    #[allow(rustc::diagnostic_outside_of_impl)]
+    pub fn early_struct_fatal(&self, msg: impl Into<DiagMessage>) -> Diag<'_, FatalAbort> {
+        self.dcx.handle().struct_fatal(msg)
+    }
+
+    #[allow(rustc::untranslatable_diagnostic)]
+    #[allow(rustc::diagnostic_outside_of_impl)]
+    pub fn early_warn(&self, msg: impl Into<DiagMessage>) {
+        self.dcx.handle().warn(msg)
+    }
+
+    #[allow(rustc::untranslatable_diagnostic)]
+    #[allow(rustc::diagnostic_outside_of_impl)]
+    pub fn early_struct_warn(&self, msg: impl Into<DiagMessage>) -> Diag<'_, ()> {
+        self.dcx.handle().struct_warn(msg)
+    }
+}
+
+fn mk_emitter(output: ErrorOutputType) -> Box<DynEmitter> {
     // FIXME(#100717): early errors aren't translated at the moment, so this is fine, but it will
     // need to reference every crate that might emit an early error for translation to work.
     let fallback_bundle =
         fallback_fluent_bundle(vec![rustc_errors::DEFAULT_LOCALE_RESOURCE], false);
-    let emitter: Box<dyn Emitter + sync::Send> = match output {
-        config::ErrorOutputType::HumanReadable(kind) => {
-            let (short, color_config) = kind.unzip();
-            Box::new(EmitterWriter::stderr(
-                color_config,
-                None,
-                None,
+    let emitter: Box<DynEmitter> = match output {
+        config::ErrorOutputType::HumanReadable(kind, color_config) => {
+            let short = kind.short();
+            Box::new(
+                HumanEmitter::new(stderr_destination(color_config), fallback_bundle)
+                    .theme(if let HumanReadableErrorType::Unicode = kind {
+                        OutputTheme::Unicode
+                    } else {
+                        OutputTheme::Ascii
+                    })
+                    .short_message(short),
+            )
+        }
+        config::ErrorOutputType::Json { pretty, json_rendered, color_config } => {
+            Box::new(JsonEmitter::new(
+                Box::new(io::BufWriter::new(io::stderr())),
+                Some(Arc::new(SourceMap::new(FilePathMapping::empty()))),
                 fallback_bundle,
-                short,
-                false,
-                None,
-                false,
-                false,
-                TerminalUrl::No,
+                pretty,
+                json_rendered,
+                color_config,
             ))
         }
-        config::ErrorOutputType::Json { pretty, json_rendered } => Box::new(JsonEmitter::basic(
-            pretty,
-            json_rendered,
-            None,
-            fallback_bundle,
-            None,
-            false,
-            false,
-            TerminalUrl::No,
-        )),
     };
-    rustc_errors::Handler::with_emitter(true, None, emitter)
+    emitter
 }
 
-#[allow(rustc::untranslatable_diagnostic)]
-#[allow(rustc::diagnostic_outside_of_impl)]
-#[must_use = "ErrorGuaranteed must be returned from `run_compiler` in order to exit with a non-zero status code"]
-pub fn early_error_no_abort(
-    output: config::ErrorOutputType,
-    msg: impl Into<DiagnosticMessage>,
-) -> ErrorGuaranteed {
-    early_error_handler(output).struct_err(msg).emit()
+pub trait RemapFileNameExt {
+    type Output<'a>
+    where
+        Self: 'a;
+
+    /// Returns a possibly remapped filename based on the passed scope and remap cli options.
+    ///
+    /// One and only one scope should be passed to this method, it will panic otherwise.
+    fn for_scope(&self, sess: &Session, scope: RemapPathScopeComponents) -> Self::Output<'_>;
 }
 
-#[allow(rustc::untranslatable_diagnostic)]
-#[allow(rustc::diagnostic_outside_of_impl)]
-pub fn early_error(output: config::ErrorOutputType, msg: impl Into<DiagnosticMessage>) -> ! {
-    early_error_handler(output).struct_fatal(msg).emit()
+impl RemapFileNameExt for rustc_span::FileName {
+    type Output<'a> = rustc_span::FileNameDisplay<'a>;
+
+    fn for_scope(&self, sess: &Session, scope: RemapPathScopeComponents) -> Self::Output<'_> {
+        assert!(
+            scope.bits().count_ones() == 1,
+            "one and only one scope should be passed to for_scope"
+        );
+        if sess.opts.unstable_opts.remap_path_scope.contains(scope) {
+            self.prefer_remapped_unconditionaly()
+        } else {
+            self.prefer_local()
+        }
+    }
 }
 
-#[allow(rustc::untranslatable_diagnostic)]
-#[allow(rustc::diagnostic_outside_of_impl)]
-pub fn early_warn(output: config::ErrorOutputType, msg: impl Into<DiagnosticMessage>) {
-    early_error_handler(output).struct_warn(msg).emit()
+impl RemapFileNameExt for rustc_span::RealFileName {
+    type Output<'a> = &'a Path;
+
+    fn for_scope(&self, sess: &Session, scope: RemapPathScopeComponents) -> Self::Output<'_> {
+        assert!(
+            scope.bits().count_ones() == 1,
+            "one and only one scope should be passed to for_scope"
+        );
+        if sess.opts.unstable_opts.remap_path_scope.contains(scope) {
+            self.remapped_path_if_available()
+        } else {
+            self.local_path_if_available()
+        }
+    }
 }

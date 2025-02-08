@@ -1,8 +1,7 @@
-// run-pass
+//@ run-pass
 // Test lifetimes are linked properly when we autoslice a vector.
 // Issue #3148.
 
-// pretty-expanded FIXME #23616
 
 fn subslice<F>(v: F) -> F where F: FnOnce() { v }
 

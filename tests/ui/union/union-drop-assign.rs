@@ -1,7 +1,10 @@
-// run-pass
+//@ run-pass
 #![allow(unused_assignments)]
 
 // Drop works for union itself.
+
+// FIXME(static_mut_refs): this could use an atomic
+#![allow(static_mut_refs)]
 
 use std::mem::ManuallyDrop;
 

@@ -1,5 +1,6 @@
-use rustc_span::LocalExpnId;
 use std::fmt;
+
+use rustc_span::LocalExpnId;
 
 rustc_index::newtype_index! {
     /// Identifies an AST node.
@@ -8,6 +9,8 @@ rustc_index::newtype_index! {
     /// This is later turned into [`DefId`] and `HirId` for the HIR.
     ///
     /// [`DefId`]: rustc_span::def_id::DefId
+    #[encodable]
+    #[orderable]
     #[debug_format = "NodeId({})"]
     pub struct NodeId {
         /// The [`NodeId`] used to represent the root of the crate.

@@ -1,22 +1,20 @@
-use anyhow::{format_err, Context, Result};
 use std::fs;
-use std::path::Path;
-use walkdir::WalkDir;
-
 // Needed to set the script mode to executable.
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 // FIXME: what about Windows? Are default ACLs executable?
-
 #[cfg(unix)]
 use std::os::unix::fs::symlink as symlink_file;
 #[cfg(windows)]
 use std::os::windows::fs::symlink_file;
+use std::path::Path;
+
+use anyhow::{Context, Result, format_err};
+use walkdir::WalkDir;
 
 /// Converts a `&Path` to a UTF-8 `&str`.
 pub fn path_to_str(path: &Path) -> Result<&str> {
-    path.to_str()
-        .ok_or_else(|| format_err!("path is not valid UTF-8 '{}'", path.display()))
+    path.to_str().ok_or_else(|| format_err!("path is not valid UTF-8 '{}'", path.display()))
 }
 
 /// Wraps `fs::copy` with a nicer error message.
@@ -27,11 +25,7 @@ pub fn copy<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> Result<u64> {
         Ok(0)
     } else {
         let amt = fs::copy(&from, &to).with_context(|| {
-            format!(
-                "failed to copy '{}' to '{}'",
-                from.as_ref().display(),
-                to.as_ref().display()
-            )
+            format!("failed to copy '{}' to '{}'", from.as_ref().display(), to.as_ref().display())
         })?;
         Ok(amt)
     }
@@ -117,14 +111,18 @@ where
         } else {
             copy(entry.path(), dst)?;
         }
-        callback(&path, file_type)?;
+        callback(path, file_type)?;
     }
     Ok(())
 }
 
 macro_rules! actor_field_default {
-    () => { Default::default() };
-    (= $expr:expr) => { $expr.into() }
+    () => {
+        Default::default()
+    };
+    (= $expr:expr) => {
+        $expr.into()
+    };
 }
 
 /// Creates an "actor" with default values, setters for all fields, and Clap parser support.
@@ -135,7 +133,7 @@ macro_rules! actor {
         $( #[ $attr ] )+
         #[derive(clap::Args)]
         pub struct $name {
-            $( $( #[ $field_attr ] )+ #[clap(long, $(default_value = $default)*)] $field : $type, )*
+            $( $( #[ $field_attr ] )+ #[arg(long, $(default_value = $default)*)] $field : $type, )*
         }
 
         impl Default for $name {

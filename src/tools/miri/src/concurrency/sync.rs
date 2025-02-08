@@ -1,20 +1,18 @@
-use std::collections::{hash_map::Entry, VecDeque};
-use std::num::NonZeroU32;
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::collections::hash_map::Entry;
+use std::default::Default;
 use std::ops::Not;
+use std::rc::Rc;
+use std::time::Duration;
 
-use log::trace;
-
+use rustc_abi::Size;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_index::{Idx, IndexVec};
 
 use super::init_once::InitOnce;
 use super::vector_clock::VClock;
 use crate::*;
-
-pub trait SyncId {
-    fn from_u32(id: u32) -> Self;
-    fn to_u32(&self) -> u32;
-}
 
 /// We cannot use the `newtype_index!` macro because we have to use 0 as a
 /// sentinel value meaning that the identifier is not assigned. This is because
@@ -25,16 +23,10 @@ macro_rules! declare_id {
         /// 0 is used to indicate that the id was not yet assigned and,
         /// therefore, is not a valid identifier.
         #[derive(Clone, Copy, Debug, PartialOrd, Ord, PartialEq, Eq, Hash)]
-        pub struct $name(NonZeroU32);
+        pub struct $name(std::num::NonZero<u32>);
 
-        impl SyncId for $name {
-            // Panics if `id == 0`.
-            fn from_u32(id: u32) -> Self {
-                Self(NonZeroU32::new(id).unwrap())
-            }
-            fn to_u32(&self) -> u32 {
-                self.0.get()
-            }
+        impl $crate::VisitProvenance for $name {
+            fn visit_provenance(&self, _visit: &mut VisitWith<'_>) {}
         }
 
         impl Idx for $name {
@@ -42,25 +34,18 @@ macro_rules! declare_id {
                 // We use 0 as a sentinel value (see the comment above) and,
                 // therefore, need to shift by one when converting from an index
                 // into a vector.
-                let shifted_idx = u32::try_from(idx).unwrap().checked_add(1).unwrap();
-                $name(NonZeroU32::new(shifted_idx).unwrap())
+                let shifted_idx = u32::try_from(idx).unwrap().strict_add(1);
+                $name(std::num::NonZero::new(shifted_idx).unwrap())
             }
             fn index(self) -> usize {
                 // See the comment in `Self::new`.
-                // (This cannot underflow because self is NonZeroU32.)
+                // (This cannot underflow because `self.0` is `NonZero<u32>`.)
                 usize::try_from(self.0.get() - 1).unwrap()
-            }
-        }
-
-        impl $name {
-            pub fn to_u32_scalar(&self) -> Scalar<Provenance> {
-                Scalar::from_u32(self.0.get())
             }
         }
     };
 }
-
-declare_id!(MutexId);
+pub(super) use declare_id;
 
 /// The mutex state.
 #[derive(Default, Debug)]
@@ -71,12 +56,23 @@ struct Mutex {
     lock_count: usize,
     /// The queue of threads waiting for this mutex.
     queue: VecDeque<ThreadId>,
-    /// Data race handle, this tracks the happens-before
-    /// relationship between each mutex access. It is
-    /// released to during unlock and acquired from during
-    /// locking, and therefore stores the clock of the last
-    /// thread to release this mutex.
-    data_race: VClock,
+    /// Mutex clock. This tracks the moment of the last unlock.
+    clock: VClock,
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct MutexRef(Rc<RefCell<Mutex>>);
+
+impl MutexRef {
+    fn new() -> Self {
+        MutexRef(Rc::new(RefCell::new(Mutex::default())))
+    }
+}
+
+impl VisitProvenance for MutexRef {
+    fn visit_provenance(&self, _visit: &mut VisitWith<'_>) {
+        // Mutex contains no provenance.
+    }
 }
 
 declare_id!(RwLockId);
@@ -93,7 +89,7 @@ struct RwLock {
     writer_queue: VecDeque<ThreadId>,
     /// The queue of reader threads waiting for this lock.
     reader_queue: VecDeque<ThreadId>,
-    /// Data race handle for writers, tracks the happens-before
+    /// Data race clock for writers. Tracks the happens-before
     /// ordering between each write access to a rwlock and is updated
     /// after a sequence of concurrent readers to track the happens-
     /// before ordering between the set of previous readers and
@@ -101,8 +97,8 @@ struct RwLock {
     /// Contains the clock of the last thread to release a writer
     /// lock or the joined clock of the set of last threads to release
     /// shared reader locks.
-    data_race: VClock,
-    /// Data race handle for readers, this is temporary storage
+    clock_unlocked: VClock,
+    /// Data race clock for readers. This is temporary storage
     /// for the combined happens-before ordering for between all
     /// concurrent readers and the next writer, and the value
     /// is stored to the main data_race variable once all
@@ -111,54 +107,49 @@ struct RwLock {
     /// must load the clock of the last write and must not
     /// add happens-before orderings between shared reader
     /// locks.
-    data_race_reader: VClock,
+    /// This is only relevant when there is an active reader.
+    clock_current_readers: VClock,
 }
 
 declare_id!(CondvarId);
 
-#[derive(Debug, Copy, Clone)]
-pub enum RwLockMode {
-    Read,
-    Write,
-}
-
-#[derive(Debug)]
-pub enum CondvarLock {
-    Mutex(MutexId),
-    RwLock { id: RwLockId, mode: RwLockMode },
-}
-
-/// A thread waiting on a conditional variable.
-#[derive(Debug)]
-struct CondvarWaiter {
-    /// The thread that is waiting on this variable.
-    thread: ThreadId,
-    /// The mutex or rwlock on which the thread is waiting.
-    lock: CondvarLock,
-}
-
 /// The conditional variable state.
 #[derive(Default, Debug)]
 struct Condvar {
-    waiters: VecDeque<CondvarWaiter>,
+    waiters: VecDeque<ThreadId>,
     /// Tracks the happens-before relationship
     /// between a cond-var signal and a cond-var
     /// wait during a non-spurious signal event.
     /// Contains the clock of the last thread to
-    /// perform a futex-signal.
-    data_race: VClock,
+    /// perform a condvar-signal.
+    clock: VClock,
 }
 
 /// The futex state.
 #[derive(Default, Debug)]
 struct Futex {
-    waiters: VecDeque<FutexWaiter>,
+    waiters: Vec<FutexWaiter>,
     /// Tracks the happens-before relationship
     /// between a futex-wake and a futex-wait
     /// during a non-spurious wake event.
     /// Contains the clock of the last thread to
     /// perform a futex-wake.
-    data_race: VClock,
+    clock: VClock,
+}
+
+#[derive(Default, Clone)]
+pub struct FutexRef(Rc<RefCell<Futex>>);
+
+impl FutexRef {
+    pub fn waiters(&self) -> usize {
+        self.0.borrow().waiters.len()
+    }
+}
+
+impl VisitProvenance for FutexRef {
+    fn visit_provenance(&self, _visit: &mut VisitWith<'_>) {
+        // No provenance in `Futex`.
+    }
 }
 
 /// A thread waiting on a futex.
@@ -170,174 +161,196 @@ struct FutexWaiter {
     bitset: u32,
 }
 
-/// The state of all synchronization variables.
+/// The state of all synchronization objects.
 #[derive(Default, Debug)]
-pub(crate) struct SynchronizationState<'mir, 'tcx> {
-    mutexes: IndexVec<MutexId, Mutex>,
+pub struct SynchronizationObjects {
     rwlocks: IndexVec<RwLockId, RwLock>,
     condvars: IndexVec<CondvarId, Condvar>,
-    futexes: FxHashMap<u64, Futex>,
-    pub(super) init_onces: IndexVec<InitOnceId, InitOnce<'mir, 'tcx>>,
-}
-
-impl<'mir, 'tcx> VisitTags for SynchronizationState<'mir, 'tcx> {
-    fn visit_tags(&self, visit: &mut dyn FnMut(BorTag)) {
-        for init_once in self.init_onces.iter() {
-            init_once.visit_tags(visit);
-        }
-    }
+    pub(super) init_onces: IndexVec<InitOnceId, InitOnce>,
 }
 
 // Private extension trait for local helper methods
-impl<'mir, 'tcx: 'mir> EvalContextExtPriv<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
-pub(super) trait EvalContextExtPriv<'mir, 'tcx: 'mir>:
-    crate::MiriInterpCxExt<'mir, 'tcx>
-{
-    /// Lazily initialize the ID of this Miri sync structure.
-    /// ('0' indicates uninit.)
-    #[inline]
-    fn get_or_create_id<Id: SyncId>(
+impl<'tcx> EvalContextExtPriv<'tcx> for crate::MiriInterpCx<'tcx> {}
+pub(super) trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
+    fn condvar_reacquire_mutex(
         &mut self,
-        next_id: Id,
-        lock_op: &OpTy<'tcx, Provenance>,
-        offset: u64,
-    ) -> InterpResult<'tcx, Option<Id>> {
+        mutex_ref: &MutexRef,
+        retval: Scalar,
+        dest: MPlaceTy<'tcx>,
+    ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
-        let value_place =
-            this.deref_operand_and_offset(lock_op, offset, this.machine.layouts.u32)?;
-
-        // Since we are lazy, this update has to be atomic.
-        let (old, success) = this
-            .atomic_compare_exchange_scalar(
-                &value_place,
-                &ImmTy::from_uint(0u32, this.machine.layouts.u32),
-                Scalar::from_u32(next_id.to_u32()),
-                AtomicRwOrd::Relaxed, // deliberately *no* synchronization
-                AtomicReadOrd::Relaxed,
-                false,
-            )?
-            .to_scalar_pair();
-
-        Ok(if success.to_bool().expect("compare_exchange's second return value is a bool") {
-            // Caller of the closure needs to allocate next_id
-            None
+        if this.mutex_is_locked(mutex_ref) {
+            assert_ne!(this.mutex_get_owner(mutex_ref), this.active_thread());
+            this.mutex_enqueue_and_block(mutex_ref, Some((retval, dest)));
         } else {
-            Some(Id::from_u32(old.to_u32().expect("layout is u32")))
-        })
-    }
-
-    /// Take a reader out of the queue waiting for the lock.
-    /// Returns `true` if some thread got the rwlock.
-    #[inline]
-    fn rwlock_dequeue_and_lock_reader(&mut self, id: RwLockId) -> bool {
-        let this = self.eval_context_mut();
-        if let Some(reader) = this.machine.threads.sync.rwlocks[id].reader_queue.pop_front() {
-            this.unblock_thread(reader);
-            this.rwlock_reader_lock(id, reader);
-            true
-        } else {
-            false
+            // We can have it right now!
+            this.mutex_lock(mutex_ref);
+            // Don't forget to write the return value.
+            this.write_scalar(retval, &dest)?;
         }
-    }
-
-    /// Take the writer out of the queue waiting for the lock.
-    /// Returns `true` if some thread got the rwlock.
-    #[inline]
-    fn rwlock_dequeue_and_lock_writer(&mut self, id: RwLockId) -> bool {
-        let this = self.eval_context_mut();
-        if let Some(writer) = this.machine.threads.sync.rwlocks[id].writer_queue.pop_front() {
-            this.unblock_thread(writer);
-            this.rwlock_writer_lock(id, writer);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Take a thread out of the queue waiting for the mutex, and lock
-    /// the mutex for it. Returns `true` if some thread has the mutex now.
-    #[inline]
-    fn mutex_dequeue_and_lock(&mut self, id: MutexId) -> bool {
-        let this = self.eval_context_mut();
-        if let Some(thread) = this.machine.threads.sync.mutexes[id].queue.pop_front() {
-            this.unblock_thread(thread);
-            this.mutex_lock(id, thread);
-            true
-        } else {
-            false
-        }
+        interp_ok(())
     }
 }
+
+impl SynchronizationObjects {
+    pub fn mutex_create(&mut self) -> MutexRef {
+        MutexRef::new()
+    }
+    pub fn rwlock_create(&mut self) -> RwLockId {
+        self.rwlocks.push(Default::default())
+    }
+
+    pub fn condvar_create(&mut self) -> CondvarId {
+        self.condvars.push(Default::default())
+    }
+
+    pub fn init_once_create(&mut self) -> InitOnceId {
+        self.init_onces.push(Default::default())
+    }
+}
+
+impl<'tcx> AllocExtra<'tcx> {
+    fn get_sync<T: 'static>(&self, offset: Size) -> Option<&T> {
+        self.sync.get(&offset).and_then(|s| s.downcast_ref::<T>())
+    }
+}
+
+/// We designate an `init`` field in all primitives.
+/// If `init` is set to this, we consider the primitive initialized.
+pub const LAZY_INIT_COOKIE: u32 = 0xcafe_affe;
 
 // Public interface to synchronization primitives. Please note that in most
 // cases, the function calls are infallible and it is the client's (shim
 // implementation's) responsibility to detect and deal with erroneous
 // situations.
-impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
-pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
-    fn mutex_get_or_create_id(
-        &mut self,
-        lock_op: &OpTy<'tcx, Provenance>,
-        offset: u64,
-    ) -> InterpResult<'tcx, MutexId> {
-        let this = self.eval_context_mut();
-        this.mutex_get_or_create(|ecx, next_id| ecx.get_or_create_id(next_id, lock_op, offset))
-    }
-
-    fn rwlock_get_or_create_id(
-        &mut self,
-        lock_op: &OpTy<'tcx, Provenance>,
-        offset: u64,
-    ) -> InterpResult<'tcx, RwLockId> {
-        let this = self.eval_context_mut();
-        this.rwlock_get_or_create(|ecx, next_id| ecx.get_or_create_id(next_id, lock_op, offset))
-    }
-
-    fn condvar_get_or_create_id(
-        &mut self,
-        lock_op: &OpTy<'tcx, Provenance>,
-        offset: u64,
-    ) -> InterpResult<'tcx, CondvarId> {
-        let this = self.eval_context_mut();
-        this.condvar_get_or_create(|ecx, next_id| ecx.get_or_create_id(next_id, lock_op, offset))
-    }
-
-    #[inline]
-    /// Provides the closure with the next MutexId. Creates that mutex if the closure returns None,
-    /// otherwise returns the value from the closure
-    fn mutex_get_or_create<F>(&mut self, existing: F) -> InterpResult<'tcx, MutexId>
+impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
+pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
+    /// Helper for lazily initialized `alloc_extra.sync` data:
+    /// this forces an immediate init.
+    /// Return a reference to the data in the machine state.
+    fn lazy_sync_init<'a, T: 'static>(
+        &'a mut self,
+        primitive: &MPlaceTy<'tcx>,
+        init_offset: Size,
+        data: T,
+    ) -> InterpResult<'tcx, &'a T>
     where
-        F: FnOnce(&mut MiriInterpCx<'mir, 'tcx>, MutexId) -> InterpResult<'tcx, Option<MutexId>>,
+        'tcx: 'a,
     {
         let this = self.eval_context_mut();
-        let next_index = this.machine.threads.sync.mutexes.next_index();
-        if let Some(old) = existing(this, next_index)? {
-            Ok(old)
+
+        let (alloc, offset, _) = this.ptr_get_alloc_id(primitive.ptr(), 0)?;
+        let (alloc_extra, _machine) = this.get_alloc_extra_mut(alloc)?;
+        alloc_extra.sync.insert(offset, Box::new(data));
+        // Mark this as "initialized".
+        let init_field = primitive.offset(init_offset, this.machine.layouts.u32, this)?;
+        this.write_scalar_atomic(
+            Scalar::from_u32(LAZY_INIT_COOKIE),
+            &init_field,
+            AtomicWriteOrd::Relaxed,
+        )?;
+        interp_ok(this.get_alloc_extra(alloc)?.get_sync::<T>(offset).unwrap())
+    }
+
+    /// Helper for lazily initialized `alloc_extra.sync` data:
+    /// Checks if the primitive is initialized:
+    /// - If yes, fetches the data from `alloc_extra.sync`, or calls `missing_data` if that fails
+    ///   and stores that in `alloc_extra.sync`.
+    /// - Otherwise, calls `new_data` to initialize the primitive.
+    ///
+    /// Return a reference to the data in the machine state.
+    fn lazy_sync_get_data<'a, T: 'static>(
+        &'a mut self,
+        primitive: &MPlaceTy<'tcx>,
+        init_offset: Size,
+        missing_data: impl FnOnce() -> InterpResult<'tcx, T>,
+        new_data: impl FnOnce(&mut MiriInterpCx<'tcx>) -> InterpResult<'tcx, T>,
+    ) -> InterpResult<'tcx, &'a T>
+    where
+        'tcx: 'a,
+    {
+        let this = self.eval_context_mut();
+
+        // Check if this is already initialized. Needs to be atomic because we can race with another
+        // thread initializing. Needs to be an RMW operation to ensure we read the *latest* value.
+        // So we just try to replace MUTEX_INIT_COOKIE with itself.
+        let init_cookie = Scalar::from_u32(LAZY_INIT_COOKIE);
+        let init_field = primitive.offset(init_offset, this.machine.layouts.u32, this)?;
+        let (_init, success) = this
+            .atomic_compare_exchange_scalar(
+                &init_field,
+                &ImmTy::from_scalar(init_cookie, this.machine.layouts.u32),
+                init_cookie,
+                AtomicRwOrd::Relaxed,
+                AtomicReadOrd::Relaxed,
+                /* can_fail_spuriously */ false,
+            )?
+            .to_scalar_pair();
+
+        if success.to_bool()? {
+            // If it is initialized, it must be found in the "sync primitive" table,
+            // or else it has been moved illegally.
+            let (alloc, offset, _) = this.ptr_get_alloc_id(primitive.ptr(), 0)?;
+            let (alloc_extra, _machine) = this.get_alloc_extra_mut(alloc)?;
+            // Due to borrow checker reasons, we have to do the lookup twice.
+            if alloc_extra.get_sync::<T>(offset).is_none() {
+                let data = missing_data()?;
+                alloc_extra.sync.insert(offset, Box::new(data));
+            }
+            interp_ok(alloc_extra.get_sync::<T>(offset).unwrap())
         } else {
-            let new_index = this.machine.threads.sync.mutexes.push(Default::default());
-            assert_eq!(next_index, new_index);
-            Ok(new_index)
+            let data = new_data(this)?;
+            this.lazy_sync_init(primitive, init_offset, data)
         }
+    }
+
+    /// Get the synchronization primitive associated with the given pointer,
+    /// or initialize a new one.
+    ///
+    /// Return `None` if this pointer does not point to at least 1 byte of mutable memory.
+    fn get_sync_or_init<'a, T: 'static>(
+        &'a mut self,
+        ptr: Pointer,
+        new: impl FnOnce(&'a mut MiriMachine<'tcx>) -> T,
+    ) -> Option<&'a T>
+    where
+        'tcx: 'a,
+    {
+        let this = self.eval_context_mut();
+        if !this.ptr_try_get_alloc_id(ptr, 0).ok().is_some_and(|(alloc_id, offset, ..)| {
+            let info = this.get_alloc_info(alloc_id);
+            info.kind == AllocKind::LiveData && info.mutbl.is_mut() && offset < info.size
+        }) {
+            return None;
+        }
+        // This cannot fail now.
+        let (alloc, offset, _) = this.ptr_get_alloc_id(ptr, 0).unwrap();
+        let (alloc_extra, machine) = this.get_alloc_extra_mut(alloc).unwrap();
+        // Due to borrow checker reasons, we have to do the lookup twice.
+        if alloc_extra.get_sync::<T>(offset).is_none() {
+            let new = new(machine);
+            alloc_extra.sync.insert(offset, Box::new(new));
+        }
+        Some(alloc_extra.get_sync::<T>(offset).unwrap())
     }
 
     #[inline]
     /// Get the id of the thread that currently owns this lock.
-    fn mutex_get_owner(&mut self, id: MutexId) -> ThreadId {
-        let this = self.eval_context_ref();
-        this.machine.threads.sync.mutexes[id].owner.unwrap()
+    fn mutex_get_owner(&self, mutex_ref: &MutexRef) -> ThreadId {
+        mutex_ref.0.borrow().owner.unwrap()
     }
 
     #[inline]
     /// Check if locked.
-    fn mutex_is_locked(&self, id: MutexId) -> bool {
-        let this = self.eval_context_ref();
-        this.machine.threads.sync.mutexes[id].owner.is_some()
+    fn mutex_is_locked(&self, mutex_ref: &MutexRef) -> bool {
+        mutex_ref.0.borrow().owner.is_some()
     }
 
     /// Lock by setting the mutex owner and increasing the lock count.
-    fn mutex_lock(&mut self, id: MutexId, thread: ThreadId) {
+    fn mutex_lock(&mut self, mutex_ref: &MutexRef) {
         let this = self.eval_context_mut();
-        let mutex = &mut this.machine.threads.sync.mutexes[id];
+        let thread = this.active_thread();
+        let mut mutex = mutex_ref.0.borrow_mut();
         if let Some(current_owner) = mutex.owner {
             assert_eq!(thread, current_owner, "mutex already locked by another thread");
             assert!(
@@ -347,82 +360,95 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         } else {
             mutex.owner = Some(thread);
         }
-        mutex.lock_count = mutex.lock_count.checked_add(1).unwrap();
+        mutex.lock_count = mutex.lock_count.strict_add(1);
         if let Some(data_race) = &this.machine.data_race {
-            data_race.validate_lock_acquire(&mutex.data_race, thread);
+            data_race.acquire_clock(&mutex.clock, &this.machine.threads);
         }
     }
 
     /// Try unlocking by decreasing the lock count and returning the old lock
     /// count. If the lock count reaches 0, release the lock and potentially
-    /// give to a new owner. If the lock was not locked by `expected_owner`,
+    /// give to a new owner. If the lock was not locked by the current thread,
     /// return `None`.
-    fn mutex_unlock(&mut self, id: MutexId, expected_owner: ThreadId) -> Option<usize> {
+    fn mutex_unlock(&mut self, mutex_ref: &MutexRef) -> InterpResult<'tcx, Option<usize>> {
         let this = self.eval_context_mut();
-        let current_span = this.machine.current_span();
-        let mutex = &mut this.machine.threads.sync.mutexes[id];
-        if let Some(current_owner) = mutex.owner {
+        let mut mutex = mutex_ref.0.borrow_mut();
+        interp_ok(if let Some(current_owner) = mutex.owner {
             // Mutex is locked.
-            if current_owner != expected_owner {
+            if current_owner != this.machine.threads.active_thread() {
                 // Only the owner can unlock the mutex.
-                return None;
+                return interp_ok(None);
             }
             let old_lock_count = mutex.lock_count;
-            mutex.lock_count = old_lock_count
-                .checked_sub(1)
-                .expect("invariant violation: lock_count == 0 iff the thread is unlocked");
+            mutex.lock_count = old_lock_count.strict_sub(1);
             if mutex.lock_count == 0 {
                 mutex.owner = None;
                 // The mutex is completely unlocked. Try transferring ownership
                 // to another thread.
                 if let Some(data_race) = &this.machine.data_race {
-                    data_race.validate_lock_release(
-                        &mut mutex.data_race,
-                        current_owner,
-                        current_span,
-                    );
+                    data_race.release_clock(&this.machine.threads, |clock| {
+                        mutex.clock.clone_from(clock)
+                    });
                 }
-                this.mutex_dequeue_and_lock(id);
+                let thread_id = mutex.queue.pop_front();
+                // We need to drop our mutex borrow before unblock_thread
+                // because it will be borrowed again in the unblock callback.
+                drop(mutex);
+                if thread_id.is_some() {
+                    this.unblock_thread(thread_id.unwrap(), BlockReason::Mutex)?;
+                }
             }
             Some(old_lock_count)
         } else {
             // Mutex is not locked.
             None
-        }
+        })
     }
 
     /// Put the thread into the queue waiting for the mutex.
+    ///
+    /// Once the Mutex becomes available and if it exists, `retval_dest.0` will
+    /// be written to `retval_dest.1`.
     #[inline]
-    fn mutex_enqueue_and_block(&mut self, id: MutexId, thread: ThreadId) {
+    fn mutex_enqueue_and_block(
+        &mut self,
+        mutex_ref: &MutexRef,
+        retval_dest: Option<(Scalar, MPlaceTy<'tcx>)>,
+    ) {
         let this = self.eval_context_mut();
-        assert!(this.mutex_is_locked(id), "queing on unlocked mutex");
-        this.machine.threads.sync.mutexes[id].queue.push_back(thread);
-        this.block_thread(thread);
-    }
+        assert!(this.mutex_is_locked(mutex_ref), "queuing on unlocked mutex");
+        let thread = this.active_thread();
+        mutex_ref.0.borrow_mut().queue.push_back(thread);
+        let mutex_ref = mutex_ref.clone();
+        this.block_thread(
+            BlockReason::Mutex,
+            None,
+            callback!(
+                @capture<'tcx> {
+                    mutex_ref: MutexRef,
+                    retval_dest: Option<(Scalar, MPlaceTy<'tcx>)>,
+                }
+                |this, unblock: UnblockKind| {
+                    assert_eq!(unblock, UnblockKind::Ready);
 
-    /// Provides the closure with the next RwLockId. Creates that RwLock if the closure returns None,
-    /// otherwise returns the value from the closure
-    #[inline]
-    fn rwlock_get_or_create<F>(&mut self, existing: F) -> InterpResult<'tcx, RwLockId>
-    where
-        F: FnOnce(&mut MiriInterpCx<'mir, 'tcx>, RwLockId) -> InterpResult<'tcx, Option<RwLockId>>,
-    {
-        let this = self.eval_context_mut();
-        let next_index = this.machine.threads.sync.rwlocks.next_index();
-        if let Some(old) = existing(this, next_index)? {
-            Ok(old)
-        } else {
-            let new_index = this.machine.threads.sync.rwlocks.push(Default::default());
-            assert_eq!(next_index, new_index);
-            Ok(new_index)
-        }
+                    assert!(!this.mutex_is_locked(&mutex_ref));
+                    this.mutex_lock(&mutex_ref);
+
+                    if let Some((retval, dest)) = retval_dest {
+                        this.write_scalar(retval, &dest)?;
+                    }
+
+                    interp_ok(())
+                }
+            ),
+        );
     }
 
     #[inline]
     /// Check if locked.
     fn rwlock_is_locked(&self, id: RwLockId) -> bool {
         let this = self.eval_context_ref();
-        let rwlock = &this.machine.threads.sync.rwlocks[id];
+        let rwlock = &this.machine.sync.rwlocks[id];
         trace!(
             "rwlock_is_locked: {:?} writer is {:?} and there are {} reader threads (some of which could hold multiple read locks)",
             id,
@@ -436,241 +462,355 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
     #[inline]
     fn rwlock_is_write_locked(&self, id: RwLockId) -> bool {
         let this = self.eval_context_ref();
-        let rwlock = &this.machine.threads.sync.rwlocks[id];
+        let rwlock = &this.machine.sync.rwlocks[id];
         trace!("rwlock_is_write_locked: {:?} writer is {:?}", id, rwlock.writer);
         rwlock.writer.is_some()
     }
 
     /// Read-lock the lock by adding the `reader` the list of threads that own
     /// this lock.
-    fn rwlock_reader_lock(&mut self, id: RwLockId, reader: ThreadId) {
+    fn rwlock_reader_lock(&mut self, id: RwLockId) {
         let this = self.eval_context_mut();
+        let thread = this.active_thread();
         assert!(!this.rwlock_is_write_locked(id), "the lock is write locked");
-        trace!("rwlock_reader_lock: {:?} now also held (one more time) by {:?}", id, reader);
-        let rwlock = &mut this.machine.threads.sync.rwlocks[id];
-        let count = rwlock.readers.entry(reader).or_insert(0);
-        *count = count.checked_add(1).expect("the reader counter overflowed");
+        trace!("rwlock_reader_lock: {:?} now also held (one more time) by {:?}", id, thread);
+        let rwlock = &mut this.machine.sync.rwlocks[id];
+        let count = rwlock.readers.entry(thread).or_insert(0);
+        *count = count.strict_add(1);
         if let Some(data_race) = &this.machine.data_race {
-            data_race.validate_lock_acquire(&rwlock.data_race, reader);
+            data_race.acquire_clock(&rwlock.clock_unlocked, &this.machine.threads);
         }
     }
 
-    /// Try read-unlock the lock for `reader` and potentially give the lock to a new owner.
+    /// Try read-unlock the lock for the current threads and potentially give the lock to a new owner.
     /// Returns `true` if succeeded, `false` if this `reader` did not hold the lock.
-    fn rwlock_reader_unlock(&mut self, id: RwLockId, reader: ThreadId) -> bool {
+    fn rwlock_reader_unlock(&mut self, id: RwLockId) -> InterpResult<'tcx, bool> {
         let this = self.eval_context_mut();
-        let current_span = this.machine.current_span();
-        let rwlock = &mut this.machine.threads.sync.rwlocks[id];
-        match rwlock.readers.entry(reader) {
+        let thread = this.active_thread();
+        let rwlock = &mut this.machine.sync.rwlocks[id];
+        match rwlock.readers.entry(thread) {
             Entry::Occupied(mut entry) => {
                 let count = entry.get_mut();
                 assert!(*count > 0, "rwlock locked with count == 0");
                 *count -= 1;
                 if *count == 0 {
-                    trace!("rwlock_reader_unlock: {:?} no longer held by {:?}", id, reader);
+                    trace!("rwlock_reader_unlock: {:?} no longer held by {:?}", id, thread);
                     entry.remove();
                 } else {
-                    trace!("rwlock_reader_unlock: {:?} held one less time by {:?}", id, reader);
+                    trace!("rwlock_reader_unlock: {:?} held one less time by {:?}", id, thread);
                 }
             }
-            Entry::Vacant(_) => return false, // we did not even own this lock
+            Entry::Vacant(_) => return interp_ok(false), // we did not even own this lock
         }
         if let Some(data_race) = &this.machine.data_race {
-            data_race.validate_lock_release_shared(
-                &mut rwlock.data_race_reader,
-                reader,
-                current_span,
-            );
+            // Add this to the shared-release clock of all concurrent readers.
+            data_race.release_clock(&this.machine.threads, |clock| {
+                rwlock.clock_current_readers.join(clock)
+            });
         }
 
         // The thread was a reader. If the lock is not held any more, give it to a writer.
         if this.rwlock_is_locked(id).not() {
             // All the readers are finished, so set the writer data-race handle to the value
-            //  of the union of all reader data race handles, since the set of readers
-            //  happen-before the writers
-            let rwlock = &mut this.machine.threads.sync.rwlocks[id];
-            rwlock.data_race.clone_from(&rwlock.data_race_reader);
-            this.rwlock_dequeue_and_lock_writer(id);
+            // of the union of all reader data race handles, since the set of readers
+            // happen-before the writers
+            let rwlock = &mut this.machine.sync.rwlocks[id];
+            rwlock.clock_unlocked.clone_from(&rwlock.clock_current_readers);
+            // See if there is a thread to unblock.
+            if let Some(writer) = rwlock.writer_queue.pop_front() {
+                this.unblock_thread(writer, BlockReason::RwLock(id))?;
+            }
         }
-        true
+        interp_ok(true)
     }
 
     /// Put the reader in the queue waiting for the lock and block it.
+    /// Once the lock becomes available, `retval` will be written to `dest`.
     #[inline]
-    fn rwlock_enqueue_and_block_reader(&mut self, id: RwLockId, reader: ThreadId) {
+    fn rwlock_enqueue_and_block_reader(
+        &mut self,
+        id: RwLockId,
+        retval: Scalar,
+        dest: MPlaceTy<'tcx>,
+    ) {
         let this = self.eval_context_mut();
+        let thread = this.active_thread();
         assert!(this.rwlock_is_write_locked(id), "read-queueing on not write locked rwlock");
-        this.machine.threads.sync.rwlocks[id].reader_queue.push_back(reader);
-        this.block_thread(reader);
+        this.machine.sync.rwlocks[id].reader_queue.push_back(thread);
+        this.block_thread(
+            BlockReason::RwLock(id),
+            None,
+            callback!(
+                @capture<'tcx> {
+                    id: RwLockId,
+                    retval: Scalar,
+                    dest: MPlaceTy<'tcx>,
+                }
+                |this, unblock: UnblockKind| {
+                    assert_eq!(unblock, UnblockKind::Ready);
+                    this.rwlock_reader_lock(id);
+                    this.write_scalar(retval, &dest)?;
+                    interp_ok(())
+                }
+            ),
+        );
     }
 
     /// Lock by setting the writer that owns the lock.
     #[inline]
-    fn rwlock_writer_lock(&mut self, id: RwLockId, writer: ThreadId) {
+    fn rwlock_writer_lock(&mut self, id: RwLockId) {
         let this = self.eval_context_mut();
+        let thread = this.active_thread();
         assert!(!this.rwlock_is_locked(id), "the rwlock is already locked");
-        trace!("rwlock_writer_lock: {:?} now held by {:?}", id, writer);
-        let rwlock = &mut this.machine.threads.sync.rwlocks[id];
-        rwlock.writer = Some(writer);
+        trace!("rwlock_writer_lock: {:?} now held by {:?}", id, thread);
+        let rwlock = &mut this.machine.sync.rwlocks[id];
+        rwlock.writer = Some(thread);
         if let Some(data_race) = &this.machine.data_race {
-            data_race.validate_lock_acquire(&rwlock.data_race, writer);
+            data_race.acquire_clock(&rwlock.clock_unlocked, &this.machine.threads);
         }
     }
 
-    /// Try to unlock by removing the writer.
+    /// Try to unlock an rwlock held by the current thread.
+    /// Return `false` if it is held by another thread.
     #[inline]
-    fn rwlock_writer_unlock(&mut self, id: RwLockId, expected_writer: ThreadId) -> bool {
+    fn rwlock_writer_unlock(&mut self, id: RwLockId) -> InterpResult<'tcx, bool> {
         let this = self.eval_context_mut();
-        let current_span = this.machine.current_span();
-        let rwlock = &mut this.machine.threads.sync.rwlocks[id];
-        if let Some(current_writer) = rwlock.writer {
-            if current_writer != expected_writer {
+        let thread = this.active_thread();
+        let rwlock = &mut this.machine.sync.rwlocks[id];
+        interp_ok(if let Some(current_writer) = rwlock.writer {
+            if current_writer != thread {
                 // Only the owner can unlock the rwlock.
-                return false;
+                return interp_ok(false);
             }
             rwlock.writer = None;
-            trace!("rwlock_writer_unlock: {:?} unlocked by {:?}", id, expected_writer);
-            // Release memory to both reader and writer vector clocks
-            //  since this writer happens-before both the union of readers once they are finished
-            //  and the next writer
+            trace!("rwlock_writer_unlock: {:?} unlocked by {:?}", id, thread);
+            // Record release clock for next lock holder.
             if let Some(data_race) = &this.machine.data_race {
-                data_race.validate_lock_release(
-                    &mut rwlock.data_race,
-                    current_writer,
-                    current_span,
-                );
-                data_race.validate_lock_release(
-                    &mut rwlock.data_race_reader,
-                    current_writer,
-                    current_span,
-                );
+                data_race.release_clock(&this.machine.threads, |clock| {
+                    rwlock.clock_unlocked.clone_from(clock)
+                });
             }
             // The thread was a writer.
             //
             // We are prioritizing writers here against the readers. As a
             // result, not only readers can starve writers, but also writers can
             // starve readers.
-            if this.rwlock_dequeue_and_lock_writer(id) {
-                // Someone got the write lock, nice.
+            if let Some(writer) = rwlock.writer_queue.pop_front() {
+                this.unblock_thread(writer, BlockReason::RwLock(id))?;
             } else {
-                // Give the lock to all readers.
-                while this.rwlock_dequeue_and_lock_reader(id) {
-                    // Rinse and repeat.
+                // Take the entire read queue and wake them all up.
+                let readers = std::mem::take(&mut rwlock.reader_queue);
+                for reader in readers {
+                    this.unblock_thread(reader, BlockReason::RwLock(id))?;
                 }
             }
             true
         } else {
             false
-        }
+        })
     }
 
     /// Put the writer in the queue waiting for the lock.
+    /// Once the lock becomes available, `retval` will be written to `dest`.
     #[inline]
-    fn rwlock_enqueue_and_block_writer(&mut self, id: RwLockId, writer: ThreadId) {
+    fn rwlock_enqueue_and_block_writer(
+        &mut self,
+        id: RwLockId,
+        retval: Scalar,
+        dest: MPlaceTy<'tcx>,
+    ) {
         let this = self.eval_context_mut();
         assert!(this.rwlock_is_locked(id), "write-queueing on unlocked rwlock");
-        this.machine.threads.sync.rwlocks[id].writer_queue.push_back(writer);
-        this.block_thread(writer);
-    }
-
-    /// Provides the closure with the next CondvarId. Creates that Condvar if the closure returns None,
-    /// otherwise returns the value from the closure
-    #[inline]
-    fn condvar_get_or_create<F>(&mut self, existing: F) -> InterpResult<'tcx, CondvarId>
-    where
-        F: FnOnce(
-            &mut MiriInterpCx<'mir, 'tcx>,
-            CondvarId,
-        ) -> InterpResult<'tcx, Option<CondvarId>>,
-    {
-        let this = self.eval_context_mut();
-        let next_index = this.machine.threads.sync.condvars.next_index();
-        if let Some(old) = existing(this, next_index)? {
-            Ok(old)
-        } else {
-            let new_index = this.machine.threads.sync.condvars.push(Default::default());
-            assert_eq!(next_index, new_index);
-            Ok(new_index)
-        }
+        let thread = this.active_thread();
+        this.machine.sync.rwlocks[id].writer_queue.push_back(thread);
+        this.block_thread(
+            BlockReason::RwLock(id),
+            None,
+            callback!(
+                @capture<'tcx> {
+                    id: RwLockId,
+                    retval: Scalar,
+                    dest: MPlaceTy<'tcx>,
+                }
+                |this, unblock: UnblockKind| {
+                    assert_eq!(unblock, UnblockKind::Ready);
+                    this.rwlock_writer_lock(id);
+                    this.write_scalar(retval, &dest)?;
+                    interp_ok(())
+                }
+            ),
+        );
     }
 
     /// Is the conditional variable awaited?
     #[inline]
     fn condvar_is_awaited(&mut self, id: CondvarId) -> bool {
         let this = self.eval_context_mut();
-        !this.machine.threads.sync.condvars[id].waiters.is_empty()
+        !this.machine.sync.condvars[id].waiters.is_empty()
     }
 
-    /// Mark that the thread is waiting on the conditional variable.
-    fn condvar_wait(&mut self, id: CondvarId, thread: ThreadId, lock: CondvarLock) {
+    /// Release the mutex and let the current thread wait on the given condition variable.
+    /// Once it is signaled, the mutex will be acquired and `retval_succ` will be written to `dest`.
+    /// If the timeout happens first, `retval_timeout` will be written to `dest`.
+    fn condvar_wait(
+        &mut self,
+        condvar: CondvarId,
+        mutex_ref: MutexRef,
+        timeout: Option<(TimeoutClock, TimeoutAnchor, Duration)>,
+        retval_succ: Scalar,
+        retval_timeout: Scalar,
+        dest: MPlaceTy<'tcx>,
+    ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
-        let waiters = &mut this.machine.threads.sync.condvars[id].waiters;
-        assert!(waiters.iter().all(|waiter| waiter.thread != thread), "thread is already waiting");
-        waiters.push_back(CondvarWaiter { thread, lock });
+        if let Some(old_locked_count) = this.mutex_unlock(&mutex_ref)? {
+            if old_locked_count != 1 {
+                throw_unsup_format!(
+                    "awaiting a condvar on a mutex acquired multiple times is not supported"
+                );
+            }
+        } else {
+            throw_ub_format!(
+                "awaiting a condvar on a mutex that is unlocked or owned by a different thread"
+            );
+        }
+        let thread = this.active_thread();
+        let waiters = &mut this.machine.sync.condvars[condvar].waiters;
+        waiters.push_back(thread);
+        this.block_thread(
+            BlockReason::Condvar(condvar),
+            timeout,
+            callback!(
+                @capture<'tcx> {
+                    condvar: CondvarId,
+                    mutex_ref: MutexRef,
+                    retval_succ: Scalar,
+                    retval_timeout: Scalar,
+                    dest: MPlaceTy<'tcx>,
+                }
+                |this, unblock: UnblockKind| {
+                    match unblock {
+                        UnblockKind::Ready => {
+                            // The condvar was signaled. Make sure we get the clock for that.
+                            if let Some(data_race) = &this.machine.data_race {
+                                data_race.acquire_clock(
+                                    &this.machine.sync.condvars[condvar].clock,
+                                    &this.machine.threads,
+                                );
+                            }
+                            // Try to acquire the mutex.
+                            // The timeout only applies to the first wait (until the signal), not for mutex acquisition.
+                            this.condvar_reacquire_mutex(&mutex_ref, retval_succ, dest)
+                        }
+                        UnblockKind::TimedOut => {
+                            // We have to remove the waiter from the queue again.
+                            let thread = this.active_thread();
+                            let waiters = &mut this.machine.sync.condvars[condvar].waiters;
+                            waiters.retain(|waiter| *waiter != thread);
+                            // Now get back the lock.
+                            this.condvar_reacquire_mutex(&mutex_ref, retval_timeout, dest)
+                        }
+                    }
+                }
+            ),
+        );
+        interp_ok(())
     }
 
     /// Wake up some thread (if there is any) sleeping on the conditional
-    /// variable.
-    fn condvar_signal(&mut self, id: CondvarId) -> Option<(ThreadId, CondvarLock)> {
+    /// variable. Returns `true` iff any thread was woken up.
+    fn condvar_signal(&mut self, id: CondvarId) -> InterpResult<'tcx, bool> {
         let this = self.eval_context_mut();
-        let current_thread = this.get_active_thread();
-        let current_span = this.machine.current_span();
-        let condvar = &mut this.machine.threads.sync.condvars[id];
+        let condvar = &mut this.machine.sync.condvars[id];
         let data_race = &this.machine.data_race;
 
         // Each condvar signal happens-before the end of the condvar wake
         if let Some(data_race) = data_race {
-            data_race.validate_lock_release(&mut condvar.data_race, current_thread, current_span);
+            data_race.release_clock(&this.machine.threads, |clock| condvar.clock.clone_from(clock));
         }
-        condvar.waiters.pop_front().map(|waiter| {
-            if let Some(data_race) = data_race {
-                data_race.validate_lock_acquire(&condvar.data_race, waiter.thread);
-            }
-            (waiter.thread, waiter.lock)
-        })
+        let Some(waiter) = condvar.waiters.pop_front() else {
+            return interp_ok(false);
+        };
+        this.unblock_thread(waiter, BlockReason::Condvar(id))?;
+        interp_ok(true)
     }
 
-    #[inline]
-    /// Remove the thread from the queue of threads waiting on this conditional variable.
-    fn condvar_remove_waiter(&mut self, id: CondvarId, thread: ThreadId) {
+    /// Wait for the futex to be signaled, or a timeout. Once the thread is
+    /// unblocked, `callback` is called with the unblock reason.
+    fn futex_wait(
+        &mut self,
+        futex_ref: FutexRef,
+        bitset: u32,
+        timeout: Option<(TimeoutClock, TimeoutAnchor, Duration)>,
+        callback: DynUnblockCallback<'tcx>,
+    ) {
         let this = self.eval_context_mut();
-        this.machine.threads.sync.condvars[id].waiters.retain(|waiter| waiter.thread != thread);
-    }
-
-    fn futex_wait(&mut self, addr: u64, thread: ThreadId, bitset: u32) {
-        let this = self.eval_context_mut();
-        let futex = &mut this.machine.threads.sync.futexes.entry(addr).or_default();
+        let thread = this.active_thread();
+        let mut futex = futex_ref.0.borrow_mut();
         let waiters = &mut futex.waiters;
         assert!(waiters.iter().all(|waiter| waiter.thread != thread), "thread is already waiting");
-        waiters.push_back(FutexWaiter { thread, bitset });
+        waiters.push(FutexWaiter { thread, bitset });
+        drop(futex);
+
+        this.block_thread(
+            BlockReason::Futex,
+            timeout,
+            callback!(
+                @capture<'tcx> {
+                    futex_ref: FutexRef,
+                    callback: DynUnblockCallback<'tcx>,
+                }
+                |this, unblock: UnblockKind| {
+                    match unblock {
+                        UnblockKind::Ready => {
+                            let futex = futex_ref.0.borrow();
+                            // Acquire the clock of the futex.
+                            if let Some(data_race) = &this.machine.data_race {
+                                data_race.acquire_clock(&futex.clock, &this.machine.threads);
+                            }
+                        },
+                        UnblockKind::TimedOut => {
+                            // Remove the waiter from the futex.
+                            let thread = this.active_thread();
+                            let mut futex = futex_ref.0.borrow_mut();
+                            futex.waiters.retain(|waiter| waiter.thread != thread);
+                        },
+                    }
+
+                    callback.call(this, unblock)
+                }
+            ),
+        );
     }
 
-    fn futex_wake(&mut self, addr: u64, bitset: u32) -> Option<ThreadId> {
+    /// Wake up `count` of the threads in the queue that match any of the bits
+    /// in the bitset. Returns how many threads were woken.
+    fn futex_wake(
+        &mut self,
+        futex_ref: &FutexRef,
+        bitset: u32,
+        count: usize,
+    ) -> InterpResult<'tcx, usize> {
         let this = self.eval_context_mut();
-        let current_thread = this.get_active_thread();
-        let current_span = this.machine.current_span();
-        let futex = &mut this.machine.threads.sync.futexes.get_mut(&addr)?;
+        let mut futex = futex_ref.0.borrow_mut();
         let data_race = &this.machine.data_race;
 
         // Each futex-wake happens-before the end of the futex wait
         if let Some(data_race) = data_race {
-            data_race.validate_lock_release(&mut futex.data_race, current_thread, current_span);
+            data_race.release_clock(&this.machine.threads, |clock| futex.clock.clone_from(clock));
         }
 
-        // Wake up the first thread in the queue that matches any of the bits in the bitset.
-        futex.waiters.iter().position(|w| w.bitset & bitset != 0).map(|i| {
-            let waiter = futex.waiters.remove(i).unwrap();
-            if let Some(data_race) = data_race {
-                data_race.validate_lock_acquire(&futex.data_race, waiter.thread);
-            }
-            waiter.thread
-        })
-    }
+        // Remove `count` of the threads in the queue that match any of the bits in the bitset.
+        // We collect all of them before unblocking because the unblock callback may access the
+        // futex state to retrieve the remaining number of waiters on macOS.
+        let waiters: Vec<_> =
+            futex.waiters.extract_if(.., |w| w.bitset & bitset != 0).take(count).collect();
+        drop(futex);
 
-    fn futex_remove_waiter(&mut self, addr: u64, thread: ThreadId) {
-        let this = self.eval_context_mut();
-        if let Some(futex) = this.machine.threads.sync.futexes.get_mut(&addr) {
-            futex.waiters.retain(|waiter| waiter.thread != thread);
+        let woken = waiters.len();
+        for waiter in waiters {
+            this.unblock_thread(waiter.thread, BlockReason::Futex)?;
         }
+
+        interp_ok(woken)
     }
 }

@@ -1,7 +1,8 @@
-use crate::iter::adapters::{
-    zip::try_get_unchecked, TrustedRandomAccess, TrustedRandomAccessNoCoerce,
-};
-use crate::iter::{FusedIterator, TrustedLen, UncheckedIterator};
+use core::num::NonZero;
+
+use crate::iter::adapters::zip::try_get_unchecked;
+use crate::iter::adapters::{SourceIter, TrustedRandomAccess, TrustedRandomAccessNoCoerce};
+use crate::iter::{FusedIterator, InPlaceIterable, TrustedLen, UncheckedIterator};
 use crate::ops::Try;
 
 /// An iterator that clones the elements of an underlying iterator.
@@ -166,4 +167,24 @@ impl<I: Default> Default for Cloned<I> {
     fn default() -> Self {
         Self::new(Default::default())
     }
+}
+
+#[unstable(issue = "none", feature = "inplace_iteration")]
+unsafe impl<I> SourceIter for Cloned<I>
+where
+    I: SourceIter,
+{
+    type Source = I::Source;
+
+    #[inline]
+    unsafe fn as_inner(&mut self) -> &mut I::Source {
+        // SAFETY: unsafe function forwarding to unsafe function with the same requirements
+        unsafe { SourceIter::as_inner(&mut self.it) }
+    }
+}
+
+#[unstable(issue = "none", feature = "inplace_iteration")]
+unsafe impl<I: InPlaceIterable> InPlaceIterable for Cloned<I> {
+    const EXPAND_BY: Option<NonZero<usize>> = I::EXPAND_BY;
+    const MERGE_BY: Option<NonZero<usize>> = I::MERGE_BY;
 }

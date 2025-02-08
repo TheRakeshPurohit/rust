@@ -1,26 +1,17 @@
-#![deny(rustc::untranslatable_diagnostic)]
-#![deny(rustc::diagnostic_outside_of_impl)]
-use crate::borrow_set::LocalsStateAtExit;
 use rustc_hir as hir;
-use rustc_middle::mir::ProjectionElem;
-use rustc_middle::mir::{Body, Mutability, Place};
+use rustc_macros::extension;
+use rustc_middle::mir::{Body, Mutability, Place, ProjectionElem};
 use rustc_middle::ty::{self, TyCtxt};
+use tracing::debug;
 
-/// Extension methods for the `Place` type.
-pub trait PlaceExt<'tcx> {
+use crate::borrow_set::LocalsStateAtExit;
+
+#[extension(pub trait PlaceExt<'tcx>)]
+impl<'tcx> Place<'tcx> {
     /// Returns `true` if we can safely ignore borrows of this place.
     /// This is true whenever there is no action that the user can do
     /// to the place `self` that would invalidate the borrow. This is true
     /// for borrows of raw pointer dereferents as well as shared references.
-    fn ignore_borrow(
-        &self,
-        tcx: TyCtxt<'tcx>,
-        body: &Body<'tcx>,
-        locals_state_at_exit: &LocalsStateAtExit,
-    ) -> bool;
-}
-
-impl<'tcx> PlaceExt<'tcx> for Place<'tcx> {
     fn ignore_borrow(
         &self,
         tcx: TyCtxt<'tcx>,
@@ -46,11 +37,9 @@ impl<'tcx> PlaceExt<'tcx> for Place<'tcx> {
             }
         }
 
-        for (i, elem) in self.projection.iter().enumerate() {
-            let proj_base = &self.projection[..i];
-
+        for (i, (proj_base, elem)) in self.iter_projections().enumerate() {
             if elem == ProjectionElem::Deref {
-                let ty = Place::ty_from(self.local, proj_base, body, tcx).ty;
+                let ty = proj_base.ty(body, tcx).ty;
                 match ty.kind() {
                     ty::Ref(_, _, hir::Mutability::Not) if i == 0 => {
                         // For references to thread-local statics, we do need

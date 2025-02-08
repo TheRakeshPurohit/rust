@@ -15,63 +15,97 @@
 //!   procedural macros).
 //! * Lowering of concrete model to a [`base_db::CrateGraph`]
 
-#![warn(rust_2018_idioms, unused_lifetimes, semicolon_in_expressions_from_macros)]
+pub mod project_json;
+pub mod toolchain_info {
+    pub mod rustc_cfg;
+    pub mod target_data_layout;
+    pub mod target_tuple;
+    pub mod version;
 
-mod manifest_path;
+    use std::path::Path;
+
+    use crate::{ManifestPath, Sysroot};
+
+    #[derive(Copy, Clone)]
+    pub enum QueryConfig<'a> {
+        /// Directly invoke `rustc` to query the desired information.
+        Rustc(&'a Sysroot, &'a Path),
+        /// Attempt to use cargo to query the desired information, honoring cargo configurations.
+        /// If this fails, falls back to invoking `rustc` directly.
+        Cargo(&'a Sysroot, &'a ManifestPath),
+    }
+}
+
+mod build_dependencies;
 mod cargo_workspace;
-mod cfg_flag;
-mod project_json;
+mod env;
+mod manifest_path;
 mod sysroot;
 mod workspace;
-mod rustc_cfg;
-mod build_scripts;
-pub mod target_data_layout;
 
 #[cfg(test)]
 mod tests;
 
 use std::{
+    fmt,
     fs::{self, read_dir, ReadDir},
     io,
     process::Command,
 };
 
-use anyhow::{bail, format_err, Context, Result};
-use paths::{AbsPath, AbsPathBuf};
+use anyhow::{bail, format_err, Context};
+use paths::{AbsPath, AbsPathBuf, Utf8PathBuf};
 use rustc_hash::FxHashSet;
 
 pub use crate::{
-    build_scripts::WorkspaceBuildScripts,
+    build_dependencies::WorkspaceBuildScripts,
     cargo_workspace::{
-        CargoConfig, CargoFeatures, CargoWorkspace, Package, PackageData, PackageDependency,
-        RustLibSource, Target, TargetData, TargetKind,
+        CargoConfig, CargoFeatures, CargoMetadataConfig, CargoWorkspace, Package, PackageData,
+        PackageDependency, RustLibSource, Target, TargetData, TargetKind,
     },
     manifest_path::ManifestPath,
     project_json::{ProjectJson, ProjectJsonData},
     sysroot::Sysroot,
-    workspace::{CfgOverrides, PackageRoot, ProjectWorkspace},
+    workspace::{FileLoader, PackageRoot, ProjectWorkspace, ProjectWorkspaceKind},
 };
+pub use cargo_metadata::Metadata;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectJsonFromCommand {
+    /// The data describing this project, such as its dependencies.
+    pub data: ProjectJsonData,
+    /// The build system specific file that describes this project,
+    /// such as a `my-project/BUCK` file.
+    pub buildfile: AbsPathBuf,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum ProjectManifest {
     ProjectJson(ManifestPath),
     CargoToml(ManifestPath),
+    CargoScript(ManifestPath),
 }
 
 impl ProjectManifest {
-    pub fn from_manifest_file(path: AbsPathBuf) -> Result<ProjectManifest> {
+    pub fn from_manifest_file(path: AbsPathBuf) -> anyhow::Result<ProjectManifest> {
         let path = ManifestPath::try_from(path)
-            .map_err(|path| format_err!("bad manifest path: {}", path.display()))?;
+            .map_err(|path| format_err!("bad manifest path: {path}"))?;
         if path.file_name().unwrap_or_default() == "rust-project.json" {
+            return Ok(ProjectManifest::ProjectJson(path));
+        }
+        if path.file_name().unwrap_or_default() == ".rust-project.json" {
             return Ok(ProjectManifest::ProjectJson(path));
         }
         if path.file_name().unwrap_or_default() == "Cargo.toml" {
             return Ok(ProjectManifest::CargoToml(path));
         }
-        bail!("project root must point to Cargo.toml or rust-project.json: {}", path.display());
+        if path.extension().unwrap_or_default() == "rs" {
+            return Ok(ProjectManifest::CargoScript(path));
+        }
+        bail!("project root must point to a Cargo.toml, rust-project.json or <script>.rs file: {path}");
     }
 
-    pub fn discover_single(path: &AbsPath) -> Result<ProjectManifest> {
+    pub fn discover_single(path: &AbsPath) -> anyhow::Result<ProjectManifest> {
         let mut candidates = ProjectManifest::discover(path)?;
         let res = match candidates.pop() {
             None => bail!("no projects"),
@@ -86,6 +120,9 @@ impl ProjectManifest {
 
     pub fn discover(path: &AbsPath) -> io::Result<Vec<ProjectManifest>> {
         if let Some(project_json) = find_in_parent_dirs(path, "rust-project.json") {
+            return Ok(vec![ProjectManifest::ProjectJson(project_json)]);
+        }
+        if let Some(project_json) = find_in_parent_dirs(path, ".rust-project.json") {
             return Ok(vec![ProjectManifest::ProjectJson(project_json)]);
         }
         return find_cargo_toml(path)
@@ -126,7 +163,10 @@ impl ProjectManifest {
                 .filter_map(Result::ok)
                 .map(|it| it.path().join("Cargo.toml"))
                 .filter(|it| it.exists())
-                .map(AbsPathBuf::assert)
+                .map(Utf8PathBuf::from_path_buf)
+                .filter_map(Result::ok)
+                .map(AbsPathBuf::try_from)
+                .filter_map(Result::ok)
                 .filter_map(|it| it.try_into().ok())
                 .collect()
         }
@@ -143,9 +183,23 @@ impl ProjectManifest {
         res.sort();
         res
     }
+
+    pub fn manifest_path(&self) -> &ManifestPath {
+        match self {
+            ProjectManifest::ProjectJson(it)
+            | ProjectManifest::CargoToml(it)
+            | ProjectManifest::CargoScript(it) => it,
+        }
+    }
 }
 
-fn utf8_stdout(mut cmd: Command) -> Result<String> {
+impl fmt::Display for ProjectManifest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self.manifest_path(), f)
+    }
+}
+
+fn utf8_stdout(cmd: &mut Command) -> anyhow::Result<String> {
     let output = cmd.output().with_context(|| format!("{cmd:?} failed"))?;
     if !output.status.success() {
         match String::from_utf8(output.stderr) {
@@ -156,19 +210,69 @@ fn utf8_stdout(mut cmd: Command) -> Result<String> {
         }
     }
     let stdout = String::from_utf8(output.stdout)?;
-    Ok(stdout.trim().to_string())
+    Ok(stdout.trim().to_owned())
 }
 
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum InvocationStrategy {
     Once,
     #[default]
     PerWorkspace,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum InvocationLocation {
-    Root(AbsPathBuf),
-    #[default]
-    Workspace,
+/// A set of cfg-overrides per crate.
+#[derive(Default, Debug, Clone, Eq, PartialEq)]
+pub struct CfgOverrides {
+    /// A global set of overrides matching all crates.
+    pub global: cfg::CfgDiff,
+    /// A set of overrides matching specific crates.
+    pub selective: rustc_hash::FxHashMap<String, cfg::CfgDiff>,
+}
+
+impl CfgOverrides {
+    pub fn len(&self) -> usize {
+        self.global.len() + self.selective.values().map(|it| it.len()).sum::<usize>()
+    }
+
+    pub fn apply(&self, cfg_options: &mut cfg::CfgOptions, name: &str) {
+        if !self.global.is_empty() {
+            cfg_options.apply_diff(self.global.clone());
+        };
+        if let Some(diff) = self.selective.get(name) {
+            cfg_options.apply_diff(diff.clone());
+        };
+    }
+}
+
+fn parse_cfg(s: &str) -> Result<cfg::CfgAtom, String> {
+    let res = match s.split_once('=') {
+        Some((key, value)) => {
+            if !(value.starts_with('"') && value.ends_with('"')) {
+                return Err(format!("Invalid cfg ({s:?}), value should be in quotes"));
+            }
+            let key = intern::Symbol::intern(key);
+            let value = intern::Symbol::intern(&value[1..value.len() - 1]);
+            cfg::CfgAtom::KeyValue { key, value }
+        }
+        None => cfg::CfgAtom::Flag(intern::Symbol::intern(s)),
+    };
+    Ok(res)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SysrootSourceWorkspaceConfig {
+    CargoMetadata(CargoMetadataConfig),
+    Stitched,
+}
+
+impl Default for SysrootSourceWorkspaceConfig {
+    fn default() -> Self {
+        SysrootSourceWorkspaceConfig::default_cargo()
+    }
+}
+
+impl SysrootSourceWorkspaceConfig {
+    pub fn default_cargo() -> Self {
+        SysrootSourceWorkspaceConfig::CargoMetadata(Default::default())
+    }
 }

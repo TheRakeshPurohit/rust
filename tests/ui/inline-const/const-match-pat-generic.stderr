@@ -1,14 +1,15 @@
-error: constant pattern depends on a generic parameter
-  --> $DIR/const-match-pat-generic.rs:8:9
+error[E0158]: constant pattern cannot depend on generic parameters
+  --> $DIR/const-match-pat-generic.rs:7:9
    |
 LL |         const { V } => {},
-   |         ^^^^^^^^^^^
+   |         ^^^^^^^^^^^ `const` depends on a generic parameter
 
-error: constant pattern depends on a generic parameter
-  --> $DIR/const-match-pat-generic.rs:20:9
+error[E0158]: constant pattern cannot depend on generic parameters
+  --> $DIR/const-match-pat-generic.rs:19:9
    |
 LL |         const { f(V) } => {},
-   |         ^^^^^^^^^^^^^^
+   |         ^^^^^^^^^^^^^^ `const` depends on a generic parameter
 
 error: aborting due to 2 previous errors
 
+For more information about this error, try `rustc --explain E0158`.

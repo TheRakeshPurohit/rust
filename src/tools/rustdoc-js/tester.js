@@ -1,5 +1,14 @@
+/* global globalThis */
 const fs = require("fs");
 const path = require("path");
+
+
+function arrayToCode(array) {
+    return array.map((value, index) => {
+        value = value.split("&nbsp;").join(" ");
+        return (index % 2 === 1) ? ("`" + value + "`") : value;
+    }).join("");
+}
 
 function loadContent(content) {
     const Module = module.constructor;
@@ -23,7 +32,9 @@ function contentToDiffLine(key, value) {
 }
 
 function shouldIgnoreField(fieldName) {
-    return fieldName === "query" || fieldName === "correction";
+    return fieldName === "query" || fieldName === "correction" ||
+        fieldName === "proposeCorrectionFrom" ||
+        fieldName === "proposeCorrectionTo";
 }
 
 // This function is only called when no matching result was found and therefore will only display
@@ -81,7 +92,6 @@ function checkNeededFields(fullPath, expected, error_text, queryName, position) 
     if (fullPath.length === 0) {
         fieldsToCheck = [
             "foundElems",
-            "original",
             "returned",
             "userQuery",
             "error",
@@ -120,7 +130,31 @@ function checkNeededFields(fullPath, expected, error_text, queryName, position) 
 }
 
 function valueCheck(fullPath, expected, result, error_text, queryName) {
-    if (Array.isArray(expected)) {
+    if (Array.isArray(expected) && result instanceof Map) {
+        const expected_set = new Set();
+        for (const [key, expected_value] of expected) {
+            expected_set.add(key);
+            checkNeededFields(fullPath, expected_value, error_text, queryName, key);
+            if (result.has(key)) {
+                valueCheck(
+                    fullPath + "[" + key + "]",
+                    expected_value,
+                    result.get(key),
+                    error_text,
+                    queryName,
+                );
+            } else {
+                error_text.push(`${queryName}==> EXPECTED has extra key in map from field ` +
+                    `\`${fullPath}\` (key ${key}): \`${JSON.stringify(expected_value)}\``);
+            }
+        }
+        for (const [key, result_value] of result.entries()) {
+            if (!expected_set.has(key)) {
+                error_text.push(`${queryName}==> EXPECTED missing key in map from field ` +
+                    `\`${fullPath}\` (key ${key}): \`${JSON.stringify(result_value)}\``);
+            }
+        }
+    } else if (Array.isArray(expected)) {
         let i;
         for (i = 0; i < expected.length; ++i) {
             checkNeededFields(fullPath, expected[i], error_text, queryName, i);
@@ -151,15 +185,10 @@ function valueCheck(fullPath, expected, result, error_text, queryName) {
             }
             let result_v = result[key];
             if (result_v !== null && key === "error") {
-                result_v.forEach((value, index) => {
-                    value = value.split("&nbsp;").join(" ");
-                    if (index % 2 === 1) {
-                        result_v[index] = "`" + value + "`";
-                    } else {
-                        result_v[index] = value;
-                    }
-                });
-                result_v = result_v.join("");
+                if (!result_v.forEach) {
+                    throw result_v;
+                }
+                result_v = arrayToCode(result_v);
             }
             const obj_path = fullPath + (fullPath.length > 0 ? "." : "") + key;
             valueCheck(obj_path, expected[key], result_v, error_text, queryName);
@@ -183,11 +212,11 @@ function runParser(query, expected, parseQuery, queryName) {
     return error_text;
 }
 
-function runSearch(query, expected, doSearch, loadedFile, queryName) {
+async function runSearch(query, expected, doSearch, loadedFile, queryName) {
     const ignore_order = loadedFile.ignore_order;
     const exact_check = loadedFile.exact_check;
 
-    const results = doSearch(query, loadedFile.FILTER_CRATE);
+    const results = await doSearch(query, loadedFile.FILTER_CRATE);
     const error_text = [];
 
     for (const key in expected) {
@@ -209,7 +238,7 @@ function runSearch(query, expected, doSearch, loadedFile, queryName) {
         }
 
         let prev_pos = -1;
-        entry.forEach((elem, index) => {
+        for (const [index, elem] of entry.entries()) {
             const entry_pos = lookForEntry(elem, results[key]);
             if (entry_pos === -1) {
                 error_text.push(queryName + "==> Result not found in '" + key + "': '" +
@@ -227,17 +256,17 @@ function runSearch(query, expected, doSearch, loadedFile, queryName) {
                                 JSON.stringify(results[key][index]) + "'");
             } else if (ignore_order === false && entry_pos < prev_pos) {
                 error_text.push(queryName + "==> '" + JSON.stringify(elem) + "' was supposed " +
-                                "to be before '" + JSON.stringify(results[key][entry_pos]) + "'");
+                                "to be before '" + JSON.stringify(results[key][prev_pos]) + "'");
             } else {
                 prev_pos = entry_pos;
             }
-        });
+        }
     }
     return error_text;
 }
 
-function runCorrections(query, corrections, getCorrections, loadedFile) {
-    const qc = getCorrections(query, loadedFile.FILTER_CRATE);
+async function runCorrections(query, corrections, getCorrections, loadedFile) {
+    const qc = await getCorrections(query, loadedFile.FILTER_CRATE);
     const error_text = [];
 
     if (corrections === null) {
@@ -270,18 +299,27 @@ function checkResult(error_text, loadedFile, displaySuccess) {
     return 1;
 }
 
-function runCheckInner(callback, loadedFile, entry, getCorrections, extra) {
+async function runCheckInner(callback, loadedFile, entry, getCorrections, extra) {
     if (typeof entry.query !== "string") {
         console.log("FAILED");
         console.log("==> Missing `query` field");
         return false;
     }
-    let error_text = callback(entry.query, entry, extra ? "[ query `" + entry.query + "`]" : "");
+    let error_text = await callback(
+        entry.query,
+        entry,
+        extra ? "[ query `" + entry.query + "`]" : "",
+    );
     if (checkResult(error_text, loadedFile, false) !== 0) {
         return false;
     }
     if (entry.correction !== undefined) {
-        error_text = runCorrections(entry.query, entry.correction, getCorrections, loadedFile);
+        error_text = await runCorrections(
+            entry.query,
+            entry.correction,
+            getCorrections,
+            loadedFile,
+        );
         if (checkResult(error_text, loadedFile, false) !== 0) {
             return false;
         }
@@ -289,16 +327,16 @@ function runCheckInner(callback, loadedFile, entry, getCorrections, extra) {
     return true;
 }
 
-function runCheck(loadedFile, key, getCorrections, callback) {
+async function runCheck(loadedFile, key, getCorrections, callback) {
     const expected = loadedFile[key];
 
     if (Array.isArray(expected)) {
         for (const entry of expected) {
-            if (!runCheckInner(callback, loadedFile, entry, getCorrections, true)) {
+            if (!await runCheckInner(callback, loadedFile, entry, getCorrections, true)) {
                 return 1;
             }
         }
-    } else if (!runCheckInner(callback, loadedFile, expected, getCorrections, false)) {
+    } else if (!await runCheckInner(callback, loadedFile, expected, getCorrections, false)) {
         return 1;
     }
     console.log("OK");
@@ -309,7 +347,7 @@ function hasCheck(content, checkName) {
     return content.startsWith(`const ${checkName}`) || content.includes(`\nconst ${checkName}`);
 }
 
-function runChecks(testFile, doSearch, parseQuery, getCorrections) {
+async function runChecks(testFile, doSearch, parseQuery, getCorrections) {
     let checkExpected = false;
     let checkParsed = false;
     let testFileContent = readFile(testFile);
@@ -338,12 +376,12 @@ function runChecks(testFile, doSearch, parseQuery, getCorrections) {
     let res = 0;
 
     if (checkExpected) {
-        res += runCheck(loadedFile, "EXPECTED", getCorrections, (query, expected, text) => {
+        res += await runCheck(loadedFile, "EXPECTED", getCorrections, (query, expected, text) => {
             return runSearch(query, expected, doSearch, loadedFile, text);
         });
     }
     if (checkParsed) {
-        res += runCheck(loadedFile, "PARSED", getCorrections, (query, expected, text) => {
+        res += await runCheck(loadedFile, "PARSED", getCorrections, (query, expected, text) => {
             return runParser(query, expected, parseQuery, text);
         });
     }
@@ -364,19 +402,79 @@ function loadSearchJS(doc_folder, resource_suffix) {
     const searchIndexJs = path.join(doc_folder, "search-index" + resource_suffix + ".js");
     const searchIndex = require(searchIndexJs);
 
+    globalThis.searchState = {
+        descShards: new Map(),
+        loadDesc: async function({descShard, descIndex}) {
+            if (descShard.promise === null) {
+                descShard.promise = new Promise((resolve, reject) => {
+                    descShard.resolve = resolve;
+                    const ds = descShard;
+                    const fname = `${ds.crate}-desc-${ds.shard}-${resource_suffix}.js`;
+                    fs.readFile(
+                        `${doc_folder}/search.desc/${descShard.crate}/${fname}`,
+                        (err, data) => {
+                            if (err) {
+                                reject(err);
+                            } else {
+                                eval(data.toString("utf8"));
+                            }
+                        },
+                    );
+                });
+            }
+            const list = await descShard.promise;
+            return list[descIndex];
+        },
+        loadedDescShard: function(crate, shard, data) {
+            this.descShards.get(crate)[shard].resolve(data.split("\n"));
+        },
+    };
+
     const staticFiles = path.join(doc_folder, "static.files");
     const searchJs = fs.readdirSync(staticFiles).find(f => f.match(/search.*\.js$/));
     const searchModule = require(path.join(staticFiles, searchJs));
-    const searchWords = searchModule.initSearch(searchIndex.searchIndex);
-
+    searchModule.initSearch(searchIndex.searchIndex);
+    const docSearch = searchModule.docSearch;
     return {
-        doSearch: function(queryStr, filterCrate, currentCrate) {
-            return searchModule.execQuery(searchModule.parseQuery(queryStr), searchWords,
+        doSearch: async function(queryStr, filterCrate, currentCrate) {
+            const result = await docSearch.execQuery(searchModule.parseQuery(queryStr),
                 filterCrate, currentCrate);
+            for (const tab in result) {
+                if (!Object.prototype.hasOwnProperty.call(result, tab)) {
+                    continue;
+                }
+                if (!(result[tab] instanceof Array)) {
+                    continue;
+                }
+                for (const entry of result[tab]) {
+                    for (const key in entry) {
+                        if (!Object.prototype.hasOwnProperty.call(entry, key)) {
+                            continue;
+                        }
+                        if (key === "displayTypeSignature") {
+                            const {type, mappedNames, whereClause} =
+                                await entry.displayTypeSignature;
+                            entry.displayType = arrayToCode(type);
+                            entry.displayMappedNames = [...mappedNames.entries()]
+                                .map(([name, qname]) => {
+                                    return `${name} = ${qname}`;
+                                }).join(", ");
+                            entry.displayWhereClause = [...whereClause.entries()]
+                                .flatMap(([name, value]) => {
+                                    if (value.length === 0) {
+                                        return [];
+                                    }
+                                    return [`${name}: ${arrayToCode(value)}`];
+                                }).join(", ");
+                        }
+                    }
+                }
+            }
+            return result;
         },
         getCorrections: function(queryStr, filterCrate, currentCrate) {
             const parsedQuery = searchModule.parseQuery(queryStr);
-            searchModule.execQuery(parsedQuery, searchWords, filterCrate, currentCrate);
+            docSearch.execQuery(parsedQuery, filterCrate, currentCrate);
             return parsedQuery.correction;
         },
         parseQuery: searchModule.parseQuery,
@@ -445,7 +543,7 @@ function parseOptions(args) {
     return null;
 }
 
-function main(argv) {
+async function main(argv) {
     const opts = parseOptions(argv.slice(2));
     if (opts === null) {
         return 1;
@@ -453,7 +551,7 @@ function main(argv) {
 
     const parseAndSearch = loadSearchJS(
         opts["doc_folder"],
-        opts["resource_suffix"]
+        opts["resource_suffix"],
     );
     let errors = 0;
 
@@ -465,21 +563,29 @@ function main(argv) {
     };
 
     if (opts["test_file"].length !== 0) {
-        opts["test_file"].forEach(file => {
+        for (const file of opts["test_file"]) {
             process.stdout.write(`Testing ${file} ... `);
-            errors += runChecks(file, doSearch, parseAndSearch.parseQuery, getCorrections);
-        });
+            errors += await runChecks(file, doSearch, parseAndSearch.parseQuery, getCorrections);
+        }
     } else if (opts["test_folder"].length !== 0) {
-        fs.readdirSync(opts["test_folder"]).forEach(file => {
+        for (const file of fs.readdirSync(opts["test_folder"])) {
             if (!file.endsWith(".js")) {
-                return;
+                continue;
             }
             process.stdout.write(`Testing ${file} ... `);
-            errors += runChecks(path.join(opts["test_folder"], file), doSearch,
+            errors += await runChecks(path.join(opts["test_folder"], file), doSearch,
                     parseAndSearch.parseQuery, getCorrections);
-        });
+        }
     }
     return errors > 0 ? 1 : 0;
 }
 
-process.exit(main(process.argv));
+main(process.argv).catch(e => {
+    console.log(e);
+    process.exit(1);
+}).then(x => process.exit(x));
+
+process.on("beforeExit", () => {
+    console.log("process did not complete");
+    process.exit(1);
+});

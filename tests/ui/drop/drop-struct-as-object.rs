@@ -1,9 +1,12 @@
-// run-pass
+//@ run-pass
 #![allow(unused_variables)]
 #![allow(non_upper_case_globals)]
 
 // Test that destructor on a struct runs successfully after the struct
 // is boxed and converted to an object.
+
+// FIXME(static_mut_refs): this could use an atomic
+#![allow(static_mut_refs)]
 
 static mut value: usize = 0;
 
@@ -12,7 +15,7 @@ struct Cat {
 }
 
 trait Dummy {
-    fn get(&self) -> usize;
+    fn get(&self) -> usize; //~ WARN method `get` is never used
 }
 
 impl Dummy for Cat {

@@ -2,7 +2,7 @@
 //!
 //! Overview of check:
 //!
-//! 1. We create a list of error codes used by the compiler. Error codes are extracted from `compiler/rustc_error_codes/src/error_codes.rs`.
+//! 1. We create a list of error codes used by the compiler. Error codes are extracted from `compiler/rustc_error_codes/src/lib.rs`.
 //!
 //! 2. We check that the error code has a long-form explanation in `compiler/rustc_error_codes/src/error_codes/`.
 //!   - The explanation is expected to contain a `doctest` that fails with the correct error code. (`EXEMPT_FROM_DOCTEST` *currently* bypasses this check)
@@ -16,18 +16,20 @@
 //! 4. We check that the error code is actually emitted by the compiler.
 //!   - This is done by searching `compiler/` with a regex.
 
-use std::{ffi::OsStr, fs, path::Path};
+use std::ffi::OsStr;
+use std::fs;
+use std::path::Path;
 
 use regex::Regex;
 
 use crate::walk::{filter_dirs, walk, walk_many};
 
-const ERROR_CODES_PATH: &str = "compiler/rustc_error_codes/src/error_codes.rs";
+const ERROR_CODES_PATH: &str = "compiler/rustc_error_codes/src/lib.rs";
 const ERROR_DOCS_PATH: &str = "compiler/rustc_error_codes/src/error_codes/";
 const ERROR_TESTS_PATH: &str = "tests/ui/error-codes/";
 
 // Error codes that (for some reason) can't have a doctest in their explanation. Error codes are still expected to provide a code example, even if untested.
-const IGNORE_DOCTEST_CHECK: &[&str] = &["E0464", "E0570", "E0601", "E0602", "E0640", "E0717"];
+const IGNORE_DOCTEST_CHECK: &[&str] = &["E0464", "E0570", "E0601", "E0602", "E0717"];
 
 // Error codes that don't yet have a UI test. This list will eventually be removed.
 const IGNORE_UI_TEST_CHECK: &[&str] =
@@ -71,43 +73,65 @@ fn extract_error_codes(root_path: &Path, errors: &mut Vec<String>) -> Vec<String
     let path = root_path.join(Path::new(ERROR_CODES_PATH));
     let file =
         fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read `{path:?}`: {e}"));
+    let path = path.display();
 
     let mut error_codes = Vec::new();
 
-    for line in file.lines() {
+    for (line_index, line) in file.lines().enumerate() {
+        let line_index = line_index + 1;
         let line = line.trim();
 
         if line.starts_with('E') {
             let split_line = line.split_once(':');
 
-            // Extract the error code from the line, emitting a fatal error if it is not in a correct format.
-            let err_code = if let Some(err_code) = split_line {
-                err_code.0.to_owned()
-            } else {
+            // Extract the error code from the line. Emit a fatal error if it is not in the correct
+            // format.
+            let Some(split_line) = split_line else {
                 errors.push(format!(
-                    "Expected a line with the format `Exxxx: include_str!(\"..\")`, but got \"{}\" \
-                    without a `:` delimiter",
+                    "{path}:{line_index}: Expected a line with the format `Eabcd: abcd, \
+                    but got \"{}\" without a `:` delimiter",
                     line,
                 ));
                 continue;
             };
 
+            let err_code = split_line.0.to_owned();
+
             // If this is a duplicate of another error code, emit a fatal error.
             if error_codes.contains(&err_code) {
-                errors.push(format!("Found duplicate error code: `{}`", err_code));
+                errors.push(format!(
+                    "{path}:{line_index}: Found duplicate error code: `{}`",
+                    err_code
+                ));
                 continue;
             }
 
+            let mut chars = err_code.chars();
+            assert_eq!(chars.next(), Some('E'));
+            let error_num_as_str = chars.as_str();
+
             // Ensure that the line references the correct markdown file.
-            let expected_filename = format!(" include_str!(\"./error_codes/{}.md\"),", err_code);
-            if expected_filename != split_line.unwrap().1 {
+            let rest = split_line.1.split_once(',');
+            let Some(rest) = rest else {
                 errors.push(format!(
-                    "Error code `{}` expected to reference docs with `{}` but instead found `{}` in \
-                    `compiler/rustc_error_codes/src/error_codes.rs`",
-                    err_code,
-                    expected_filename,
-                    split_line.unwrap().1,
+                    "{path}:{line_index}: Expected a line with the format `Eabcd: abcd, \
+                    but got \"{}\" without a `,` delimiter",
+                    line,
                 ));
+                continue;
+            };
+            if error_num_as_str != rest.0.trim() {
+                errors.push(format!(
+                    "{path}:{line_index}: `{}:` should be followed by `{},` but instead found `{}` in \
+                    `compiler/rustc_error_codes/src/lib.rs`",
+                    err_code,
+                    error_num_as_str,
+                    split_line.1,
+                ));
+                continue;
+            }
+            if !rest.1.trim().is_empty() && !rest.1.trim().starts_with("//") {
+                errors.push(format!("{path}:{line_index}: should only have one error per line"));
                 continue;
             }
 
@@ -141,14 +165,14 @@ fn check_error_codes_docs(
             return;
         }
 
-        // Make sure that the file is referenced in `error_codes.rs`
+        // Make sure that the file is referenced in `rustc_error_codes/src/lib.rs`
         let filename = path.file_name().unwrap().to_str().unwrap().split_once('.');
         let err_code = filename.unwrap().0; // `unwrap` is ok because we know the filename is in the correct format.
 
         if error_codes.iter().all(|e| e != err_code) {
             errors.push(format!(
                 "Found valid file `{}` in error code docs directory without corresponding \
-                entry in `error_code.rs`",
+                entry in `rustc_error_codes/src/lib.rs`",
                 path.display()
             ));
             return;
@@ -286,18 +310,16 @@ fn check_error_codes_tests(
         for line in file.lines() {
             let s = line.trim();
             // Assuming the line starts with `error[E`, we can substring the error code out.
-            if s.starts_with("error[E") {
-                if &s[6..11] == code {
-                    found_code = true;
-                    break;
-                }
+            if s.starts_with("error[E") && &s[6..11] == code {
+                found_code = true;
+                break;
             };
         }
 
         if !found_code {
             verbose_print!(
                 verbose,
-                "warning: Error code {code}`` has a UI test file, but doesn't contain its own error code!"
+                "warning: Error code `{code}` has a UI test file, but doesn't contain its own error code!"
             );
         }
     }
@@ -311,13 +333,8 @@ fn check_error_codes_used(
     no_longer_emitted: &[String],
     verbose: bool,
 ) {
-    // We want error codes which match the following cases:
-    //
-    // * foo(a, E0111, a)
-    // * foo(a, E0111)
-    // * foo(E0111, a)
-    // * #[error = "E0111"]
-    let regex = Regex::new(r#"[(,"\s](E\d{4})[,)"]"#).unwrap();
+    // Search for error codes in the form `E0123`.
+    let regex = Regex::new(r#"\bE\d{4}\b"#).unwrap();
 
     let mut found_codes = Vec::new();
 
@@ -336,12 +353,12 @@ fn check_error_codes_used(
             }
 
             for cap in regex.captures_iter(line) {
-                if let Some(error_code) = cap.get(1) {
+                if let Some(error_code) = cap.get(0) {
                     let error_code = error_code.as_str().to_owned();
 
                     if !error_codes.contains(&error_code) {
                         // This error code isn't properly defined, we must error.
-                        errors.push(format!("Error code `{}` is used in the compiler but not defined and documented in `compiler/rustc_error_codes/src/error_codes.rs`.", error_code));
+                        errors.push(format!("Error code `{}` is used in the compiler but not defined and documented in `compiler/rustc_error_codes/src/lib.rs`.", error_code));
                         continue;
                     }
 
@@ -354,7 +371,12 @@ fn check_error_codes_used(
 
     for code in error_codes {
         if !found_codes.contains(code) && !no_longer_emitted.contains(code) {
-            errors.push(format!("Error code `{code}` exists, but is not emitted by the compiler!"))
+            errors.push(format!(
+                "Error code `{code}` exists, but is not emitted by the compiler!\n\
+                Please mark the code as no longer emitted by adding the following note to the top of the `EXXXX.md` file:\n\
+                `#### Note: this error code is no longer emitted by the compiler`\n\
+                Also, do not forget to mark doctests that no longer apply as `ignore (error is no longer emitted)`."
+            ));
         }
 
         if found_codes.contains(code) && no_longer_emitted.contains(code) {

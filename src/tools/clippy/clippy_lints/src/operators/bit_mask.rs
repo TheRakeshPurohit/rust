@@ -1,8 +1,9 @@
-use clippy_utils::consts::{constant, Constant};
+use clippy_utils::consts::{ConstEvalCtxt, Constant};
 use clippy_utils::diagnostics::span_lint;
+use clippy_utils::is_from_proc_macro;
 use rustc_hir::{BinOpKind, Expr, ExprKind};
 use rustc_lint::LateContext;
-use rustc_span::source_map::Span;
+use rustc_span::Span;
 
 use super::{BAD_BIT_MASK, INEFFECTIVE_BIT_MASK};
 
@@ -35,14 +36,14 @@ fn invert_cmp(cmp: BinOpKind) -> BinOpKind {
     }
 }
 
-fn check_compare(cx: &LateContext<'_>, bit_op: &Expr<'_>, cmp_op: BinOpKind, cmp_value: u128, span: Span) {
+fn check_compare<'a>(cx: &LateContext<'a>, bit_op: &Expr<'a>, cmp_op: BinOpKind, cmp_value: u128, span: Span) {
     if let ExprKind::Binary(op, left, right) = &bit_op.kind {
-        if op.node != BinOpKind::BitAnd && op.node != BinOpKind::BitOr {
+        if op.node != BinOpKind::BitAnd && op.node != BinOpKind::BitOr || is_from_proc_macro(cx, bit_op) {
             return;
         }
-        fetch_int_literal(cx, right)
-            .or_else(|| fetch_int_literal(cx, left))
-            .map_or((), |mask| check_bit_mask(cx, op.node, cmp_op, mask, cmp_value, span));
+        if let Some(mask) = fetch_int_literal(cx, right).or_else(|| fetch_int_literal(cx, left)) {
+            check_bit_mask(cx, op.node, cmp_op, mask, cmp_value, span);
+        }
     }
 }
 
@@ -64,7 +65,7 @@ fn check_bit_mask(
                             cx,
                             BAD_BIT_MASK,
                             span,
-                            &format!("incompatible bit mask: `_ & {mask_value}` can never be equal to `{cmp_value}`"),
+                            format!("incompatible bit mask: `_ & {mask_value}` can never be equal to `{cmp_value}`"),
                         );
                     }
                 } else if mask_value == 0 {
@@ -77,7 +78,7 @@ fn check_bit_mask(
                         cx,
                         BAD_BIT_MASK,
                         span,
-                        &format!("incompatible bit mask: `_ | {mask_value}` can never be equal to `{cmp_value}`"),
+                        format!("incompatible bit mask: `_ | {mask_value}` can never be equal to `{cmp_value}`"),
                     );
                 }
             },
@@ -90,7 +91,7 @@ fn check_bit_mask(
                         cx,
                         BAD_BIT_MASK,
                         span,
-                        &format!("incompatible bit mask: `_ & {mask_value}` will always be lower than `{cmp_value}`"),
+                        format!("incompatible bit mask: `_ & {mask_value}` will always be lower than `{cmp_value}`"),
                     );
                 } else if mask_value == 0 {
                     span_lint(cx, BAD_BIT_MASK, span, "&-masking with zero");
@@ -102,7 +103,7 @@ fn check_bit_mask(
                         cx,
                         BAD_BIT_MASK,
                         span,
-                        &format!("incompatible bit mask: `_ | {mask_value}` will never be lower than `{cmp_value}`"),
+                        format!("incompatible bit mask: `_ | {mask_value}` will never be lower than `{cmp_value}`"),
                     );
                 } else {
                     check_ineffective_lt(cx, span, mask_value, cmp_value, "|");
@@ -118,7 +119,7 @@ fn check_bit_mask(
                         cx,
                         BAD_BIT_MASK,
                         span,
-                        &format!("incompatible bit mask: `_ & {mask_value}` will never be higher than `{cmp_value}`"),
+                        format!("incompatible bit mask: `_ & {mask_value}` will never be higher than `{cmp_value}`"),
                     );
                 } else if mask_value == 0 {
                     span_lint(cx, BAD_BIT_MASK, span, "&-masking with zero");
@@ -130,7 +131,7 @@ fn check_bit_mask(
                         cx,
                         BAD_BIT_MASK,
                         span,
-                        &format!("incompatible bit mask: `_ | {mask_value}` will always be higher than `{cmp_value}`"),
+                        format!("incompatible bit mask: `_ | {mask_value}` will always be higher than `{cmp_value}`"),
                     );
                 } else {
                     check_ineffective_gt(cx, span, mask_value, cmp_value, "|");
@@ -149,7 +150,7 @@ fn check_ineffective_lt(cx: &LateContext<'_>, span: Span, m: u128, c: u128, op: 
             cx,
             INEFFECTIVE_BIT_MASK,
             span,
-            &format!("ineffective bit mask: `x {op} {m}` compared to `{c}`, is the same as x compared directly"),
+            format!("ineffective bit mask: `x {op} {m}` compared to `{c}`, is the same as x compared directly"),
         );
     }
 }
@@ -160,13 +161,13 @@ fn check_ineffective_gt(cx: &LateContext<'_>, span: Span, m: u128, c: u128, op: 
             cx,
             INEFFECTIVE_BIT_MASK,
             span,
-            &format!("ineffective bit mask: `x {op} {m}` compared to `{c}`, is the same as x compared directly"),
+            format!("ineffective bit mask: `x {op} {m}` compared to `{c}`, is the same as x compared directly"),
         );
     }
 }
 
 fn fetch_int_literal(cx: &LateContext<'_>, lit: &Expr<'_>) -> Option<u128> {
-    match constant(cx, cx.typeck_results(), lit)? {
+    match ConstEvalCtxt::new(cx).eval(lit)? {
         Constant::Int(n) => Some(n),
         _ => None,
     }

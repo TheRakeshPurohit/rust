@@ -1,5 +1,5 @@
-// run-pass
-// ignore-emscripten no threads support
+//@ run-pass
+//@ needs-threads
 
 use std::thread;
 
@@ -19,5 +19,7 @@ fn main() {
     thread::spawn(|| {
         FOO.with(|_| {});
         println!("test1");
-    }).join().unwrap();
+    })
+    .join()
+    .unwrap();
 }

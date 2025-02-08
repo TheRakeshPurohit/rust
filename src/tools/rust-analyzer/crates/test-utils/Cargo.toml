@@ -1,7 +1,8 @@
 [package]
 name = "test-utils"
 version = "0.0.0"
-description = "TBD"
+repository.workspace = true
+description = "Assorted testing utilities for rust-analyzer."
 
 authors.workspace = true
 edition.workspace = true
@@ -13,9 +14,14 @@ doctest = false
 
 [dependencies]
 # Avoid adding deps here, this crate is widely used in tests it should compile fast!
-dissimilar = "1.0.4"
+dissimilar = "1.0.7"
 text-size.workspace = true
-rustc-hash = "1.1.0"
+tracing.workspace = true
+rustc-hash.workspace = true
 
+paths.workspace = true
 stdx.workspace = true
 profile.workspace = true
+
+[lints]
+workspace = true

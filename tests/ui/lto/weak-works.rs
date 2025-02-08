@@ -1,7 +1,8 @@
-// run-pass
+//@ run-pass
 
-// compile-flags: -C codegen-units=8 -Z thinlto
-// ignore-windows
+//@ compile-flags: -C codegen-units=8 -Z thinlto
+//@ ignore-i686-pc-windows-gnu
+//@ ignore-x86_64-pc-windows-gnu
 
 #![feature(linkage)]
 

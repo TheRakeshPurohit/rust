@@ -2,7 +2,9 @@
 #![allow(
     clippy::disallowed_names,
     clippy::diverging_sub_expression,
-    clippy::uninlined_format_args
+    clippy::uninlined_format_args,
+    clippy::match_single_binding,
+    clippy::match_like_matches_macro
 )]
 
 fn bar<T>(_: T) {}
@@ -22,7 +24,6 @@ fn match_same_arms() {
             a
         },
         _ => {
-            //~ ERROR match arms have same body
             foo();
             let mut a = 42 + [23].len() as i32;
             if true {
@@ -32,16 +33,17 @@ fn match_same_arms() {
             a
         },
     };
+    //~^^^^^^^^^^^^^^^^^^^ ERROR: this match arm has an identical body to the `_` wildcard arm
 
     let _ = match 42 {
         42 => foo(),
-        51 => foo(), //~ ERROR match arms have same body
+        51 => foo(), //~ ERROR: this match arm has an identical body to another arm
         _ => true,
     };
 
     let _ = match Some(42) {
         Some(_) => 24,
-        None => 24, //~ ERROR match arms have same body
+        None => 24, //~ ERROR: this match arm has an identical body to another arm
     };
 
     let _ = match Some(42) {
@@ -63,13 +65,27 @@ fn match_same_arms() {
 
     match (Some(42), Some(42)) {
         (Some(a), None) => bar(a),
-        (None, Some(a)) => bar(a), //~ ERROR match arms have same body
+        (None, Some(a)) => bar(a), //~ ERROR: this match arm has an identical body to another arm
         _ => (),
     }
 
+    // No warning because guards are different
+    let _ = match Some(42) {
+        Some(a) if a == 42 => a,
+        Some(a) if a == 24 => a,
+        Some(_) => 24,
+        None => 0,
+    };
+
+    let _ = match (Some(42), Some(42)) {
+        (Some(a), None) if a == 42 => a,
+        (None, Some(a)) if a == 42 => a, //~ ERROR: this match arm has an identical body to another arm
+        _ => 0,
+    };
+
     match (Some(42), Some(42)) {
-        (Some(a), ..) => bar(a),
-        (.., Some(a)) => bar(a), //~ ERROR match arms have same body
+        (Some(a), ..) => bar(a), //~ ERROR: this match arm has an identical body to another arm
+        (.., Some(a)) => bar(a),
         _ => (),
     }
 
@@ -102,7 +118,7 @@ fn match_same_arms() {
     }
 
     match (x, Some(1i32)) {
-        (Ok(x), Some(_)) => println!("ok {}", x),
+        (Ok(x), Some(_)) => println!("ok {}", x), //~ ERROR: this match arm has an identical body to another arm
         (Ok(_), Some(x)) => println!("ok {}", x),
         _ => println!("err"),
     }
@@ -118,7 +134,7 @@ fn match_same_arms() {
     match x {
         Ok(_tmp) => println!("ok"),
         Ok(3) => println!("ok"),
-        Ok(_) => println!("ok"),
+        Ok(_) => println!("ok"), //~ ERROR: this match arm has an identical body to another arm
         Err(_) => {
             unreachable!();
         },
@@ -152,6 +168,7 @@ fn match_same_arms() {
             empty!(x);
         },
     }
+    //~^^^^^^^ ERROR: this match arm has an identical body to another arm
 
     match_expr_like_matches_macro_priority();
 }
@@ -195,7 +212,7 @@ fn main() {
 
     // Suggest moving `Foo::Z(_)` up.
     let _ = match Foo::X(0) {
-        Foo::X(0) => 1,
+        Foo::X(0) => 1, //~ ERROR: this match arm has an identical body to another arm
         Foo::X(_) | Foo::Y(_) => 2,
         Foo::Z(_) => 1,
         _ => 0,
@@ -205,7 +222,7 @@ fn main() {
     let _ = match Foo::X(0) {
         Foo::X(0) => 1,
         Foo::Y(_) | Foo::Z(0) => 2,
-        Foo::Z(_) => 1,
+        Foo::Z(_) => 1, //~ ERROR: this match arm has an identical body to another arm
         _ => 0,
     };
 
@@ -228,7 +245,7 @@ fn main() {
         Some(Bar { x: 0, y: 5, .. }) => 1,
         Some(Bar { y: 10, z: 0, .. }) => 2,
         None => 50,
-        Some(Bar { y: 0, x: 5, .. }) => 1,
+        Some(Bar { y: 0, x: 5, .. }) => 1, //~ ERROR: this match arm has an identical body to another arm
         _ => 200,
     };
 
@@ -245,4 +262,22 @@ fn main() {
         1 => cfg!(not_enable),
         _ => false,
     };
+}
+
+// issue #8919, fixed on https://github.com/rust-lang/rust/pull/97312
+mod with_lifetime {
+    enum MaybeStaticStr<'a> {
+        Static(&'static str),
+        Borrowed(&'a str),
+    }
+
+    impl<'a> MaybeStaticStr<'a> {
+        fn get(&self) -> &'a str {
+            match *self {
+                MaybeStaticStr::Static(s) => s,
+                MaybeStaticStr::Borrowed(s) => s,
+                //~^ ERROR: this match arm has an identical body to another arm
+            }
+        }
+    }
 }

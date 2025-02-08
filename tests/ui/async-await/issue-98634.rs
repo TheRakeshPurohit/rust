@@ -1,4 +1,4 @@
-// edition: 2021
+//@ edition: 2021
 
 use std::{
     future::Future,
@@ -43,8 +43,8 @@ impl Runtime {
 fn main() {
     Runtime.block_on(async {
         StructAsync { callback }.await;
-        //~^ ERROR expected `callback` to be a fn item that returns `Pin<Box<dyn Future<Output = ()>>>`, but it returns `impl Future<Output = ()>`
-        //~| ERROR expected `callback` to be a fn item that returns `Pin<Box<dyn Future<Output = ()>>>`, but it returns `impl Future<Output = ()>`
-        //~| ERROR expected `callback` to be a fn item that returns `Pin<Box<dyn Future<Output = ()>>>`, but it returns `impl Future<Output = ()>`
+        //~^ ERROR expected `callback` to return `Pin<Box<dyn Future<Output = ()>>>`, but it returns `impl Future<Output = ()>`
+        //~| ERROR expected `callback` to return `Pin<Box<dyn Future<Output = ()>>>`, but it returns `impl Future<Output = ()>`
+        //~| ERROR expected `callback` to return `Pin<Box<dyn Future<Output = ()>>>`, but it returns `impl Future<Output = ()>`
     });
 }

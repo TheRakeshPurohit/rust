@@ -1,9 +1,9 @@
-// edition:2018
-#![feature(async_closure)]
+//@ edition:2018
+
 fn foo() -> Box<dyn std::future::Future<Output = u32>> {
     let x = 0u32;
     Box::new((async || x)())
-    //~^ ERROR E0373
+    //~^ ERROR cannot return value referencing local variable `x`
 }
 
 fn main() {

@@ -1,20 +1,18 @@
+use clippy_config::Conf;
 use clippy_utils::diagnostics::{span_lint_and_help, span_lint_and_then};
-use clippy_utils::trait_ref_of_method;
+use clippy_utils::{is_from_proc_macro, trait_ref_of_method};
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_errors::Applicability;
-use rustc_hir::intravisit::{walk_impl_item, walk_item, walk_param_bound, walk_ty, Visitor};
+use rustc_hir::intravisit::{Visitor, walk_impl_item, walk_item, walk_param_bound, walk_ty, walk_unambig_ty};
 use rustc_hir::{
-    BodyId, ExprKind, GenericBound, GenericParam, GenericParamKind, Generics, ImplItem, ImplItemKind, Item, ItemKind,
-    PredicateOrigin, Ty, TyKind, WherePredicate,
+    AmbigArg, BodyId, ExprKind, GenericBound, GenericParam, GenericParamKind, Generics, ImplItem, ImplItemKind, Item,
+    ItemKind, PredicateOrigin, Ty, WherePredicate, WherePredicateKind,
 };
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::hir::nested_filter;
-use rustc_middle::lint::in_external_macro;
-use rustc_session::{declare_tool_lint, impl_lint_pass};
-use rustc_span::{
-    def_id::{DefId, LocalDefId},
-    Span,
-};
+use rustc_session::impl_lint_pass;
+use rustc_span::Span;
+use rustc_span::def_id::{DefId, LocalDefId};
 
 declare_clippy_lint! {
     /// ### What it does
@@ -25,13 +23,13 @@ declare_clippy_lint! {
     /// requires using a turbofish, which serves no purpose but to satisfy the compiler.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// fn unused_ty<T>(x: u8) {
     ///     // ..
     /// }
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// fn no_unused_ty(x: u8) {
     ///     // ..
     /// }
@@ -47,25 +45,10 @@ pub struct ExtraUnusedTypeParameters {
 }
 
 impl ExtraUnusedTypeParameters {
-    pub fn new(avoid_breaking_exported_api: bool) -> Self {
+    pub fn new(conf: &'static Conf) -> Self {
         Self {
-            avoid_breaking_exported_api,
+            avoid_breaking_exported_api: conf.avoid_breaking_exported_api,
         }
-    }
-
-    /// Don't lint external macros or functions with empty bodies. Also, don't lint exported items
-    /// if the `avoid_breaking_exported_api` config option is set.
-    fn is_empty_exported_or_macro(
-        &self,
-        cx: &LateContext<'_>,
-        span: Span,
-        def_id: LocalDefId,
-        body_id: BodyId,
-    ) -> bool {
-        let body = cx.tcx.hir().body(body_id).value;
-        let fn_empty = matches!(&body.kind, ExprKind::Block(blk, None) if blk.stmts.is_empty() && blk.expr.is_none());
-        let is_exported = cx.effective_visibilities.is_exported(def_id);
-        in_external_macro(cx.sess(), span) || fn_empty || (is_exported && self.avoid_breaking_exported_api)
     }
 }
 
@@ -112,11 +95,11 @@ impl<'cx, 'tcx> TypeWalker<'cx, 'tcx> {
             .map_or(param.span, |bound_span| param.span.with_hi(bound_span.hi()))
     }
 
-    fn emit_help(&self, spans: Vec<Span>, msg: &str, help: &'static str) {
+    fn emit_help(&self, spans: Vec<Span>, msg: String, help: &'static str) {
         span_lint_and_help(self.cx, EXTRA_UNUSED_TYPE_PARAMETERS, spans, msg, None, help);
     }
 
-    fn emit_sugg(&self, spans: Vec<Span>, msg: &str, help: &'static str) {
+    fn emit_sugg(&self, spans: Vec<Span>, msg: String, help: &'static str) {
         let suggestions: Vec<(Span, String)> = spans.iter().copied().zip(std::iter::repeat(String::new())).collect();
         span_lint_and_then(self.cx, EXTRA_UNUSED_TYPE_PARAMETERS, spans, msg, |diag| {
             diag.multipart_suggestion(help, suggestions, Applicability::MachineApplicable);
@@ -169,7 +152,7 @@ impl<'cx, 'tcx> TypeWalker<'cx, 'tcx> {
                 .iter()
                 .map(|(_, param)| self.get_bound_span(param))
                 .collect::<Vec<_>>();
-            self.emit_help(spans, &msg, help);
+            self.emit_help(spans, msg, help);
         } else {
             let spans = if explicit_params.len() == extra_params.len() {
                 vec![self.generics.span] // Remove the entire list of generics
@@ -179,25 +162,27 @@ impl<'cx, 'tcx> TypeWalker<'cx, 'tcx> {
                     .iter()
                     .rev()
                     .map(|(idx, param)| {
-                        if let Some(next) = explicit_params.get(idx + 1) && end != Some(next.def_id) {
-                        // Extend the current span forward, up until the next param in the list.
-                        param.span.until(next.span)
-                    } else {
-                        // Extend the current span back to include the comma following the previous
-                        // param. If the span of the next param in the list has already been
-                        // extended, we continue the chain. This is why we're iterating in reverse.
-                        end = Some(param.def_id);
+                        if let Some(next) = explicit_params.get(idx + 1)
+                            && end != Some(next.def_id)
+                        {
+                            // Extend the current span forward, up until the next param in the list.
+                            param.span.until(next.span)
+                        } else {
+                            // Extend the current span back to include the comma following the previous
+                            // param. If the span of the next param in the list has already been
+                            // extended, we continue the chain. This is why we're iterating in reverse.
+                            end = Some(param.def_id);
 
-                        // idx will never be 0, else we'd be removing the entire list of generics
-                        let prev = explicit_params[idx - 1];
-                        let prev_span = self.get_bound_span(prev);
-                        self.get_bound_span(param).with_lo(prev_span.hi())
-                    }
+                            // idx will never be 0, else we'd be removing the entire list of generics
+                            let prev = explicit_params[idx - 1];
+                            let prev_span = self.get_bound_span(prev);
+                            self.get_bound_span(param).with_lo(prev_span.hi())
+                        }
                     })
                     .collect()
             };
-            self.emit_sugg(spans, &msg, help);
-        };
+            self.emit_sugg(spans, msg, help);
+        }
     }
 }
 
@@ -207,30 +192,25 @@ fn bound_to_trait_def_id(bound: &GenericBound<'_>) -> Option<LocalDefId> {
     bound.trait_ref()?.trait_def_id()?.as_local()
 }
 
-impl<'cx, 'tcx> Visitor<'tcx> for TypeWalker<'cx, 'tcx> {
+impl<'tcx> Visitor<'tcx> for TypeWalker<'_, 'tcx> {
     type NestedFilter = nested_filter::OnlyBodies;
 
-    fn visit_ty(&mut self, t: &'tcx Ty<'tcx>) {
+    fn visit_ty(&mut self, t: &'tcx Ty<'tcx, AmbigArg>) {
         if let Some((def_id, _)) = t.peel_refs().as_generic_param() {
             self.ty_params.remove(&def_id);
-        } else if let TyKind::OpaqueDef(id, _, _) = t.kind {
-            // Explicitly walk OpaqueDef. Normally `walk_ty` would do the job, but it calls
-            // `visit_nested_item`, which checks that `Self::NestedFilter::INTER` is set. We're
-            // using `OnlyBodies`, so the check ends up failing and the type isn't fully walked.
-            let item = self.nested_visit_map().item(id);
-            walk_item(self, item);
         } else {
             walk_ty(self, t);
         }
     }
 
     fn visit_where_predicate(&mut self, predicate: &'tcx WherePredicate<'tcx>) {
-        if let WherePredicate::BoundPredicate(predicate) = predicate {
+        let span = predicate.span;
+        if let WherePredicateKind::BoundPredicate(predicate) = predicate.kind {
             // Collect spans for any bounds on type parameters.
             if let Some((def_id, _)) = predicate.bounded_ty.peel_refs().as_generic_param() {
                 match predicate.origin {
                     PredicateOrigin::GenericParam => {
-                        self.inline_bounds.insert(def_id, predicate.span);
+                        self.inline_bounds.insert(def_id, span);
                     },
                     PredicateOrigin::WhereClause => {
                         self.where_bounds.insert(def_id);
@@ -248,8 +228,13 @@ impl<'cx, 'tcx> Visitor<'tcx> for TypeWalker<'cx, 'tcx> {
                 {
                     self.ty_params.remove(&def_id);
                 }
+            } else {
+                // If the bounded type isn't a generic param, but is instead a concrete generic
+                // type, any params we find nested inside of it are being used as concrete types,
+                // and can therefore can be considered used. So, we're fine to walk the left-hand
+                // side of the where bound.
+                walk_unambig_ty(self, predicate.bounded_ty);
             }
-            // Only walk the right-hand side of where bounds
             for bound in predicate.bounds {
                 walk_param_bound(self, bound);
             }
@@ -261,10 +246,22 @@ impl<'cx, 'tcx> Visitor<'tcx> for TypeWalker<'cx, 'tcx> {
     }
 }
 
+fn is_empty_body(cx: &LateContext<'_>, body: BodyId) -> bool {
+    matches!(cx.tcx.hir().body(body).value.kind, ExprKind::Block(b, _) if b.stmts.is_empty() && b.expr.is_none())
+}
+
 impl<'tcx> LateLintPass<'tcx> for ExtraUnusedTypeParameters {
     fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
-        if let ItemKind::Fn(_, generics, body_id) = item.kind
-            && !self.is_empty_exported_or_macro(cx, item.span, item.owner_id.def_id, body_id)
+        if let ItemKind::Fn {
+            generics,
+            body: body_id,
+            ..
+        } = item.kind
+            && !generics.params.is_empty()
+            && !is_empty_body(cx, body_id)
+            && (!self.avoid_breaking_exported_api || !cx.effective_visibilities.is_exported(item.owner_id.def_id))
+            && !item.span.in_external_macro(cx.sess().source_map())
+            && !is_from_proc_macro(cx, item)
         {
             let mut walker = TypeWalker::new(cx, generics);
             walk_item(&mut walker, item);
@@ -275,8 +272,12 @@ impl<'tcx> LateLintPass<'tcx> for ExtraUnusedTypeParameters {
     fn check_impl_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx ImplItem<'tcx>) {
         // Only lint on inherent methods, not trait methods.
         if let ImplItemKind::Fn(.., body_id) = item.kind
+            && !item.generics.params.is_empty()
             && trait_ref_of_method(cx, item.owner_id.def_id).is_none()
-            && !self.is_empty_exported_or_macro(cx, item.span, item.owner_id.def_id, body_id)
+            && !is_empty_body(cx, body_id)
+            && (!self.avoid_breaking_exported_api || !cx.effective_visibilities.is_exported(item.owner_id.def_id))
+            && !item.span.in_external_macro(cx.sess().source_map())
+            && !is_from_proc_macro(cx, item)
         {
             let mut walker = TypeWalker::new(cx, item.generics);
             walk_impl_item(&mut walker, item);

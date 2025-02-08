@@ -2,7 +2,7 @@
 // for completeness since .rs files linked from .rc files support this
 // notation to specify their module's attributes
 
-// check-pass
+//@ check-pass
 
 #![feature(rustc_attrs)]
 #![rustc_dummy = "val"]
@@ -148,7 +148,7 @@ mod test_foreign_items {
             #![rustc_dummy]
 
             #[rustc_dummy]
-            fn rust_get_test_int() -> u32;
+            fn rust_get_test_int() -> isize;
         }
     }
 }

@@ -1,9 +1,7 @@
-use core::iter::Iterator;
-use std::{
-    collections::{vec_deque, VecDeque},
-    mem,
-};
-use test::{black_box, Bencher};
+use std::collections::{VecDeque, vec_deque};
+use std::mem;
+
+use test::{Bencher, black_box};
 
 #[bench]
 fn bench_new(b: &mut Bencher) {

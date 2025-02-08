@@ -1,5 +1,5 @@
-// run-pass
-// aux-build:modify-ast.rs
+//@ run-pass
+//@ proc-macro: modify-ast.rs
 
 extern crate modify_ast;
 
@@ -7,7 +7,7 @@ use modify_ast::*;
 
 #[derive(Foo)]
 pub struct MyStructc {
-    #[cfg_attr(my_cfg, foo)]
+    #[cfg_attr(FALSE, foo)]
     _a: i32,
 }
 

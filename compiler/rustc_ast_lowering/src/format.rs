@@ -1,15 +1,14 @@
-use super::LoweringContext;
-use rustc_ast as ast;
-use rustc_ast::visit::{self, Visitor};
+use core::ops::ControlFlow;
+use std::borrow::Cow;
+
+use rustc_ast::visit::Visitor;
 use rustc_ast::*;
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_hir as hir;
-use rustc_span::{
-    sym,
-    symbol::{kw, Ident},
-    Span, Symbol,
-};
-use std::borrow::Cow;
+use rustc_session::config::FmtDebug;
+use rustc_span::{Ident, Span, Symbol, kw, sym};
+
+use super::LoweringContext;
 
 impl<'hir> LoweringContext<'_, 'hir> {
     pub(crate) fn lower_format_args(&mut self, sp: Span, fmt: &FormatArgs) -> hir::ExprKind<'hir> {
@@ -19,9 +18,125 @@ impl<'hir> LoweringContext<'_, 'hir> {
         let mut fmt = Cow::Borrowed(fmt);
         if self.tcx.sess.opts.unstable_opts.flatten_format_args {
             fmt = flatten_format_args(fmt);
-            fmt = inline_literals(fmt);
+            fmt = self.inline_literals(fmt);
         }
         expand_format_args(self, sp, &fmt, allow_const)
+    }
+
+    /// Try to convert a literal into an interned string
+    fn try_inline_lit(&self, lit: token::Lit) -> Option<Symbol> {
+        match LitKind::from_token_lit(lit) {
+            Ok(LitKind::Str(s, _)) => Some(s),
+            Ok(LitKind::Int(n, ty)) => {
+                match ty {
+                    // unsuffixed integer literals are assumed to be i32's
+                    LitIntType::Unsuffixed => {
+                        (n <= i32::MAX as u128).then_some(Symbol::intern(&n.to_string()))
+                    }
+                    LitIntType::Signed(int_ty) => {
+                        let max_literal = self.int_ty_max(int_ty);
+                        (n <= max_literal).then_some(Symbol::intern(&n.to_string()))
+                    }
+                    LitIntType::Unsigned(uint_ty) => {
+                        let max_literal = self.uint_ty_max(uint_ty);
+                        (n <= max_literal).then_some(Symbol::intern(&n.to_string()))
+                    }
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Get the maximum value of int_ty. It is platform-dependent due to the byte size of isize
+    fn int_ty_max(&self, int_ty: IntTy) -> u128 {
+        match int_ty {
+            IntTy::Isize => self.tcx.data_layout.pointer_size.signed_int_max() as u128,
+            IntTy::I8 => i8::MAX as u128,
+            IntTy::I16 => i16::MAX as u128,
+            IntTy::I32 => i32::MAX as u128,
+            IntTy::I64 => i64::MAX as u128,
+            IntTy::I128 => i128::MAX as u128,
+        }
+    }
+
+    /// Get the maximum value of uint_ty. It is platform-dependent due to the byte size of usize
+    fn uint_ty_max(&self, uint_ty: UintTy) -> u128 {
+        match uint_ty {
+            UintTy::Usize => self.tcx.data_layout.pointer_size.unsigned_int_max(),
+            UintTy::U8 => u8::MAX as u128,
+            UintTy::U16 => u16::MAX as u128,
+            UintTy::U32 => u32::MAX as u128,
+            UintTy::U64 => u64::MAX as u128,
+            UintTy::U128 => u128::MAX as u128,
+        }
+    }
+
+    /// Inline literals into the format string.
+    ///
+    /// Turns
+    ///
+    /// `format_args!("Hello, {}! {} {}", "World", 123, x)`
+    ///
+    /// into
+    ///
+    /// `format_args!("Hello, World! 123 {}", x)`.
+    fn inline_literals<'fmt>(&self, mut fmt: Cow<'fmt, FormatArgs>) -> Cow<'fmt, FormatArgs> {
+        let mut was_inlined = vec![false; fmt.arguments.all_args().len()];
+        let mut inlined_anything = false;
+
+        for i in 0..fmt.template.len() {
+            let FormatArgsPiece::Placeholder(placeholder) = &fmt.template[i] else { continue };
+            let Ok(arg_index) = placeholder.argument.index else { continue };
+
+            let mut literal = None;
+
+            if let FormatTrait::Display = placeholder.format_trait
+                && placeholder.format_options == Default::default()
+                && let arg = fmt.arguments.all_args()[arg_index].expr.peel_parens_and_refs()
+                && let ExprKind::Lit(lit) = arg.kind
+            {
+                literal = self.try_inline_lit(lit);
+            }
+
+            if let Some(literal) = literal {
+                // Now we need to mutate the outer FormatArgs.
+                // If this is the first time, this clones the outer FormatArgs.
+                let fmt = fmt.to_mut();
+                // Replace the placeholder with the literal.
+                fmt.template[i] = FormatArgsPiece::Literal(literal);
+                was_inlined[arg_index] = true;
+                inlined_anything = true;
+            }
+        }
+
+        // Remove the arguments that were inlined.
+        if inlined_anything {
+            let fmt = fmt.to_mut();
+
+            let mut remove = was_inlined;
+
+            // Don't remove anything that's still used.
+            for_all_argument_indexes(&mut fmt.template, |index| remove[*index] = false);
+
+            // Drop all the arguments that are marked for removal.
+            let mut remove_it = remove.iter();
+            fmt.arguments.all_args_mut().retain(|_| remove_it.next() != Some(&true));
+
+            // Calculate the mapping of old to new indexes for the remaining arguments.
+            let index_map: Vec<usize> = remove
+                .into_iter()
+                .scan(0, |i, remove| {
+                    let mapped = *i;
+                    *i += !remove as usize;
+                    Some(mapped)
+                })
+                .collect();
+
+            // Correct the indexes that refer to arguments that have shifted position.
+            for_all_argument_indexes(&mut fmt.template, |index| *index = index_map[*index]);
+        }
+
+        fmt
     }
 }
 
@@ -61,9 +176,12 @@ fn flatten_format_args(mut fmt: Cow<'_, FormatArgs>) -> Cow<'_, FormatArgs> {
             let remaining_args = args.split_off(arg_index + 1);
             let old_arg_offset = args.len();
             let mut fmt2 = &mut args.pop().unwrap().expr; // The inner FormatArgs.
-            let fmt2 = loop { // Unwrap the Expr to get to the FormatArgs.
+            let fmt2 = loop {
+                // Unwrap the Expr to get to the FormatArgs.
                 match &mut fmt2.kind {
-                    ExprKind::Paren(inner) | ExprKind::AddrOf(BorrowKind::Ref, _, inner) => fmt2 = inner,
+                    ExprKind::Paren(inner) | ExprKind::AddrOf(BorrowKind::Ref, _, inner) => {
+                        fmt2 = inner
+                    }
                     ExprKind::FormatArgs(fmt2) => break fmt2,
                     _ => unreachable!(),
                 }
@@ -99,82 +217,6 @@ fn flatten_format_args(mut fmt: Cow<'_, FormatArgs>) -> Cow<'_, FormatArgs> {
     fmt
 }
 
-/// Inline literals into the format string.
-///
-/// Turns
-///
-/// `format_args!("Hello, {}! {} {}", "World", 123, x)`
-///
-/// into
-///
-/// `format_args!("Hello, World! 123 {}", x)`.
-fn inline_literals(mut fmt: Cow<'_, FormatArgs>) -> Cow<'_, FormatArgs> {
-    let mut was_inlined = vec![false; fmt.arguments.all_args().len()];
-    let mut inlined_anything = false;
-
-    for i in 0..fmt.template.len() {
-        let FormatArgsPiece::Placeholder(placeholder) = &fmt.template[i] else { continue };
-        let Ok(arg_index) = placeholder.argument.index else { continue };
-
-        let mut literal = None;
-
-        if let FormatTrait::Display = placeholder.format_trait
-            && placeholder.format_options == Default::default()
-            && let arg = fmt.arguments.all_args()[arg_index].expr.peel_parens_and_refs()
-            && let ExprKind::Lit(lit) = arg.kind
-        {
-            if let token::LitKind::Str | token::LitKind::StrRaw(_) = lit.kind
-                && let Ok(LitKind::Str(s, _)) = LitKind::from_token_lit(lit)
-            {
-                literal = Some(s);
-            } else if let token::LitKind::Integer = lit.kind
-                && let Ok(LitKind::Int(n, _)) = LitKind::from_token_lit(lit)
-            {
-                literal = Some(Symbol::intern(&n.to_string()));
-            }
-        }
-
-        if let Some(literal) = literal {
-            // Now we need to mutate the outer FormatArgs.
-            // If this is the first time, this clones the outer FormatArgs.
-            let fmt = fmt.to_mut();
-            // Replace the placeholder with the literal.
-            fmt.template[i] = FormatArgsPiece::Literal(literal);
-            was_inlined[arg_index] = true;
-            inlined_anything = true;
-        }
-    }
-
-    // Remove the arguments that were inlined.
-    if inlined_anything {
-        let fmt = fmt.to_mut();
-
-        let mut remove = was_inlined;
-
-        // Don't remove anything that's still used.
-        for_all_argument_indexes(&mut fmt.template, |index| remove[*index] = false);
-
-        // Drop all the arguments that are marked for removal.
-        let mut remove_it = remove.iter();
-        fmt.arguments.all_args_mut().retain(|_| remove_it.next() != Some(&true));
-
-        // Calculate the mapping of old to new indexes for the remaining arguments.
-        let index_map: Vec<usize> = remove
-            .into_iter()
-            .scan(0, |i, remove| {
-                let mapped = *i;
-                *i += !remove as usize;
-                Some(mapped)
-            })
-            .collect();
-
-        // Correct the indexes that refer to arguments that have shifted position.
-        for_all_argument_indexes(&mut fmt.template, |index| *index = index_map[*index]);
-    }
-
-    fmt
-}
-
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 enum ArgumentType {
     Format(FormatTrait),
@@ -201,7 +243,10 @@ fn make_argument<'hir>(
         hir::LangItem::FormatArgument,
         match ty {
             Format(Display) => sym::new_display,
-            Format(Debug) => sym::new_debug,
+            Format(Debug) => match ctx.tcx.sess.opts.unstable_opts.fmt_debug {
+                FmtDebug::Full | FmtDebug::Shallow => sym::new_debug,
+                FmtDebug::None => sym::new_debug_noop,
+            },
             Format(LowerExp) => sym::new_lower_exp,
             Format(UpperExp) => sym::new_upper_exp,
             Format(Octal) => sym::new_octal,
@@ -264,7 +309,7 @@ fn make_count<'hir>(
                 ctx.expr(
                     sp,
                     hir::ExprKind::Err(
-                        ctx.tcx.sess.delay_span_bug(sp, "lowered bad format_args count"),
+                        ctx.dcx().span_delayed_bug(sp, "lowered bad format_args count"),
                     ),
                 )
             }
@@ -303,7 +348,7 @@ fn make_format_spec<'hir>(
         }
         Err(_) => ctx.expr(
             sp,
-            hir::ExprKind::Err(ctx.tcx.sess.delay_span_bug(sp, "lowered bad format_args count")),
+            hir::ExprKind::Err(ctx.dcx().span_delayed_bug(sp, "lowered bad format_args count")),
         ),
     };
     let &FormatOptions {
@@ -317,16 +362,13 @@ fn make_format_spec<'hir>(
         debug_hex,
     } = &placeholder.format_options;
     let fill = ctx.expr_char(sp, fill.unwrap_or(' '));
-    let align = ctx.expr_lang_item_type_relative(
-        sp,
-        hir::LangItem::FormatAlignment,
-        match alignment {
+    let align =
+        ctx.expr_lang_item_type_relative(sp, hir::LangItem::FormatAlignment, match alignment {
             Some(FormatAlignment::Left) => sym::Left,
             Some(FormatAlignment::Right) => sym::Right,
             Some(FormatAlignment::Center) => sym::Center,
             None => sym::Unknown,
-        },
-    );
+        });
     // This needs to match `Flag` in library/core/src/fmt/rt.rs.
     let flags: u32 = ((sign == Some(FormatSign::Plus)) as u32)
         | ((sign == Some(FormatSign::Minus)) as u32) << 1
@@ -335,8 +377,8 @@ fn make_format_spec<'hir>(
         | ((debug_hex == Some(FormatDebugHex::Lower)) as u32) << 4
         | ((debug_hex == Some(FormatDebugHex::Upper)) as u32) << 5;
     let flags = ctx.expr_u32(sp, flags);
-    let precision = make_count(ctx, sp, &precision, argmap);
-    let width = make_count(ctx, sp, &width, argmap);
+    let precision = make_count(ctx, sp, precision, argmap);
+    let width = make_count(ctx, sp, width, argmap);
     let format_placeholder_new = ctx.arena.alloc(ctx.expr_lang_item_type_relative(
         sp,
         hir::LangItem::FormatPlaceholder,
@@ -410,15 +452,11 @@ fn expand_format_args<'hir>(
     let format_options = use_format_options.then(|| {
         // Generate:
         //     &[format_spec_0, format_spec_1, format_spec_2]
-        let elements: Vec<_> = fmt
-            .template
-            .iter()
-            .filter_map(|piece| {
-                let FormatArgsPiece::Placeholder(placeholder) = piece else { return None };
-                Some(make_format_spec(ctx, macsp, placeholder, &mut argmap))
-            })
-            .collect();
-        ctx.expr_array_ref(macsp, ctx.arena.alloc_from_iter(elements))
+        let elements = ctx.arena.alloc_from_iter(fmt.template.iter().filter_map(|piece| {
+            let FormatArgsPiece::Placeholder(placeholder) = piece else { return None };
+            Some(make_format_spec(ctx, macsp, placeholder, &mut argmap))
+        }));
+        ctx.expr_array_ref(macsp, elements)
     });
 
     let arguments = fmt.arguments.all_args();
@@ -477,10 +515,8 @@ fn expand_format_args<'hir>(
         //         <core::fmt::Argument>::new_debug(&arg2),
         //         …
         //     ]
-        let elements: Vec<_> = arguments
-            .iter()
-            .zip(argmap)
-            .map(|(arg, ((_, ty), placeholder_span))| {
+        let elements = ctx.arena.alloc_from_iter(arguments.iter().zip(argmap).map(
+            |(arg, ((_, ty), placeholder_span))| {
                 let placeholder_span =
                     placeholder_span.unwrap_or(arg.expr.span).with_ctxt(macsp.ctxt());
                 let arg_span = match arg.kind {
@@ -493,9 +529,9 @@ fn expand_format_args<'hir>(
                     hir::ExprKind::AddrOf(hir::BorrowKind::Ref, hir::Mutability::Not, arg),
                 ));
                 make_argument(ctx, placeholder_span, ref_arg, ty)
-            })
-            .collect();
-        ctx.expr_array_ref(macsp, ctx.arena.alloc_from_iter(elements))
+            },
+        ));
+        ctx.expr_array_ref(macsp, elements)
     } else {
         // Generate:
         //     &match (&arg0, &arg1, &…) {
@@ -528,19 +564,14 @@ fn expand_format_args<'hir>(
                 make_argument(ctx, placeholder_span, arg, ty)
             },
         ));
-        let elements: Vec<_> = arguments
-            .iter()
-            .map(|arg| {
-                let arg_expr = ctx.lower_expr(&arg.expr);
-                ctx.expr(
-                    arg.expr.span.with_ctxt(macsp.ctxt()),
-                    hir::ExprKind::AddrOf(hir::BorrowKind::Ref, hir::Mutability::Not, arg_expr),
-                )
-            })
-            .collect();
-        let args_tuple = ctx
-            .arena
-            .alloc(ctx.expr(macsp, hir::ExprKind::Tup(ctx.arena.alloc_from_iter(elements))));
+        let elements = ctx.arena.alloc_from_iter(arguments.iter().map(|arg| {
+            let arg_expr = ctx.lower_expr(&arg.expr);
+            ctx.expr(
+                arg.expr.span.with_ctxt(macsp.ctxt()),
+                hir::ExprKind::AddrOf(hir::BorrowKind::Ref, hir::Mutability::Not, arg_expr),
+            )
+        }));
+        let args_tuple = ctx.arena.alloc(ctx.expr(macsp, hir::ExprKind::Tup(elements)));
         let array = ctx.arena.alloc(ctx.expr(macsp, hir::ExprKind::Array(args)));
         let match_arms = ctx.arena.alloc_from_iter([ctx.arm(args_pat, array)]);
         let match_expr = ctx.arena.alloc(ctx.expr_match(
@@ -602,30 +633,31 @@ fn expand_format_args<'hir>(
 }
 
 fn may_contain_yield_point(e: &ast::Expr) -> bool {
-    struct MayContainYieldPoint(bool);
+    struct MayContainYieldPoint;
 
     impl Visitor<'_> for MayContainYieldPoint {
-        fn visit_expr(&mut self, e: &ast::Expr) {
+        type Result = ControlFlow<()>;
+
+        fn visit_expr(&mut self, e: &ast::Expr) -> ControlFlow<()> {
             if let ast::ExprKind::Await(_, _) | ast::ExprKind::Yield(_) = e.kind {
-                self.0 = true;
+                ControlFlow::Break(())
             } else {
-                visit::walk_expr(self, e);
+                visit::walk_expr(self, e)
             }
         }
 
-        fn visit_mac_call(&mut self, _: &ast::MacCall) {
+        fn visit_mac_call(&mut self, _: &ast::MacCall) -> ControlFlow<()> {
             // Macros should be expanded at this point.
             unreachable!("unexpanded macro in ast lowering");
         }
 
-        fn visit_item(&mut self, _: &ast::Item) {
+        fn visit_item(&mut self, _: &ast::Item) -> ControlFlow<()> {
             // Do not recurse into nested items.
+            ControlFlow::Continue(())
         }
     }
 
-    let mut visitor = MayContainYieldPoint(false);
-    visitor.visit_expr(e);
-    visitor.0
+    MayContainYieldPoint.visit_expr(e).is_break()
 }
 
 fn for_all_argument_indexes(template: &mut [FormatArgsPiece], mut f: impl FnMut(&mut usize)) {

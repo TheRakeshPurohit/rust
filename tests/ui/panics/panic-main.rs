@@ -1,6 +1,6 @@
-// run-fail
-// error-pattern:moop
-// ignore-emscripten no processes
+//@ run-fail
+//@ error-pattern:moop
+//@ needs-subprocess
 
 fn main() {
     panic!("moop");

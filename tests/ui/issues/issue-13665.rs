@@ -1,5 +1,4 @@
-// run-pass
-// pretty-expanded FIXME #23616
+//@ run-pass
 
 fn foo<'r>() {
   let maybe_value_ref: Option<&'r u8> = None;

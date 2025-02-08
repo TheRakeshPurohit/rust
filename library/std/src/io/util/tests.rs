@@ -1,6 +1,5 @@
 use crate::io::prelude::*;
-use crate::io::{empty, repeat, sink, BorrowedBuf, Empty, Repeat, SeekFrom, Sink};
-
+use crate::io::{BorrowedBuf, Empty, Repeat, SeekFrom, Sink, empty, repeat, sink};
 use crate::mem::MaybeUninit;
 
 #[test]
@@ -18,7 +17,7 @@ fn empty_reads() {
     assert_eq!(e.read(&mut []).unwrap(), 0);
     assert_eq!(e.read(&mut [0]).unwrap(), 0);
     assert_eq!(e.read(&mut [0; 1024]).unwrap(), 0);
-    assert_eq!(e.by_ref().read(&mut [0; 1024]).unwrap(), 0);
+    assert_eq!(Read::by_ref(&mut e).read(&mut [0; 1024]).unwrap(), 0);
 
     let buf: &mut [MaybeUninit<_>] = &mut [];
     let mut buf: BorrowedBuf<'_> = buf.into();
@@ -40,7 +39,7 @@ fn empty_reads() {
 
     let buf: &mut [_] = &mut [MaybeUninit::uninit(); 1024];
     let mut buf: BorrowedBuf<'_> = buf.into();
-    e.by_ref().read_buf(buf.unfilled()).unwrap();
+    Read::by_ref(&mut e).read_buf(buf.unfilled()).unwrap();
     assert_eq!(buf.len(), 0);
     assert_eq!(buf.init_len(), 0);
 }
@@ -63,6 +62,15 @@ fn empty_seeks() {
     assert!(matches!(e.seek(SeekFrom::Current(0)), Ok(0)));
     assert!(matches!(e.seek(SeekFrom::Current(1)), Ok(0)));
     assert!(matches!(e.seek(SeekFrom::Current(i64::MAX)), Ok(0)));
+}
+
+#[test]
+fn empty_sinks() {
+    let mut e = empty();
+    assert_eq!(e.write(&[]).unwrap(), 0);
+    assert_eq!(e.write(&[0]).unwrap(), 1);
+    assert_eq!(e.write(&[0; 1024]).unwrap(), 1024);
+    assert_eq!(Write::by_ref(&mut e).write(&[0; 1024]).unwrap(), 1024);
 }
 
 #[test]

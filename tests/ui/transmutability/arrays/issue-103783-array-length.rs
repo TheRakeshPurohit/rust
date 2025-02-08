@@ -3,14 +3,12 @@
 #![allow(dead_code)]
 
 mod assert {
-    use std::mem::{Assume, BikeshedIntrinsicFrom};
-    pub struct Context;
+    use std::mem::{Assume, TransmuteFrom};
 
     pub fn is_maybe_transmutable<Src, Dst>()
     where
-        Dst: BikeshedIntrinsicFrom<
+        Dst: TransmuteFrom<
             Src,
-            Context,
             { Assume { alignment: true, lifetimes: true, safety: true, validity: true } },
         >,
     {

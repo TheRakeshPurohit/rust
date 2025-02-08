@@ -2,10 +2,11 @@
 
 use crate::convert;
 use crate::ops::{self, ControlFlow};
-use crate::result::Result;
 
 /// Indicates whether a value is available or if the current task has been
 /// scheduled to receive a wakeup instead.
+///
+/// This is returned by [`Future::poll`](core::future::Future::poll).
 #[must_use = "this `Poll` may be a `Pending` variant, which should be handled"]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[lang = "Poll"]

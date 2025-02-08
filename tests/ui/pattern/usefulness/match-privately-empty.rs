@@ -1,5 +1,6 @@
+//@ revisions: normal exhaustive_patterns
+#![cfg_attr(exhaustive_patterns, feature(exhaustive_patterns))]
 #![feature(never_type)]
-#![feature(exhaustive_patterns)]
 
 mod private {
     pub struct Private {
@@ -11,11 +12,8 @@ mod private {
 
 fn main() {
     match private::DATA {
-    //~^ ERROR non-exhaustive patterns: `Some(Private { misc: true, .. })` not covered
+        //~^ ERROR non-exhaustive patterns: `Some(Private { misc: true, .. })` not covered
         None => {}
-        Some(private::Private {
-            misc: false,
-            ..
-        }) => {}
+        Some(private::Private { misc: false, .. }) => {}
     }
 }

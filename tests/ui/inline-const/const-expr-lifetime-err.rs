@@ -1,6 +1,3 @@
-#![feature(const_mut_refs)]
-#![feature(inline_const)]
-
 use std::marker::PhantomData;
 
 #[derive(PartialEq, Eq)]

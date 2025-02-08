@@ -1,3 +1,4 @@
+// skip-filecheck
 // EMIT_MIR_FOR_EACH_PANIC_STRATEGY
 // check that we clear the "ADT master drop flag" even when there are
 // no fields to be dropped.
@@ -14,11 +15,13 @@ fn main() {
     }
 }
 
-fn cond() -> bool { false }
+fn cond() -> bool {
+    false
+}
 
 struct K;
 
 enum E {
     F(K),
-    G(Box<E>)
+    G(Box<E>),
 }

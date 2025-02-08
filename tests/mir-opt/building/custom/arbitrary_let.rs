@@ -1,3 +1,4 @@
+// skip-filecheck
 #![feature(custom_mir, core_intrinsics)]
 
 extern crate core;
@@ -7,7 +8,7 @@ use core::ptr::{addr_of, addr_of_mut};
 // EMIT_MIR arbitrary_let.arbitrary_let.built.after.mir
 #[custom_mir(dialect = "built")]
 fn arbitrary_let(x: i32) -> i32 {
-    mir!(
+    mir! {
         {
             let y = x;
             Goto(second)
@@ -20,7 +21,7 @@ fn arbitrary_let(x: i32) -> i32 {
             let z = y;
             Goto(third)
         }
-    )
+    }
 }
 
 fn main() {

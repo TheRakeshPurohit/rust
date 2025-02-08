@@ -1,5 +1,6 @@
-// edition: 2021
+//@ edition: 2021
 
 fn main() {
-    std::any::Any::create(); //~ ERROR
+    std::any::Any::create();
+    //~^ ERROR expected a type, found a trait
 }

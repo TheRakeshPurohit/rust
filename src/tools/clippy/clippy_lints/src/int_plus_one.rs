@@ -1,12 +1,10 @@
-//! lint on blocks unnecessarily using >= with a + 1 or - 1
-
 use clippy_utils::diagnostics::span_lint_and_sugg;
-use clippy_utils::source::snippet_opt;
+use clippy_utils::source::SpanRangeExt;
 use rustc_ast::ast::{BinOpKind, Expr, ExprKind, LitKind};
 use rustc_ast::token;
 use rustc_errors::Applicability;
 use rustc_lint::{EarlyContext, EarlyLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -16,14 +14,14 @@ declare_clippy_lint! {
     /// Readability -- better to use `> y` instead of `>= y + 1`.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # let x = 1;
     /// # let y = 1;
     /// if x >= y + 1 {}
     /// ```
     ///
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # let x = 1;
     /// # let y = 1;
     /// if x > y {}
@@ -132,8 +130,8 @@ impl IntPlusOne {
             BinOpKind::Le => "<",
             _ => return None,
         };
-        if let Some(snippet) = snippet_opt(cx, node.span) {
-            if let Some(other_side_snippet) = snippet_opt(cx, other_side.span) {
+        if let Some(snippet) = node.span.get_source_text(cx) {
+            if let Some(other_side_snippet) = other_side.span.get_source_text(cx) {
                 let rec = match side {
                     Side::Lhs => Some(format!("{snippet} {binop_string} {other_side_snippet}")),
                     Side::Rhs => Some(format!("{other_side_snippet} {binop_string} {snippet}")),

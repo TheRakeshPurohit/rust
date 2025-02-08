@@ -1,13 +1,9 @@
-// run-pass
-// revisions: mir thir
-// [thir]compile-flags: -Zthir-unsafeck
+//@ run-pass
+//@ only-unix (this is a unix-specific test)
+//@ needs-subprocess
+//@ ignore-fuchsia no execvp syscall
 
-#![allow(stable_features)]
-// ignore-windows - this is a unix-specific test
-// ignore-emscripten no processes
-// ignore-sgx no processes
-// ignore-fuchsia no execvp syscall
-#![feature(process_exec, rustc_private)]
+#![feature(rustc_private)]
 
 extern crate libc;
 

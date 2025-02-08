@@ -13,12 +13,11 @@
 #![stable(feature = "rust1", since = "1.0.0")]
 
 use core::cmp::Ordering;
-use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::iter::FusedIterator;
 use core::marker::PhantomData;
-use core::mem;
-use core::ptr::{NonNull, Unique};
+use core::ptr::NonNull;
+use core::{fmt, mem};
 
 use super::SpecExtend;
 use crate::alloc::{Allocator, Global};
@@ -168,15 +167,16 @@ impl<T, A: Allocator> LinkedList<T, A> {
     /// Adds the given node to the front of the list.
     ///
     /// # Safety
-    /// `node` must point to a valid node that was boxed using the list's allocator.
+    /// `node` must point to a valid node that was boxed and leaked using the list's allocator.
+    /// This method takes ownership of the node, so the pointer should not be used again.
     #[inline]
-    unsafe fn push_front_node(&mut self, node: Unique<Node<T>>) {
+    unsafe fn push_front_node(&mut self, node: NonNull<Node<T>>) {
         // This method takes care not to create mutable references to whole nodes,
         // to maintain validity of aliasing pointers into `element`.
         unsafe {
             (*node.as_ptr()).next = self.head;
             (*node.as_ptr()).prev = None;
-            let node = Some(NonNull::from(node));
+            let node = Some(node);
 
             match self.head {
                 None => self.tail = node,
@@ -212,15 +212,16 @@ impl<T, A: Allocator> LinkedList<T, A> {
     /// Adds the given node to the back of the list.
     ///
     /// # Safety
-    /// `node` must point to a valid node that was boxed using the list's allocator.
+    /// `node` must point to a valid node that was boxed and leaked using the list's allocator.
+    /// This method takes ownership of the node, so the pointer should not be used again.
     #[inline]
-    unsafe fn push_back_node(&mut self, node: Unique<Node<T>>) {
+    unsafe fn push_back_node(&mut self, node: NonNull<Node<T>>) {
         // This method takes care not to create mutable references to whole nodes,
         // to maintain validity of aliasing pointers into `element`.
         unsafe {
             (*node.as_ptr()).next = None;
             (*node.as_ptr()).prev = self.tail;
-            let node = Some(NonNull::from(node));
+            let node = Some(node);
 
             match self.tail {
                 None => self.head = node,
@@ -654,6 +655,7 @@ impl<T, A: Allocator> LinkedList<T, A> {
     #[inline]
     #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[rustc_confusables("length", "size")]
     pub fn len(&self) -> usize {
         self.len
     }
@@ -738,6 +740,7 @@ impl<T, A: Allocator> LinkedList<T, A> {
     #[inline]
     #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[rustc_confusables("first")]
     pub fn front(&self) -> Option<&T> {
         unsafe { self.head.as_ref().map(|node| &node.as_ref().element) }
     }
@@ -842,8 +845,8 @@ impl<T, A: Allocator> LinkedList<T, A> {
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn push_front(&mut self, elt: T) {
         let node = Box::new_in(Node::new(elt), &self.alloc);
-        let node_ptr = Unique::from(Box::leak(node));
-        // SAFETY: node_ptr is a unique pointer to a node we boxed with self.alloc
+        let node_ptr = NonNull::from(Box::leak(node));
+        // SAFETY: node_ptr is a unique pointer to a node we boxed with self.alloc and leaked
         unsafe {
             self.push_front_node(node_ptr);
         }
@@ -888,10 +891,11 @@ impl<T, A: Allocator> LinkedList<T, A> {
     /// assert_eq!(3, *d.back().unwrap());
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[rustc_confusables("push", "append")]
     pub fn push_back(&mut self, elt: T) {
         let node = Box::new_in(Node::new(elt), &self.alloc);
-        let node_ptr = Unique::from(Box::leak(node));
-        // SAFETY: node_ptr is a unique pointer to a node we boxed with self.alloc
+        let node_ptr = NonNull::from(Box::leak(node));
+        // SAFETY: node_ptr is a unique pointer to a node we boxed with self.alloc and leaked
         unsafe {
             self.push_back_node(node_ptr);
         }
@@ -1002,6 +1006,7 @@ impl<T, A: Allocator> LinkedList<T, A> {
     /// assert_eq!(d.remove(0), 1);
     /// ```
     #[unstable(feature = "linked_list_remove", issue = "69210")]
+    #[rustc_confusables("delete", "take")]
     pub fn remove(&mut self, at: usize) -> T {
         let len = self.len();
         assert!(at < len, "Cannot remove at an index outside of the list bounds");
@@ -1021,6 +1026,99 @@ impl<T, A: Allocator> LinkedList<T, A> {
                 cursor.move_prev();
             }
             cursor.remove_current().unwrap()
+        }
+    }
+
+    /// Retains only the elements specified by the predicate.
+    ///
+    /// In other words, remove all elements `e` for which `f(&e)` returns false.
+    /// This method operates in place, visiting each element exactly once in the
+    /// original order, and preserves the order of the retained elements.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(linked_list_retain)]
+    /// use std::collections::LinkedList;
+    ///
+    /// let mut d = LinkedList::new();
+    ///
+    /// d.push_front(1);
+    /// d.push_front(2);
+    /// d.push_front(3);
+    ///
+    /// d.retain(|&x| x % 2 == 0);
+    ///
+    /// assert_eq!(d.pop_front(), Some(2));
+    /// assert_eq!(d.pop_front(), None);
+    /// ```
+    ///
+    /// Because the elements are visited exactly once in the original order,
+    /// external state may be used to decide which elements to keep.
+    ///
+    /// ```
+    /// #![feature(linked_list_retain)]
+    /// use std::collections::LinkedList;
+    ///
+    /// let mut d = LinkedList::new();
+    ///
+    /// d.push_front(1);
+    /// d.push_front(2);
+    /// d.push_front(3);
+    ///
+    /// let keep = [false, true, false];
+    /// let mut iter = keep.iter();
+    /// d.retain(|_| *iter.next().unwrap());
+    /// assert_eq!(d.pop_front(), Some(2));
+    /// assert_eq!(d.pop_front(), None);
+    /// ```
+    #[unstable(feature = "linked_list_retain", issue = "114135")]
+    pub fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&T) -> bool,
+    {
+        self.retain_mut(|elem| f(elem));
+    }
+
+    /// Retains only the elements specified by the predicate.
+    ///
+    /// In other words, remove all elements `e` for which `f(&mut e)` returns false.
+    /// This method operates in place, visiting each element exactly once in the
+    /// original order, and preserves the order of the retained elements.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(linked_list_retain)]
+    /// use std::collections::LinkedList;
+    ///
+    /// let mut d = LinkedList::new();
+    ///
+    /// d.push_front(1);
+    /// d.push_front(2);
+    /// d.push_front(3);
+    ///
+    /// d.retain_mut(|x| if *x % 2 == 0 {
+    ///     *x += 1;
+    ///     true
+    /// } else {
+    ///     false
+    /// });
+    /// assert_eq!(d.pop_front(), Some(3));
+    /// assert_eq!(d.pop_front(), None);
+    /// ```
+    #[unstable(feature = "linked_list_retain", issue = "114135")]
+    pub fn retain_mut<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&mut T) -> bool,
+    {
+        let mut cursor = self.cursor_front_mut();
+        while let Some(node) = cursor.current() {
+            if !f(node) {
+                cursor.remove_current().unwrap();
+            } else {
+                cursor.move_next();
+            }
         }
     }
 
@@ -1383,6 +1481,7 @@ impl<'a, T, A: Allocator> Cursor<'a, T, A> {
     /// or None if the list is empty.
     #[must_use]
     #[unstable(feature = "linked_list_cursors", issue = "58533")]
+    #[rustc_confusables("first")]
     pub fn front(&self) -> Option<&'a T> {
         self.list.front()
     }
@@ -1391,8 +1490,17 @@ impl<'a, T, A: Allocator> Cursor<'a, T, A> {
     /// or None if the list is empty.
     #[must_use]
     #[unstable(feature = "linked_list_cursors", issue = "58533")]
+    #[rustc_confusables("last")]
     pub fn back(&self) -> Option<&'a T> {
         self.list.back()
+    }
+
+    /// Provides a reference to the cursor's parent list.
+    #[must_use]
+    #[inline(always)]
+    #[unstable(feature = "linked_list_cursors", issue = "58533")]
+    pub fn as_list(&self) -> &'a LinkedList<T, A> {
+        self.list
     }
 }
 
@@ -1504,6 +1612,18 @@ impl<'a, T, A: Allocator> CursorMut<'a, T, A> {
     pub fn as_cursor(&self) -> Cursor<'_, T, A> {
         Cursor { list: self.list, current: self.current, index: self.index }
     }
+
+    /// Provides a read-only reference to the cursor's parent list.
+    ///
+    /// The lifetime of the returned reference is bound to that of the
+    /// `CursorMut`, which means it cannot outlive the `CursorMut` and that the
+    /// `CursorMut` is frozen for the lifetime of the reference.
+    #[must_use]
+    #[inline(always)]
+    #[unstable(feature = "linked_list_cursors", issue = "58533")]
+    pub fn as_list(&self) -> &LinkedList<T, A> {
+        self.list
+    }
 }
 
 // Now the list editing operations
@@ -1604,7 +1724,7 @@ impl<'a, T, A: Allocator> CursorMut<'a, T, A> {
         unsafe {
             self.current = unlinked_node.as_ref().next;
             self.list.unlink_node(unlinked_node);
-            let unlinked_node = Box::from_raw(unlinked_node.as_ptr());
+            let unlinked_node = Box::from_raw_in(unlinked_node.as_ptr(), &self.list.alloc);
             Some(unlinked_node.element)
         }
     }
@@ -1693,6 +1813,7 @@ impl<'a, T, A: Allocator> CursorMut<'a, T, A> {
     ///
     /// This operation should compute in *O*(1) time.
     #[unstable(feature = "linked_list_cursors", issue = "58533")]
+    #[rustc_confusables("push", "append")]
     pub fn push_back(&mut self, elt: T) {
         // Safety: We know that `push_back` does not change the position in
         // memory of other nodes. This ensures that `self.current` remains
@@ -1739,6 +1860,7 @@ impl<'a, T, A: Allocator> CursorMut<'a, T, A> {
     ///
     /// This operation should compute in *O*(1) time.
     #[unstable(feature = "linked_list_cursors", issue = "58533")]
+    #[rustc_confusables("pop")]
     pub fn pop_back(&mut self) -> Option<T> {
         if self.list.is_empty() {
             None
@@ -1759,6 +1881,7 @@ impl<'a, T, A: Allocator> CursorMut<'a, T, A> {
     /// or None if the list is empty.
     #[must_use]
     #[unstable(feature = "linked_list_cursors", issue = "58533")]
+    #[rustc_confusables("first")]
     pub fn front(&self) -> Option<&T> {
         self.list.front()
     }
@@ -1775,6 +1898,7 @@ impl<'a, T, A: Allocator> CursorMut<'a, T, A> {
     /// or None if the list is empty.
     #[must_use]
     #[unstable(feature = "linked_list_cursors", issue = "58533")]
+    #[rustc_confusables("last")]
     pub fn back(&self) -> Option<&T> {
         self.list.back()
     }
@@ -1815,9 +1939,7 @@ pub struct ExtractIf<
     T: 'a,
     F: 'a,
     #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global,
-> where
-    F: FnMut(&mut T) -> bool,
-{
+> {
     list: &'a mut LinkedList<T, A>,
     it: Option<NonNull<Node<T>>>,
     pred: F,
@@ -1841,7 +1963,7 @@ where
                 if (self.pred)(&mut node.as_mut().element) {
                     // `unlink_node` is okay with aliasing `element` references.
                     self.list.unlink_node(node);
-                    return Some(Box::from_raw(node.as_ptr()).element);
+                    return Some(Box::from_raw_in(node.as_ptr(), &self.list.alloc).element);
                 }
             }
         }
@@ -1855,10 +1977,7 @@ where
 }
 
 #[unstable(feature = "extract_if", reason = "recently added", issue = "43244")]
-impl<T: fmt::Debug, F> fmt::Debug for ExtractIf<'_, T, F>
-where
-    F: FnMut(&mut T) -> bool,
-{
+impl<T: fmt::Debug, F> fmt::Debug for ExtractIf<'_, T, F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("ExtractIf").field(&self.list).finish()
     }
@@ -2021,16 +2140,22 @@ impl<T: Clone, A: Allocator + Clone> Clone for LinkedList<T, A> {
         list
     }
 
-    fn clone_from(&mut self, other: &Self) {
-        let mut iter_other = other.iter();
-        if self.len() > other.len() {
-            self.split_off(other.len());
+    /// Overwrites the contents of `self` with a clone of the contents of `source`.
+    ///
+    /// This method is preferred over simply assigning `source.clone()` to `self`,
+    /// as it avoids reallocation of the nodes of the linked list. Additionally,
+    /// if the element type `T` overrides `clone_from()`, this will reuse the
+    /// resources of `self`'s elements as well.
+    fn clone_from(&mut self, source: &Self) {
+        let mut source_iter = source.iter();
+        if self.len() > source.len() {
+            self.split_off(source.len());
         }
-        for (elem, elem_other) in self.iter_mut().zip(&mut iter_other) {
-            elem.clone_from(elem_other);
+        for (elem, source_elem) in self.iter_mut().zip(&mut source_iter) {
+            elem.clone_from(source_elem);
         }
-        if !iter_other.is_empty() {
-            self.extend(iter_other.cloned());
+        if !source_iter.is_empty() {
+            self.extend(source_iter.cloned());
         }
     }
 }

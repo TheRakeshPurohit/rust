@@ -1,7 +1,7 @@
 //! Completes function abi strings.
 use syntax::{
     ast::{self, IsString},
-    AstNode, AstToken,
+    AstNode, AstToken, SmolStr,
 };
 
 use crate::{
@@ -26,17 +26,18 @@ const SUPPORTED_CALLING_CONVENTIONS: &[&str] = &[
     "ptx-kernel",
     "msp430-interrupt",
     "x86-interrupt",
-    "amdgpu-kernel",
     "efiapi",
     "avr-interrupt",
     "avr-non-blocking-interrupt",
+    "riscv-interrupt-m",
+    "riscv-interrupt-s",
     "C-cmse-nonsecure-call",
+    "C-cmse-nonsecure-entry",
     "wasm",
     "system",
     "system-unwind",
     "rust-intrinsic",
     "rust-call",
-    "platform-intrinsic",
     "unadjusted",
 ];
 
@@ -45,31 +46,32 @@ pub(crate) fn complete_extern_abi(
     ctx: &CompletionContext<'_>,
     expanded: &ast::String,
 ) -> Option<()> {
-    if !expanded.syntax().parent().map_or(false, |it| ast::Abi::can_cast(it.kind())) {
+    if !expanded.syntax().parent().is_some_and(|it| ast::Abi::can_cast(it.kind())) {
         return None;
     }
     let abi_str = expanded;
     let source_range = abi_str.text_range_between_quotes()?;
     for &abi in SUPPORTED_CALLING_CONVENTIONS {
-        CompletionItem::new(CompletionItemKind::Keyword, source_range, abi).add_to(acc, ctx.db);
+        CompletionItem::new(
+            CompletionItemKind::Keyword,
+            source_range,
+            SmolStr::new_static(abi),
+            ctx.edition,
+        )
+        .add_to(acc, ctx.db);
     }
     Some(())
 }
 
 #[cfg(test)]
 mod tests {
-    use expect_test::{expect, Expect};
+    use expect_test::expect;
 
-    use crate::tests::{check_edit, completion_list_no_kw};
-
-    fn check(ra_fixture: &str, expect: Expect) {
-        let actual = completion_list_no_kw(ra_fixture);
-        expect.assert_eq(&actual);
-    }
+    use crate::tests::{check_edit, check_no_kw};
 
     #[test]
     fn only_completes_in_string_literals() {
-        check(
+        check_no_kw(
             r#"
 $0 fn foo {}
 "#,
@@ -79,7 +81,7 @@ $0 fn foo {}
 
     #[test]
     fn requires_extern_prefix() {
-        check(
+        check_no_kw(
             r#"
 "$0" fn foo {}
 "#,
@@ -89,7 +91,7 @@ $0 fn foo {}
 
     #[test]
     fn works() {
-        check(
+        check_no_kw(
             r#"
 extern "$0" fn foo {}
 "#,

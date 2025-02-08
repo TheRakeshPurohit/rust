@@ -1,5 +1,3 @@
-//@run-rustfix
-
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -300,6 +298,40 @@ impl Default for OtherGenericType {
     fn default() -> Self {
         Self {
             inner: Default::default(),
+        }
+    }
+}
+
+mod issue10158 {
+    pub trait T {}
+
+    #[derive(Default)]
+    pub struct S {}
+    impl T for S {}
+
+    pub struct Outer {
+        pub inner: Box<dyn T>,
+    }
+
+    impl Default for Outer {
+        fn default() -> Self {
+            Outer {
+                // Box::<S>::default() adjusts to Box<dyn T>
+                inner: Box::<S>::default(),
+            }
+        }
+    }
+}
+
+mod issue11368 {
+    pub struct A {
+        a: u32,
+    }
+
+    impl Default for A {
+        #[track_caller]
+        fn default() -> Self {
+            Self { a: 0 }
         }
     }
 }

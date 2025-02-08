@@ -1,8 +1,8 @@
 #![allow(dead_code, unused_variables, unused_macro_rules, bad_style)]
 #![deny(keyword_idents)]
 
-// edition:2015
-// run-rustfix
+//@ edition:2015
+//@ run-rustfix
 
 fn async() {} //~ ERROR async
 //~^ WARN this is accepted in the current edition
@@ -11,14 +11,12 @@ macro_rules! foo {
     ($foo:ident) => {};
     ($async:expr, async) => {};
     //~^ ERROR async
-    //~| ERROR async
-    //~| WARN this is accepted in the current edition
     //~| WARN this is accepted in the current edition
 }
 
 foo!(async);
-    //~^ ERROR async
-    //~| WARN this is accepted in the current edition
+//~^ ERROR async
+//~| WARN this is accepted in the current edition
 
 mod dont_lint_raw {
     fn r#async() {}

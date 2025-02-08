@@ -1,15 +1,15 @@
+use rustc_ast::ptr::P;
+use rustc_ast::{
+    self as ast, Fn, FnHeader, FnSig, Generics, ItemKind, Safety, Stmt, StmtKind, TyKind,
+};
+use rustc_expand::base::{Annotatable, ExtCtxt};
+use rustc_span::{Ident, Span, kw, sym};
+use thin_vec::{ThinVec, thin_vec};
+
 use crate::errors;
 use crate::util::check_builtin_macro_attribute;
 
-use rustc_ast::ptr::P;
-use rustc_ast::{self as ast, FnHeader, FnSig, Generics, StmtKind};
-use rustc_ast::{Fn, ItemKind, Stmt, TyKind, Unsafe};
-use rustc_expand::base::{Annotatable, ExtCtxt};
-use rustc_span::symbol::{kw, sym, Ident};
-use rustc_span::Span;
-use thin_vec::{thin_vec, ThinVec};
-
-pub fn expand(
+pub(crate) fn expand(
     ecx: &mut ExtCtxt<'_>,
     _span: Span,
     meta_item: &ast::MetaItem,
@@ -21,20 +21,19 @@ pub fn expand(
 
     // Allow using `#[alloc_error_handler]` on an item statement
     // FIXME - if we get deref patterns, use them to reduce duplication here
-    let (item, is_stmt, sig_span) =
-        if let Annotatable::Item(item) = &item
-            && let ItemKind::Fn(fn_kind) = &item.kind
-        {
-            (item, false, ecx.with_def_site_ctxt(fn_kind.sig.span))
-        } else if let Annotatable::Stmt(stmt) = &item
-            && let StmtKind::Item(item) = &stmt.kind
-            && let ItemKind::Fn(fn_kind) = &item.kind
-        {
-            (item, true, ecx.with_def_site_ctxt(fn_kind.sig.span))
-        } else {
-            ecx.sess.parse_sess.span_diagnostic.emit_err(errors::AllocErrorMustBeFn {span: item.span() });
-            return vec![orig_item];
-        };
+    let (item, is_stmt, sig_span) = if let Annotatable::Item(item) = &item
+        && let ItemKind::Fn(fn_kind) = &item.kind
+    {
+        (item, false, ecx.with_def_site_ctxt(fn_kind.sig.span))
+    } else if let Annotatable::Stmt(stmt) = &item
+        && let StmtKind::Item(item) = &stmt.kind
+        && let ItemKind::Fn(fn_kind) = &item.kind
+    {
+        (item, true, ecx.with_def_site_ctxt(fn_kind.sig.span))
+    } else {
+        ecx.dcx().emit_err(errors::AllocErrorMustBeFn { span: item.span() });
+        return vec![orig_item];
+    };
 
     // Generate a bunch of new items using the AllocFnFactory
     let span = ecx.with_def_site_ctxt(item.span);
@@ -68,25 +67,25 @@ fn generate_handler(cx: &ExtCtxt<'_>, handler: Ident, span: Span, sig_span: Span
 
     let layout_new = cx.std_path(&[sym::alloc, sym::Layout, sym::from_size_align_unchecked]);
     let layout_new = cx.expr_path(cx.path(span, layout_new));
-    let layout = cx.expr_call(
-        span,
-        layout_new,
-        thin_vec![cx.expr_ident(span, size), cx.expr_ident(span, align)],
-    );
+    let layout = cx.expr_call(span, layout_new, thin_vec![
+        cx.expr_ident(span, size),
+        cx.expr_ident(span, align)
+    ]);
 
     let call = cx.expr_call_ident(sig_span, handler, thin_vec![layout]);
 
     let never = ast::FnRetTy::Ty(cx.ty(span, TyKind::Never));
     let params = thin_vec![cx.param(span, size, ty_usize.clone()), cx.param(span, align, ty_usize)];
     let decl = cx.fn_decl(params, never);
-    let header = FnHeader { unsafety: Unsafe::Yes(span), ..FnHeader::default() };
-    let sig = FnSig { decl, header, span: span };
+    let header = FnHeader { safety: Safety::Unsafe(span), ..FnHeader::default() };
+    let sig = FnSig { decl, header, span };
 
     let body = Some(cx.block_expr(call));
     let kind = ItemKind::Fn(Box::new(Fn {
         defaultness: ast::Defaultness::Final,
         sig,
         generics: Generics::default(),
+        contract: None,
         body,
     }));
 

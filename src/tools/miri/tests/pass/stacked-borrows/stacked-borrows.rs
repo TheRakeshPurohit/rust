@@ -1,4 +1,3 @@
-//@compile-flags: -Zmiri-retag-fields
 #![feature(allocator_api)]
 use std::ptr;
 
@@ -9,9 +8,10 @@ fn main() {
     mut_raw_then_mut_shr();
     mut_shr_then_mut_raw();
     mut_raw_mut();
+    mut_raw_mut2();
     partially_invalidate_mut();
     drop_after_sharing();
-    direct_mut_to_const_raw();
+    // direct_mut_to_const_raw();
     two_raw();
     shr_and_raw();
     disjoint_mutable_subborrows();
@@ -20,6 +20,8 @@ fn main() {
     mut_below_shr();
     wide_raw_ptr_in_tuple();
     not_unpin_not_protected();
+    write_does_not_invalidate_all_aliases();
+    box_into_raw_allows_interior_mutable_alias();
 }
 
 // Make sure that reading from an `&mut` does, like reborrowing to `&`,
@@ -95,6 +97,18 @@ fn mut_raw_mut() {
     assert_eq!(x, 4);
 }
 
+// A variant of `mut_raw_mut` that does *not* get accepted by Tree Borrows.
+// It's kind of an accident that we accept it in Stacked Borrows...
+fn mut_raw_mut2() {
+    unsafe {
+        let mut root = 0;
+        let to = &mut root as *mut i32;
+        *to = 0;
+        let _val = root;
+        *to = 0;
+    }
+}
+
 fn partially_invalidate_mut() {
     let data = &mut (0u8, 0u8);
     let reborrow = &mut *data as *mut (u8, u8);
@@ -111,14 +125,13 @@ fn drop_after_sharing() {
 }
 
 // Make sure that coercing &mut T to *const T produces a writeable pointer.
-fn direct_mut_to_const_raw() {
-    // TODO: This is currently disabled, waiting on a decision on <https://github.com/rust-lang/rust/issues/56604>
-    /*let x = &mut 0;
+// TODO: This is currently disabled, waiting on a decision on <https://github.com/rust-lang/rust/issues/56604>
+/*fn direct_mut_to_const_raw() {
+    let x = &mut 0;
     let y: *const i32 = x;
     unsafe { *(y as *mut i32) = 1; }
     assert_eq!(*x, 1);
-    */
-}
+}*/
 
 // Make sure that we can create two raw pointers from a mutable reference and use them both.
 fn two_raw() {
@@ -224,10 +237,10 @@ fn wide_raw_ptr_in_tuple() {
 fn not_unpin_not_protected() {
     // `&mut !Unpin`, at least for now, does not get `noalias` nor `dereferenceable`, so we also
     // don't add protectors. (We could, but until we have a better idea for where we want to go with
-    // the self-referential-generator situation, it does not seem worth the potential trouble.)
+    // the self-referential-coroutine situation, it does not seem worth the potential trouble.)
     use std::marker::PhantomPinned;
 
-    pub struct NotUnpin(i32, PhantomPinned);
+    pub struct NotUnpin(#[allow(dead_code)] i32, PhantomPinned);
 
     fn inner(x: &mut NotUnpin, f: fn(&mut NotUnpin)) {
         // `f` may mutate, but it may not deallocate!
@@ -238,4 +251,42 @@ fn not_unpin_not_protected() {
         let raw = x as *mut _;
         drop(unsafe { Box::from_raw(raw) });
     });
+}
+
+fn write_does_not_invalidate_all_aliases() {
+    mod other {
+        /// Some private memory to store stuff in.
+        static mut S: *mut i32 = 0 as *mut i32;
+
+        pub fn lib1(x: &&mut i32) {
+            unsafe {
+                S = (x as *const &mut i32).cast::<*mut i32>().read();
+            }
+        }
+
+        pub fn lib2() {
+            unsafe {
+                *S = 1337;
+            }
+        }
+    }
+
+    let x = &mut 0;
+    other::lib1(&x);
+    *x = 42; // a write to x -- invalidates other pointers?
+    other::lib2();
+    assert_eq!(*x, 1337); // oops, the value changed! I guess not all pointers were invalidated
+}
+
+fn box_into_raw_allows_interior_mutable_alias() {
+    unsafe {
+        let b = Box::new(std::cell::Cell::new(42));
+        let raw = Box::into_raw(b);
+        let c = &*raw;
+        let d = raw.cast::<i32>(); // bypassing `Cell` -- only okay in Miri tests
+        // `c` and `d` should permit arbitrary aliasing with each other now.
+        *d = 1;
+        c.set(2);
+        drop(Box::from_raw(raw));
+    }
 }

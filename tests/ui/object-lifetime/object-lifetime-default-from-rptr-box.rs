@@ -1,8 +1,7 @@
-// run-pass
+//@ run-pass
 // Test that the lifetime from the enclosing `&` is "inherited"
 // through the `Box` struct.
 
-// pretty-expanded FIXME #23616
 
 #![allow(dead_code)]
 

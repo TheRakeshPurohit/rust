@@ -1,18 +1,20 @@
-use clippy_utils::diagnostics::span_lint_and_sugg;
-use clippy_utils::macros::root_macro_call_first_node;
+use clippy_config::Conf;
+use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::is_in_test;
+use clippy_utils::macros::{MacroCall, macro_backtrace};
 use clippy_utils::source::snippet_with_applicability;
-use clippy_utils::{is_in_cfg_test, is_in_test_function};
+use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::Applicability;
 use rustc_hir::{Expr, ExprKind, Node};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
-use rustc_session::{declare_tool_lint, impl_lint_pass};
-use rustc_span::{sym, BytePos, Pos, Span};
+use rustc_session::impl_lint_pass;
+use rustc_span::{Span, SyntaxContext, sym};
 
 declare_clippy_lint! {
     /// ### What it does
     /// Checks for usage of the [`dbg!`](https://doc.rust-lang.org/std/macro.dbg.html) macro.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// The `dbg!` macro is intended as a debugging tool. It should not be present in released
     /// software or committed to a version control system.
     ///
@@ -31,108 +33,107 @@ declare_clippy_lint! {
     "`dbg!` macro is intended as a debugging tool"
 }
 
-/// Gets the span of the statement up to the next semicolon, if and only if the next
-/// non-whitespace character actually is a semicolon.
-/// E.g.
-/// ```rust,ignore
-/// 
-///    dbg!();
-///    ^^^^^^^  this span is returned
-///
-///   foo!(dbg!());
-///             no span is returned
-/// ```
-fn span_including_semi(cx: &LateContext<'_>, span: Span) -> Option<Span> {
-    let sm = cx.sess().source_map();
-    let sf = sm.lookup_source_file(span.hi());
-    let src = sf.src.as_ref()?.get(span.hi().to_usize()..)?;
-    let first_non_whitespace = src.find(|c: char| !c.is_whitespace())?;
-
-    if src.as_bytes()[first_non_whitespace] == b';' {
-        let hi = span.hi() + BytePos::from_usize(first_non_whitespace + 1);
-        Some(span.with_hi(hi))
-    } else {
-        None
-    }
-}
-
-#[derive(Copy, Clone)]
 pub struct DbgMacro {
     allow_dbg_in_tests: bool,
+    /// Tracks the `dbg!` macro callsites that are already checked.
+    checked_dbg_call_site: FxHashSet<Span>,
+    /// Tracks the previous `SyntaxContext`, to avoid walking the same context chain.
+    prev_ctxt: SyntaxContext,
 }
 
 impl_lint_pass!(DbgMacro => [DBG_MACRO]);
 
 impl DbgMacro {
-    pub fn new(allow_dbg_in_tests: bool) -> Self {
-        DbgMacro { allow_dbg_in_tests }
+    pub fn new(conf: &'static Conf) -> Self {
+        DbgMacro {
+            allow_dbg_in_tests: conf.allow_dbg_in_tests,
+            checked_dbg_call_site: FxHashSet::default(),
+            prev_ctxt: SyntaxContext::root(),
+        }
     }
 }
 
 impl LateLintPass<'_> for DbgMacro {
     fn check_expr(&mut self, cx: &LateContext<'_>, expr: &Expr<'_>) {
-        let Some(macro_call) = root_macro_call_first_node(cx, expr) else { return };
-        if cx.tcx.is_diagnostic_item(sym::dbg_macro, macro_call.def_id) {
+        let cur_syntax_ctxt = expr.span.ctxt();
+
+        if cur_syntax_ctxt != self.prev_ctxt &&
+            let Some(macro_call) = first_dbg_macro_in_expansion(cx, expr.span) &&
+            !macro_call.span.in_external_macro(cx.sess().source_map()) &&
+            self.checked_dbg_call_site.insert(macro_call.span) &&
             // allows `dbg!` in test code if allow-dbg-in-test is set to true in clippy.toml
-            if self.allow_dbg_in_tests
-                && (is_in_test_function(cx.tcx, expr.hir_id) || is_in_cfg_test(cx.tcx, expr.hir_id))
-            {
-                return;
-            }
-            let mut applicability = Applicability::MachineApplicable;
+            !(self.allow_dbg_in_tests && is_in_test(cx.tcx, expr.hir_id))
+        {
+            self.prev_ctxt = cur_syntax_ctxt;
 
-            let (sugg_span, suggestion) = match expr.peel_drop_temps().kind {
-                // dbg!()
-                ExprKind::Block(..) => {
-                    // If the `dbg!` macro is a "free" statement and not contained within other expressions,
-                    // remove the whole statement.
-                    if let Some(Node::Stmt(stmt)) = cx.tcx.hir().find_parent(expr.hir_id)
-                        && let Some(span) = span_including_semi(cx, stmt.span.source_callsite())
-                    {
-                        (span, String::new())
-                    } else {
-                        (macro_call.span, String::from("()"))
-                    }
-                },
-                // dbg!(1)
-                ExprKind::Match(val, ..) => (
-                    macro_call.span,
-                    snippet_with_applicability(cx, val.span.source_callsite(), "..", &mut applicability).to_string(),
-                ),
-                // dbg!(2, 3)
-                ExprKind::Tup(
-                    [
-                        Expr {
-                            kind: ExprKind::Match(first, ..),
-                            ..
-                        },
-                        ..,
-                        Expr {
-                            kind: ExprKind::Match(last, ..),
-                            ..
-                        },
-                    ],
-                ) => {
-                    let snippet = snippet_with_applicability(
-                        cx,
-                        first.span.source_callsite().to(last.span.source_callsite()),
-                        "..",
-                        &mut applicability,
-                    );
-                    (macro_call.span, format!("({snippet})"))
-                },
-                _ => return,
-            };
-
-            span_lint_and_sugg(
+            span_lint_and_then(
                 cx,
                 DBG_MACRO,
-                sugg_span,
+                macro_call.span,
                 "the `dbg!` macro is intended as a debugging tool",
-                "remove the invocation before committing it to a version control system",
-                suggestion,
-                applicability,
+                |diag| {
+                    let mut applicability = Applicability::MachineApplicable;
+
+                    let (sugg_span, suggestion) = match expr.peel_drop_temps().kind {
+                        // dbg!()
+                        ExprKind::Block(..) => {
+                            // If the `dbg!` macro is a "free" statement and not contained within other expressions,
+                            // remove the whole statement.
+                            if let Node::Stmt(_) = cx.tcx.parent_hir_node(expr.hir_id)
+                                && let Some(semi_span) = cx.sess().source_map().mac_call_stmt_semi_span(macro_call.span)
+                            {
+                                (macro_call.span.to(semi_span), String::new())
+                            } else {
+                                (macro_call.span, String::from("()"))
+                            }
+                        },
+                        // dbg!(1)
+                        ExprKind::Match(val, ..) => (
+                            macro_call.span,
+                            snippet_with_applicability(cx, val.span.source_callsite(), "..", &mut applicability)
+                                .to_string(),
+                        ),
+                        // dbg!(2, 3)
+                        ExprKind::Tup(
+                            [
+                                Expr {
+                                    kind: ExprKind::Match(first, ..),
+                                    ..
+                                },
+                                ..,
+                                Expr {
+                                    kind: ExprKind::Match(last, ..),
+                                    ..
+                                },
+                            ],
+                        ) => {
+                            let snippet = snippet_with_applicability(
+                                cx,
+                                first.span.source_callsite().to(last.span.source_callsite()),
+                                "..",
+                                &mut applicability,
+                            );
+                            (macro_call.span, format!("({snippet})"))
+                        },
+                        _ => unreachable!(),
+                    };
+
+                    diag.span_suggestion(
+                        sugg_span,
+                        "remove the invocation before committing it to a version control system",
+                        suggestion,
+                        applicability,
+                    );
+                },
             );
         }
     }
+
+    fn check_crate_post(&mut self, _: &LateContext<'_>) {
+        self.checked_dbg_call_site = FxHashSet::default();
+    }
+}
+
+fn first_dbg_macro_in_expansion(cx: &LateContext<'_>, span: Span) -> Option<MacroCall> {
+    macro_backtrace(span).find(|mc| cx.tcx.is_diagnostic_item(sym::dbg_macro, mc.def_id))
 }

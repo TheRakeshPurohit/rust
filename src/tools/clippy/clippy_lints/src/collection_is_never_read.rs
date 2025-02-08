@@ -1,13 +1,12 @@
 use clippy_utils::diagnostics::span_lint;
-use clippy_utils::ty::{is_type_diagnostic_item, is_type_lang_item};
-use clippy_utils::visitors::for_each_expr_with_closures;
-use clippy_utils::{get_enclosing_block, get_parent_node, path_to_local_id};
+use clippy_utils::ty::{get_type_diagnostic_name, is_type_lang_item};
+use clippy_utils::visitors::{Visitable, for_each_expr};
+use clippy_utils::{get_enclosing_block, path_to_local_id};
 use core::ops::ControlFlow;
-use rustc_hir::{Block, ExprKind, HirId, LangItem, Local, Node, PatKind};
+use rustc_hir::{Body, ExprKind, HirId, LangItem, LetStmt, Node, PatKind};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::symbol::sym;
-use rustc_span::Symbol;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -20,7 +19,7 @@ declare_clippy_lint! {
     /// instead.
     ///
     /// ### Example
-    /// ```rust
+    /// ```no_run
     /// # let samples = vec![3, 1, 2];
     /// let mut sorted_samples = samples.clone();
     /// sorted_samples.sort();
@@ -29,7 +28,7 @@ declare_clippy_lint! {
     /// }
     /// ```
     /// Use instead:
-    /// ```rust
+    /// ```no_run
     /// # let samples = vec![3, 1, 2];
     /// let mut sorted_samples = samples.clone();
     /// sorted_samples.sort();
@@ -44,24 +43,11 @@ declare_clippy_lint! {
 }
 declare_lint_pass!(CollectionIsNeverRead => [COLLECTION_IS_NEVER_READ]);
 
-// Add `String` here when it is added to diagnostic items
-static COLLECTIONS: [Symbol; 9] = [
-    sym::BTreeMap,
-    sym::BTreeSet,
-    sym::BinaryHeap,
-    sym::HashMap,
-    sym::HashSet,
-    sym::LinkedList,
-    sym::Option,
-    sym::Vec,
-    sym::VecDeque,
-];
-
 impl<'tcx> LateLintPass<'tcx> for CollectionIsNeverRead {
-    fn check_local(&mut self, cx: &LateContext<'tcx>, local: &'tcx Local<'tcx>) {
-        // Look for local variables whose type is a container. Search surrounding bock for read access.
-        if match_acceptable_type(cx, local, &COLLECTIONS)
-            && let PatKind::Binding(_, local_id, _, _) = local.pat.kind
+    fn check_local(&mut self, cx: &LateContext<'tcx>, local: &'tcx LetStmt<'tcx>) {
+        // Look for local variables whose type is a container. Search surrounding block for read access.
+        if let PatKind::Binding(_, local_id, _, _) = local.pat.kind
+            && match_acceptable_type(cx, local)
             && let Some(enclosing_block) = get_enclosing_block(cx, local.hir_id)
             && has_no_read_access(cx, local_id, enclosing_block)
         {
@@ -70,19 +56,30 @@ impl<'tcx> LateLintPass<'tcx> for CollectionIsNeverRead {
     }
 }
 
-fn match_acceptable_type(cx: &LateContext<'_>, local: &Local<'_>, collections: &[rustc_span::Symbol]) -> bool {
+fn match_acceptable_type(cx: &LateContext<'_>, local: &LetStmt<'_>) -> bool {
     let ty = cx.typeck_results().pat_ty(local.pat);
-    collections.iter().any(|&sym| is_type_diagnostic_item(cx, ty, sym))
-    // String type is a lang item but not a diagnostic item for now so we need a separate check
-        || is_type_lang_item(cx, ty, LangItem::String)
+    matches!(
+        get_type_diagnostic_name(cx, ty),
+        Some(
+            sym::BTreeMap
+                | sym::BTreeSet
+                | sym::BinaryHeap
+                | sym::HashMap
+                | sym::HashSet
+                | sym::LinkedList
+                | sym::Option
+                | sym::Vec
+                | sym::VecDeque
+        )
+    ) || is_type_lang_item(cx, ty, LangItem::String)
 }
 
-fn has_no_read_access<'tcx>(cx: &LateContext<'tcx>, id: HirId, block: &'tcx Block<'tcx>) -> bool {
+fn has_no_read_access<'tcx, T: Visitable<'tcx>>(cx: &LateContext<'tcx>, id: HirId, block: T) -> bool {
     let mut has_access = false;
     let mut has_read_access = false;
 
     // Inspect all expressions and sub-expressions in the block.
-    for_each_expr_with_closures(cx, block, |expr| {
+    for_each_expr(cx, block, |expr| {
         // Ignore expressions that are not simply `id`.
         if !path_to_local_id(expr, id) {
             return ControlFlow::Continue(());
@@ -94,7 +91,7 @@ fn has_no_read_access<'tcx>(cx: &LateContext<'tcx>, id: HirId, block: &'tcx Bloc
         // `id` appearing in the left-hand side of an assignment is not a read access:
         //
         // id = ...; // Not reading `id`.
-        if let Some(Node::Expr(parent)) = get_parent_node(cx.tcx, expr.hir_id)
+        if let Node::Expr(parent) = cx.tcx.parent_hir_node(expr.hir_id)
             && let ExprKind::Assign(lhs, ..) = parent.kind
             && path_to_local_id(lhs, id)
         {
@@ -108,16 +105,35 @@ fn has_no_read_access<'tcx>(cx: &LateContext<'tcx>, id: HirId, block: &'tcx Bloc
         // Only assuming this for "official" methods defined on the type. For methods defined in extension
         // traits (identified as local, based on the orphan rule), pessimistically assume that they might
         // have side effects, so consider them a read.
-        if let Some(Node::Expr(parent)) = get_parent_node(cx.tcx, expr.hir_id)
-            && let ExprKind::MethodCall(_, receiver, _, _) = parent.kind
+        if let Node::Expr(parent) = cx.tcx.parent_hir_node(expr.hir_id)
+            && let ExprKind::MethodCall(_, receiver, args, _) = parent.kind
             && path_to_local_id(receiver, id)
             && let Some(method_def_id) = cx.typeck_results().type_dependent_def_id(parent.hir_id)
             && !method_def_id.is_local()
         {
+            // If this "official" method takes closures,
+            // it has read access if one of the closures has read access.
+            //
+            // items.retain(|item| send_item(item).is_ok());
+            let is_read_in_closure_arg = args.iter().any(|arg| {
+                if let ExprKind::Closure(closure) = arg.kind
+                    // To keep things simple, we only check the first param to see if its read.
+                    && let Body { params: [param, ..], value } = cx.tcx.hir().body(closure.body)
+                {
+                    !has_no_read_access(cx, param.hir_id, *value)
+                } else {
+                    false
+                }
+            });
+            if is_read_in_closure_arg {
+                has_read_access = true;
+                return ControlFlow::Break(());
+            }
+
             // The method call is a statement, so the return value is not used. That's not a read access:
             //
             // id.foo(args);
-            if let Some(Node::Stmt(..)) = get_parent_node(cx.tcx, parent.hir_id) {
+            if let Node::Stmt(..) = cx.tcx.parent_hir_node(parent.hir_id) {
                 return ControlFlow::Continue(());
             }
 

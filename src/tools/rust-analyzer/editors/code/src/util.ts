@@ -1,8 +1,8 @@
-import * as lc from "vscode-languageclient/node";
 import * as vscode from "vscode";
 import { strict as nativeAssert } from "assert";
-import { exec, ExecOptions, spawnSync } from "child_process";
+import { exec, spawn, type SpawnOptionsWithoutStdio, type ExecOptions } from "child_process";
 import { inspect } from "util";
+import type { CargoRunnableArgs, ShellRunnableArgs } from "./lsp_ext";
 
 export function assert(condition: boolean, explanation: string): asserts condition {
     try {
@@ -13,80 +13,52 @@ export function assert(condition: boolean, explanation: string): asserts conditi
     }
 }
 
-export const log = new (class {
-    private enabled = true;
-    private readonly output = vscode.window.createOutputChannel("Rust Analyzer Client");
+export type Env = {
+    [name: string]: string;
+};
 
-    setEnabled(yes: boolean): void {
-        log.enabled = yes;
+class Log {
+    private readonly output = vscode.window.createOutputChannel("Rust Analyzer Client", {
+        log: true,
+    });
+
+    trace(...messages: [unknown, ...unknown[]]): void {
+        this.output.trace(this.stringify(messages));
     }
 
-    // Hint: the type [T, ...T[]] means a non-empty array
-    debug(...msg: [unknown, ...unknown[]]): void {
-        if (!log.enabled) return;
-        log.write("DEBUG", ...msg);
+    debug(...messages: [unknown, ...unknown[]]): void {
+        this.output.debug(this.stringify(messages));
     }
 
-    info(...msg: [unknown, ...unknown[]]): void {
-        log.write("INFO", ...msg);
+    info(...messages: [unknown, ...unknown[]]): void {
+        this.output.info(this.stringify(messages));
     }
 
-    warn(...msg: [unknown, ...unknown[]]): void {
-        debugger;
-        log.write("WARN", ...msg);
+    warn(...messages: [unknown, ...unknown[]]): void {
+        this.output.warn(this.stringify(messages));
     }
 
-    error(...msg: [unknown, ...unknown[]]): void {
-        debugger;
-        log.write("ERROR", ...msg);
-        log.output.show(true);
+    error(...messages: [unknown, ...unknown[]]): void {
+        this.output.error(this.stringify(messages));
+        this.output.show(true);
     }
 
-    private write(label: string, ...messageParts: unknown[]): void {
-        const message = messageParts.map(log.stringify).join(" ");
-        const dateTime = new Date().toLocaleString();
-        log.output.appendLine(`${label} [${dateTime}]: ${message}`);
+    private stringify(messages: unknown[]): string {
+        return messages
+            .map((message) => {
+                if (typeof message === "string") {
+                    return message;
+                }
+                if (message instanceof Error) {
+                    return message.stack || message.message;
+                }
+                return inspect(message, { depth: 6, colors: false });
+            })
+            .join(" ");
     }
-
-    private stringify(val: unknown): string {
-        if (typeof val === "string") return val;
-        return inspect(val, {
-            colors: false,
-            depth: 6, // heuristic
-        });
-    }
-})();
-
-export async function sendRequestWithRetry<TParam, TRet>(
-    client: lc.LanguageClient,
-    reqType: lc.RequestType<TParam, TRet, unknown>,
-    param: TParam,
-    token?: vscode.CancellationToken
-): Promise<TRet> {
-    // The sequence is `10 * (2 ** (2 * n))` where n is 1, 2, 3...
-    for (const delay of [40, 160, 640, 2560, 10240, null]) {
-        try {
-            return await (token
-                ? client.sendRequest(reqType, param, token)
-                : client.sendRequest(reqType, param));
-        } catch (error) {
-            if (delay === null) {
-                log.warn("LSP request timed out", { method: reqType.method, param, error });
-                throw error;
-            }
-            if (error.code === lc.LSPErrorCodes.RequestCancelled) {
-                throw error;
-            }
-
-            if (error.code !== lc.LSPErrorCodes.ContentModified) {
-                log.warn("LSP request failed", { method: reqType.method, param, error });
-                throw error;
-            }
-            await sleep(delay);
-        }
-    }
-    throw "unreachable";
 }
+
+export const log = new Log();
 
 export function sleep(ms: number) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -108,6 +80,12 @@ export function isCargoTomlDocument(document: vscode.TextDocument): document is 
     return document.uri.scheme === "file" && document.fileName.endsWith("Cargo.toml");
 }
 
+export function isCargoRunnableArgs(
+    args: CargoRunnableArgs | ShellRunnableArgs,
+): args is CargoRunnableArgs {
+    return (args as CargoRunnableArgs).executableArgs !== undefined;
+}
+
 export function isRustEditor(editor: vscode.TextEditor): editor is RustEditor {
     return isRustDocument(editor.document);
 }
@@ -125,17 +103,6 @@ export function isDocumentInWorkspace(document: RustDocument): boolean {
     return false;
 }
 
-export function isValidExecutable(path: string): boolean {
-    log.debug("Checking availability of a binary at", path);
-
-    const res = spawnSync(path, ["--version"], { encoding: "utf8" });
-
-    const printOutput = res.error ? log.warn : log.info;
-    printOutput(path, "--version:", res);
-
-    return res.status === 0;
-}
-
 /** Sets ['when'](https://code.visualstudio.com/docs/getstarted/keybindings#_when-clause-contexts) clause contexts */
 export function setContextValue(key: string, value: any): Thenable<void> {
     return vscode.commands.executeCommand("setContext", key, value);
@@ -146,7 +113,7 @@ export function setContextValue(key: string, value: any): Thenable<void> {
  * underlying async function.
  */
 export function memoizeAsync<Ret, TThis, Param extends string>(
-    func: (this: TThis, arg: Param) => Promise<Ret>
+    func: (this: TThis, arg: Param) => Promise<Ret>,
 ) {
     const cache = new Map<string, Ret>();
 
@@ -167,28 +134,13 @@ export function execute(command: string, options: ExecOptions): Promise<string> 
     return new Promise((resolve, reject) => {
         exec(command, options, (err, stdout, stderr) => {
             if (err) {
-                log.error(err);
+                log.error("error:", err);
                 reject(err);
                 return;
             }
 
             if (stderr) {
                 reject(new Error(stderr));
-                return;
-            }
-
-            resolve(stdout.trimEnd());
-        });
-    });
-}
-
-export function executeDiscoverProject(command: string, options: ExecOptions): Promise<string> {
-    log.info(`running command: ${command}`);
-    return new Promise((resolve, reject) => {
-        exec(command, options, (err, stdout, _) => {
-            if (err) {
-                log.error(err);
-                reject(err);
                 return;
             }
 
@@ -240,5 +192,96 @@ export class LazyOutputChannel implements vscode.OutputChannel {
         if (this._channel) {
             this._channel.dispose();
         }
+    }
+}
+
+export type NotNull<T> = T extends null ? never : T;
+
+export type Nullable<T> = T | null;
+
+function isNotNull<T>(input: Nullable<T>): input is NotNull<T> {
+    return input !== null;
+}
+
+function expectNotNull<T>(input: Nullable<T>, msg: string): NotNull<T> {
+    if (isNotNull(input)) {
+        return input;
+    }
+
+    throw new TypeError(msg);
+}
+
+export function unwrapNullable<T>(input: Nullable<T>): NotNull<T> {
+    return expectNotNull(input, `unwrapping \`null\``);
+}
+export type NotUndefined<T> = T extends undefined ? never : T;
+
+export type Undefinable<T> = T | undefined;
+
+function isNotUndefined<T>(input: Undefinable<T>): input is NotUndefined<T> {
+    return input !== undefined;
+}
+
+export function expectNotUndefined<T>(input: Undefinable<T>, msg: string): NotUndefined<T> {
+    if (isNotUndefined(input)) {
+        return input;
+    }
+
+    throw new TypeError(msg);
+}
+
+export function unwrapUndefinable<T>(input: Undefinable<T>): NotUndefined<T> {
+    return expectNotUndefined(input, `unwrapping \`undefined\``);
+}
+
+interface SpawnAsyncReturns {
+    stdout: string;
+    stderr: string;
+    status: number | null;
+    error?: Error | undefined;
+}
+
+export async function spawnAsync(
+    path: string,
+    args?: ReadonlyArray<string>,
+    options?: SpawnOptionsWithoutStdio,
+): Promise<SpawnAsyncReturns> {
+    const child = spawn(path, args, options);
+    const stdout: Array<Buffer> = [];
+    const stderr: Array<Buffer> = [];
+    try {
+        const res = await new Promise<{ stdout: string; stderr: string; status: number | null }>(
+            (resolve, reject) => {
+                child.stdout.on("data", (chunk) => stdout.push(Buffer.from(chunk)));
+                child.stderr.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
+                child.on("error", (error) =>
+                    reject({
+                        stdout: Buffer.concat(stdout).toString("utf8"),
+                        stderr: Buffer.concat(stderr).toString("utf8"),
+                        error,
+                    }),
+                );
+                child.on("close", (status) =>
+                    resolve({
+                        stdout: Buffer.concat(stdout).toString("utf8"),
+                        stderr: Buffer.concat(stderr).toString("utf8"),
+                        status,
+                    }),
+                );
+            },
+        );
+
+        return {
+            stdout: res.stdout,
+            stderr: res.stderr,
+            status: res.status,
+        };
+    } catch (e: any) {
+        return {
+            stdout: e.stdout,
+            stderr: e.stderr,
+            status: e.status,
+            error: e.error,
+        };
     }
 }

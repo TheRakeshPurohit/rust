@@ -1,17 +1,13 @@
-// check-pass
-// [next] compile-flags: -Zlower-impl-trait-in-trait-to-assoc-ty
-// revisions: current next
+//@ check-pass
 
-#![feature(return_position_impl_trait_in_trait)]
-#![allow(incomplete_features)]
+pub struct Wrapper<T>(T);
 
-struct Wrapper<T>(T);
-
-trait Foo {
+pub trait Foo {
     fn bar() -> Wrapper<impl Sized>;
 }
 
 impl Foo for () {
+    #[expect(refining_impl_trait)]
     fn bar() -> Wrapper<i32> {
         Wrapper(0)
     }

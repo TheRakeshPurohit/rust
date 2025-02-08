@@ -2,7 +2,7 @@
 
 use hir::ScopeDef;
 use ide_db::{FxHashSet, SymbolKind};
-use syntax::{ast, AstNode};
+use syntax::{ast, format_smolstr, AstNode};
 
 use crate::{
     context::{CompletionContext, PathCompletionCtx, Qualified},
@@ -48,16 +48,21 @@ pub(crate) fn complete_use_path(
                     let unknown_is_current = |name: &hir::Name| {
                         matches!(
                             name_ref,
-                            Some(name_ref) if name_ref.syntax().text() == name.to_smol_str().as_str()
+                            Some(name_ref) if name_ref.syntax().text() == name.as_str()
                         )
                     };
                     for (name, def) in module_scope {
-                        if !ctx.check_stability(def.attrs(ctx.db).as_deref()) {
-                            continue;
+                        if let (Some(attrs), Some(defining_crate)) =
+                            (def.attrs(ctx.db), def.krate(ctx.db))
+                        {
+                            if !ctx.check_stability(Some(&attrs))
+                                || ctx.is_doc_hidden(&attrs, defining_crate)
+                            {
+                                continue;
+                            }
                         }
-                        let is_name_already_imported = name
-                            .as_text()
-                            .map_or(false, |text| already_imported_names.contains(text.as_str()));
+                        let is_name_already_imported =
+                            already_imported_names.contains(name.as_str());
 
                         let add_resolution = match def {
                             ScopeDef::Unknown if unknown_is_current(&name) => {
@@ -71,9 +76,9 @@ pub(crate) fn complete_use_path(
 
                         if add_resolution {
                             let mut builder = Builder::from_resolution(ctx, path_ctx, name, def);
-                            builder.set_relevance(CompletionRelevance {
+                            builder.with_relevance(|r| CompletionRelevance {
                                 is_name_already_imported,
-                                ..Default::default()
+                                ..r
                             });
                             acc.add(builder.build(ctx.db));
                         }
@@ -102,13 +107,17 @@ pub(crate) fn complete_use_path(
                     ScopeDef::ModuleDef(hir::ModuleDef::Adt(hir::Adt::Enum(e))) => {
                         // exclude prelude enum
                         let is_builtin =
-                            res.krate(ctx.db).map_or(false, |krate| krate.is_builtin(ctx.db));
+                            res.krate(ctx.db).is_some_and(|krate| krate.is_builtin(ctx.db));
 
                         if !is_builtin {
                             let item = CompletionItem::new(
                                 CompletionItemKind::SymbolKind(SymbolKind::Enum),
                                 ctx.source_range(),
-                                format!("{}::", e.name(ctx.db).display(ctx.db)),
+                                format_smolstr!(
+                                    "{}::",
+                                    e.name(ctx.db).display(ctx.db, ctx.edition)
+                                ),
+                                ctx.edition,
                             );
                             acc.add(item.build(ctx.db));
                         }

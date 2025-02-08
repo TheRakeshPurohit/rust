@@ -1,12 +1,11 @@
 error: temporary with significant `Drop` can be early dropped
-  --> $DIR/significant_drop_tightening.rs:12:9
+  --> tests/ui/significant_drop_tightening.rs:10:9
    |
 LL |   pub fn complex_return_triggers_the_lint() -> i32 {
    |  __________________________________________________-
 LL | |     fn foo() -> i32 {
 LL | |         1
-LL | |     }
-LL | |     let mutex = Mutex::new(1);
+...  |
 LL | |     let lock = mutex.lock().unwrap();
    | |         ^^^^
 ...  |
@@ -16,6 +15,7 @@ LL | | }
    |
    = note: this might lead to unnecessary resource contention
    = note: `-D clippy::significant-drop-tightening` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::significant_drop_tightening)]`
 help: drop the temporary after the end of its last usage
    |
 LL ~     let _ = *lock;
@@ -23,7 +23,7 @@ LL +     drop(lock);
    |
 
 error: temporary with significant `Drop` can be early dropped
-  --> $DIR/significant_drop_tightening.rs:44:13
+  --> tests/ui/significant_drop_tightening.rs:104:13
    |
 LL | /     {
 LL | |         let mutex = Mutex::new(1i32);
@@ -43,7 +43,7 @@ LL +         drop(lock);
    |
 
 error: temporary with significant `Drop` can be early dropped
-  --> $DIR/significant_drop_tightening.rs:65:13
+  --> tests/ui/significant_drop_tightening.rs:125:13
    |
 LL | /     {
 LL | |         let mutex = Mutex::new(1i32);
@@ -59,15 +59,11 @@ help: merge the temporary construction with its single usage
    |
 LL ~         
 LL +         let rslt0 = mutex.lock().unwrap().abs();
-   |
-help: remove separated single usage
-   |
-LL -         let rslt0 = lock.abs();
-LL +         
+LL ~         
    |
 
 error: temporary with significant `Drop` can be early dropped
-  --> $DIR/significant_drop_tightening.rs:71:17
+  --> tests/ui/significant_drop_tightening.rs:131:17
    |
 LL | /     {
 LL | |         let mutex = Mutex::new(vec![1i32]);
@@ -83,11 +79,7 @@ help: merge the temporary construction with its single usage
    |
 LL ~         
 LL +         mutex.lock().unwrap().clear();
-   |
-help: remove separated single usage
-   |
-LL -         lock.clear();
-LL +         
+LL ~         
    |
 
 error: aborting due to 4 previous errors

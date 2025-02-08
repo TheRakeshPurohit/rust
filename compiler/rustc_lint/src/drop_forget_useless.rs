@@ -1,14 +1,13 @@
-use rustc_hir::{Arm, Expr, ExprKind, Node};
+use rustc_hir::{Arm, Expr, ExprKind, Node, StmtKind};
 use rustc_middle::ty;
+use rustc_session::{declare_lint, declare_lint_pass};
 use rustc_span::sym;
 
-use crate::{
-    lints::{
-        DropCopyDiag, DropRefDiag, ForgetCopyDiag, ForgetRefDiag, UndroppedManuallyDropsDiag,
-        UndroppedManuallyDropsSuggestion,
-    },
-    LateContext, LateLintPass, LintContext,
+use crate::lints::{
+    DropCopyDiag, DropRefDiag, ForgetCopyDiag, ForgetRefDiag, UndroppedManuallyDropsDiag,
+    UndroppedManuallyDropsSuggestion, UseLetUnderscoreIgnoreSuggestion,
 };
+use crate::{LateContext, LateLintPass, LintContext};
 
 declare_lint! {
     /// The `dropping_references` lint checks for calls to `std::mem::drop` with a reference
@@ -145,23 +144,57 @@ impl<'tcx> LateLintPass<'tcx> for DropForgetUseless {
             && let Some(fn_name) = cx.tcx.get_diagnostic_name(def_id)
         {
             let arg_ty = cx.typeck_results().expr_ty(arg);
-            let is_copy = arg_ty.is_copy_modulo_regions(cx.tcx, cx.param_env);
+            let is_copy = cx.type_is_copy_modulo_regions(arg_ty);
             let drop_is_single_call_in_arm = is_single_call_in_arm(cx, arg, expr);
+            let let_underscore_ignore_sugg = || {
+                if let Some((_, node)) = cx.tcx.hir().parent_iter(expr.hir_id).nth(0)
+                    && let Node::Stmt(stmt) = node
+                    && let StmtKind::Semi(e) = stmt.kind
+                    && e.hir_id == expr.hir_id
+                    && let Some(arg_span) = arg.span.find_ancestor_inside(expr.span)
+                {
+                    UseLetUnderscoreIgnoreSuggestion::Suggestion {
+                        start_span: expr.span.shrink_to_lo().until(arg_span),
+                        end_span: arg_span.shrink_to_hi().until(expr.span.shrink_to_hi()),
+                    }
+                } else {
+                    UseLetUnderscoreIgnoreSuggestion::Note
+                }
+            };
             match fn_name {
                 sym::mem_drop if arg_ty.is_ref() && !drop_is_single_call_in_arm => {
-                    cx.emit_spanned_lint(DROPPING_REFERENCES, expr.span, DropRefDiag { arg_ty, label: arg.span });
-                },
+                    cx.emit_span_lint(DROPPING_REFERENCES, expr.span, DropRefDiag {
+                        arg_ty,
+                        label: arg.span,
+                        sugg: let_underscore_ignore_sugg(),
+                    });
+                }
                 sym::mem_forget if arg_ty.is_ref() => {
-                    cx.emit_spanned_lint(FORGETTING_REFERENCES, expr.span, ForgetRefDiag { arg_ty, label: arg.span });
-                },
+                    cx.emit_span_lint(FORGETTING_REFERENCES, expr.span, ForgetRefDiag {
+                        arg_ty,
+                        label: arg.span,
+                        sugg: let_underscore_ignore_sugg(),
+                    });
+                }
                 sym::mem_drop if is_copy && !drop_is_single_call_in_arm => {
-                    cx.emit_spanned_lint(DROPPING_COPY_TYPES, expr.span, DropCopyDiag { arg_ty, label: arg.span });
+                    cx.emit_span_lint(DROPPING_COPY_TYPES, expr.span, DropCopyDiag {
+                        arg_ty,
+                        label: arg.span,
+                        sugg: let_underscore_ignore_sugg(),
+                    });
                 }
                 sym::mem_forget if is_copy => {
-                    cx.emit_spanned_lint(FORGETTING_COPY_TYPES, expr.span, ForgetCopyDiag { arg_ty, label: arg.span });
+                    cx.emit_span_lint(FORGETTING_COPY_TYPES, expr.span, ForgetCopyDiag {
+                        arg_ty,
+                        label: arg.span,
+                        sugg: let_underscore_ignore_sugg(),
+                    });
                 }
-                sym::mem_drop if let ty::Adt(adt, _) = arg_ty.kind() && adt.is_manually_drop() => {
-                    cx.emit_spanned_lint(
+                sym::mem_drop
+                    if let ty::Adt(adt, _) = arg_ty.kind()
+                        && adt.is_manually_drop() =>
+                {
+                    cx.emit_span_lint(
                         UNDROPPED_MANUALLY_DROPS,
                         expr.span,
                         UndroppedManuallyDropsDiag {
@@ -169,9 +202,9 @@ impl<'tcx> LateLintPass<'tcx> for DropForgetUseless {
                             label: arg.span,
                             suggestion: UndroppedManuallyDropsSuggestion {
                                 start_span: arg.span.shrink_to_lo(),
-                                end_span: arg.span.shrink_to_hi()
-                            }
-                        }
+                                end_span: arg.span.shrink_to_hi(),
+                            },
+                        },
                     );
                 }
                 _ => return,
@@ -194,9 +227,8 @@ fn is_single_call_in_arm<'tcx>(
     arg: &'tcx Expr<'_>,
     drop_expr: &'tcx Expr<'_>,
 ) -> bool {
-    if matches!(arg.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
-        let parent_node = cx.tcx.hir().find_parent(drop_expr.hir_id);
-        if let Some(Node::Arm(Arm { body, .. })) = &parent_node {
+    if arg.can_have_side_effects() {
+        if let Node::Arm(Arm { body, .. }) = cx.tcx.parent_hir_node(drop_expr.hir_id) {
             return body.hir_id == drop_expr.hir_id;
         }
     }

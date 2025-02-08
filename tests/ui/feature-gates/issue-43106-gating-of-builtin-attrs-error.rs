@@ -13,8 +13,7 @@
 //~^ ERROR: `macro_export` attribute cannot be used at crate level
 #![rustc_main] //~ ERROR: the `#[rustc_main]` attribute is used internally to specify
 //~^ ERROR: `rustc_main` attribute cannot be used at crate level
-#![start]
-//~^ ERROR: `start` attribute cannot be used at crate level
+//~| NOTE: this compiler was built on YYYY-MM-DD; consider upgrading it if it is out of date
 #![repr()]
 //~^ ERROR: `repr` attribute cannot be used at crate level
 #![path = "3800"]
@@ -32,13 +31,18 @@
 //~^ ERROR attribute should be applied to function or closure
 mod inline {
     //~^ NOTE not a function or closure
+    //~| NOTE the inner attribute doesn't annotate this module
+    //~| NOTE the inner attribute doesn't annotate this module
+    //~| NOTE the inner attribute doesn't annotate this module
+    //~| NOTE the inner attribute doesn't annotate this module
+    //~| NOTE the inner attribute doesn't annotate this module
 
     mod inner { #![inline] }
     //~^ ERROR attribute should be applied to function or closure
     //~| NOTE not a function or closure
 
     #[inline = "2100"] fn f() { }
-    //~^ ERROR attribute must be of the form
+    //~^ ERROR valid forms for the attribute are
     //~| WARN this was previously accepted
     //~| NOTE #[deny(ill_formed_attribute_input)]` on by default
     //~| NOTE for more information, see issue #57571 <https://github.com/rust-lang/rust/issues/57571>
@@ -116,24 +120,6 @@ mod export_name {
     }
 }
 
-#[start]
-//~^ ERROR: `start` attribute can only be used on functions
-mod start {
-    mod inner { #![start] }
-    //~^ ERROR: `start` attribute can only be used on functions
-
-    // for `fn f()` case, see feature-gate-start.rs
-
-    #[start] struct S;
-    //~^ ERROR: `start` attribute can only be used on functions
-
-    #[start] type T = S;
-    //~^ ERROR: `start` attribute can only be used on functions
-
-    #[start] impl S { }
-    //~^ ERROR: `start` attribute can only be used on functions
-}
-
 #[repr(C)]
 //~^ ERROR: attribute should be applied to a struct, enum, or union
 mod repr {
@@ -153,6 +139,30 @@ mod repr {
     //~| NOTE not a struct, enum, or union
 
     #[repr(C)] impl S { }
+    //~^ ERROR: attribute should be applied to a struct, enum, or union
+    //~| NOTE not a struct, enum, or union
+}
+
+
+#[repr(Rust)]
+//~^ ERROR: attribute should be applied to a struct, enum, or union
+mod repr_rust {
+//~^ NOTE not a struct, enum, or union
+    mod inner { #![repr(Rust)] }
+    //~^ ERROR: attribute should be applied to a struct, enum, or union
+    //~| NOTE not a struct, enum, or union
+
+    #[repr(Rust)] fn f() { }
+    //~^ ERROR: attribute should be applied to a struct, enum, or union
+    //~| NOTE not a struct, enum, or union
+
+    struct S;
+
+    #[repr(Rust)] type T = S;
+    //~^ ERROR: attribute should be applied to a struct, enum, or union
+    //~| NOTE not a struct, enum, or union
+
+    #[repr(Rust)] impl S { }
     //~^ ERROR: attribute should be applied to a struct, enum, or union
     //~| NOTE not a struct, enum, or union
 }

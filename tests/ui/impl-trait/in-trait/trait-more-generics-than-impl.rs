@@ -1,9 +1,3 @@
-// [next] compile-flags: -Zlower-impl-trait-in-trait-to-assoc-ty
-// revisions: current next
-
-#![feature(return_position_impl_trait_in_trait)]
-#![allow(incomplete_features)]
-
 struct S;
 
 trait Foo {
@@ -12,7 +6,7 @@ trait Foo {
 
 impl Foo for S {
     fn bar() -> impl Sized {}
-    //~^ ERROR method `bar` has 0 type parameters but its trait declaration has 1 type parameter
+    //~^ ERROR associated function `bar` has 0 type parameters but its trait declaration has 1 type parameter
 }
 
 fn main() {

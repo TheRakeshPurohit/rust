@@ -1,6 +1,4 @@
-// run-pass
-
-#![feature(trait_upcasting)]
+//@ run-pass
 
 use std::rc::Rc;
 use std::sync::Arc;

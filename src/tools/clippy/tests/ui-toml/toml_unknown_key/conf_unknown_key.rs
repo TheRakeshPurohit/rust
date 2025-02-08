@@ -1,3 +1,4 @@
-//@error-pattern: unknown field `foobar`, expected one of
+//@no-rustfix
+//@error-in-other-file: unknown field `foobar`, expected one of
 
 fn main() {}

@@ -1,17 +1,17 @@
-use clippy_utils::diagnostics::span_lint_and_then;
-use clippy_utils::source::snippet;
-use clippy_utils::{path_to_local, search_same, SpanlessEq, SpanlessHash};
+use clippy_utils::diagnostics::span_lint_hir_and_then;
+use clippy_utils::source::snippet_with_applicability;
+use clippy_utils::{SpanlessEq, SpanlessHash, is_lint_allowed, path_to_local, search_same};
 use core::cmp::Ordering;
-use core::iter;
-use core::slice;
+use core::{iter, slice};
 use rustc_arena::DroplessArena;
 use rustc_ast::ast::LitKind;
 use rustc_errors::Applicability;
 use rustc_hir::def_id::DefId;
-use rustc_hir::{Arm, Expr, ExprKind, HirId, HirIdMap, HirIdMapEntry, HirIdSet, Pat, PatKind, RangeEnd};
-use rustc_lint::LateContext;
+use rustc_hir::{Arm, Expr, HirId, HirIdMap, HirIdMapEntry, HirIdSet, Pat, PatExpr, PatExprKind, PatKind, RangeEnd};
+use rustc_lint::builtin::NON_EXHAUSTIVE_OMITTED_PATTERNS;
+use rustc_lint::{LateContext, LintContext};
 use rustc_middle::ty;
-use rustc_span::Symbol;
+use rustc_span::{ErrorGuaranteed, Span, Symbol};
 
 use super::MATCH_SAME_ARMS;
 
@@ -64,56 +64,73 @@ pub(super) fn check<'tcx>(cx: &LateContext<'tcx>, arms: &'tcx [Arm<'_>]) {
         let min_index = usize::min(lindex, rindex);
         let max_index = usize::max(lindex, rindex);
 
-        let mut local_map: HirIdMap<HirId> = HirIdMap::default();
-        let eq_fallback = |a: &Expr<'_>, b: &Expr<'_>| {
-            if_chain! {
-                if let Some(a_id) = path_to_local(a);
-                if let Some(b_id) = path_to_local(b);
-                let entry = match local_map.entry(a_id) {
-                    HirIdMapEntry::Vacant(entry) => entry,
-                    // check if using the same bindings as before
-                    HirIdMapEntry::Occupied(entry) => return *entry.get() == b_id,
-                };
-                // the names technically don't have to match; this makes the lint more conservative
-                if cx.tcx.hir().name(a_id) == cx.tcx.hir().name(b_id);
-                if cx.typeck_results().expr_ty(a) == cx.typeck_results().expr_ty(b);
-                if pat_contains_local(lhs.pat, a_id);
-                if pat_contains_local(rhs.pat, b_id);
-                then {
+        let check_eq_with_pat = |expr_a: &Expr<'_>, expr_b: &Expr<'_>| {
+            let mut local_map: HirIdMap<HirId> = HirIdMap::default();
+            let eq_fallback = |a: &Expr<'_>, b: &Expr<'_>| {
+                if let Some(a_id) = path_to_local(a)
+                    && let Some(b_id) = path_to_local(b)
+                    && let entry = match local_map.entry(a_id) {
+                        HirIdMapEntry::Vacant(entry) => entry,
+                        // check if using the same bindings as before
+                        HirIdMapEntry::Occupied(entry) => return *entry.get() == b_id,
+                    }
+                    // the names technically don't have to match; this makes the lint more conservative
+                    && cx.tcx.hir().name(a_id) == cx.tcx.hir().name(b_id)
+                    && cx.typeck_results().expr_ty(a) == cx.typeck_results().expr_ty(b)
+                    && pat_contains_local(lhs.pat, a_id)
+                    && pat_contains_local(rhs.pat, b_id)
+                {
                     entry.insert(b_id);
                     true
                 } else {
                     false
                 }
-            }
-        };
-        // Arms with a guard are ignored, those can’t always be merged together
-        // If both arms overlap with an arm in between then these can't be merged either.
-        !(backwards_blocking_idxs[max_index] > min_index && forwards_blocking_idxs[min_index] < max_index)
-                && lhs.guard.is_none()
-                && rhs.guard.is_none()
-                && SpanlessEq::new(cx)
-                    .expr_fallback(eq_fallback)
-                    .eq_expr(lhs.body, rhs.body)
+            };
+
+            SpanlessEq::new(cx)
+                .expr_fallback(eq_fallback)
+                .eq_expr(expr_a, expr_b)
                 // these checks could be removed to allow unused bindings
                 && bindings_eq(lhs.pat, local_map.keys().copied().collect())
                 && bindings_eq(rhs.pat, local_map.values().copied().collect())
+        };
+
+        let check_same_guard = || match (&lhs.guard, &rhs.guard) {
+            (None, None) => true,
+            (Some(lhs_guard), Some(rhs_guard)) => check_eq_with_pat(lhs_guard, rhs_guard),
+            _ => false,
+        };
+
+        let check_same_body = || check_eq_with_pat(lhs.body, rhs.body);
+
+        // Arms with different guard are ignored, those can’t always be merged together
+        // If both arms overlap with an arm in between then these can't be merged either.
+        !(backwards_blocking_idxs[max_index] > min_index && forwards_blocking_idxs[min_index] < max_index)
+            && check_same_guard()
+            && check_same_body()
     };
 
+    let mut appl = Applicability::MaybeIncorrect;
     let indexed_arms: Vec<(usize, &Arm<'_>)> = arms.iter().enumerate().collect();
     for (&(i, arm1), &(j, arm2)) in search_same(&indexed_arms, hash, eq) {
         if matches!(arm2.pat.kind, PatKind::Wild) {
-            span_lint_and_then(
-                cx,
-                MATCH_SAME_ARMS,
-                arm1.span,
-                "this match arm has an identical body to the `_` wildcard arm",
-                |diag| {
-                    diag.span_suggestion(arm1.span, "try removing the arm", "", Applicability::MaybeIncorrect)
-                        .help("or try changing either arm body")
-                        .span_note(arm2.span, "`_` wildcard arm here");
-                },
-            );
+            if !cx.tcx.features().non_exhaustive_omitted_patterns_lint()
+                || is_lint_allowed(cx, NON_EXHAUSTIVE_OMITTED_PATTERNS, arm2.hir_id)
+            {
+                let arm_span = adjusted_arm_span(cx, arm1.span);
+                span_lint_hir_and_then(
+                    cx,
+                    MATCH_SAME_ARMS,
+                    arm1.hir_id,
+                    arm_span,
+                    "this match arm has an identical body to the `_` wildcard arm",
+                    |diag| {
+                        diag.span_suggestion(arm_span, "try removing the arm", "", appl)
+                            .help("or try changing either arm body")
+                            .span_note(arm2.span, "`_` wildcard arm here");
+                    },
+                );
+            }
         } else {
             let back_block = backwards_blocking_idxs[j];
             let (keep_arm, move_arm) = if back_block < i || (back_block == 0 && forwards_blocking_idxs[i] <= j) {
@@ -122,32 +139,43 @@ pub(super) fn check<'tcx>(cx: &LateContext<'tcx>, arms: &'tcx [Arm<'_>]) {
                 (arm2, arm1)
             };
 
-            span_lint_and_then(
+            span_lint_hir_and_then(
                 cx,
                 MATCH_SAME_ARMS,
+                keep_arm.hir_id,
                 keep_arm.span,
                 "this match arm has an identical body to another arm",
                 |diag| {
-                    let move_pat_snip = snippet(cx, move_arm.pat.span, "<pat2>");
-                    let keep_pat_snip = snippet(cx, keep_arm.pat.span, "<pat1>");
+                    let move_pat_snip = snippet_with_applicability(cx, move_arm.pat.span, "<pat2>", &mut appl);
+                    let keep_pat_snip = snippet_with_applicability(cx, keep_arm.pat.span, "<pat1>", &mut appl);
 
-                    diag.span_suggestion(
-                        keep_arm.pat.span,
-                        "try merging the arm patterns",
-                        format!("{keep_pat_snip} | {move_pat_snip}"),
-                        Applicability::MaybeIncorrect,
+                    diag.multipart_suggestion(
+                        "or try merging the arm patterns and removing the obsolete arm",
+                        vec![
+                            (keep_arm.pat.span, format!("{keep_pat_snip} | {move_pat_snip}")),
+                            (adjusted_arm_span(cx, move_arm.span), String::new()),
+                        ],
+                        appl,
                     )
-                    .help("or try changing either arm body")
-                    .span_note(move_arm.span, "other arm here");
+                    .help("try changing either arm body");
                 },
             );
         }
     }
 }
 
+/// Extend arm's span to include the comma and whitespaces after it.
+fn adjusted_arm_span(cx: &LateContext<'_>, span: Span) -> Span {
+    let source_map = cx.sess().source_map();
+    source_map
+        .span_extend_while(span, |c| c == ',' || c.is_ascii_whitespace())
+        .unwrap_or(span)
+}
+
 #[derive(Clone, Copy)]
 enum NormalizedPat<'a> {
     Wild,
+    Never,
     Struct(Option<DefId>, &'a [(Symbol, Self)]),
     Tuple(Option<DefId>, &'a [Self]),
     Or(&'a [Self]),
@@ -162,6 +190,8 @@ enum NormalizedPat<'a> {
     /// contains everything afterwards. Note that either side, or both sides, may contain zero
     /// patterns.
     Slice(&'a [Self], Option<&'a [Self]>),
+    /// A placeholder for a pattern that wasn't well formed in some way.
+    Err(ErrorGuaranteed),
 }
 
 #[derive(Clone, Copy)]
@@ -219,14 +249,17 @@ fn iter_matching_struct_fields<'a>(
     Iter(left.iter(), right.iter())
 }
 
-#[expect(clippy::similar_names)]
+#[expect(clippy::similar_names, clippy::too_many_lines)]
 impl<'a> NormalizedPat<'a> {
     fn from_pat(cx: &LateContext<'_>, arena: &'a DroplessArena, pat: &'a Pat<'_>) -> Self {
         match pat.kind {
             PatKind::Wild | PatKind::Binding(.., None) => Self::Wild,
-            PatKind::Binding(.., Some(pat)) | PatKind::Box(pat) | PatKind::Ref(pat, _) => {
-                Self::from_pat(cx, arena, pat)
-            },
+            PatKind::Binding(.., Some(pat))
+            | PatKind::Box(pat)
+            | PatKind::Deref(pat)
+            | PatKind::Ref(pat, _)
+            | PatKind::Guard(pat, _) => Self::from_pat(cx, arena, pat),
+            PatKind::Never => Self::Never,
             PatKind::Struct(ref path, fields, _) => {
                 let fields =
                     arena.alloc_from_iter(fields.iter().map(|f| (f.ident.name, Self::from_pat(cx, arena, f.pat))));
@@ -235,7 +268,7 @@ impl<'a> NormalizedPat<'a> {
             },
             PatKind::TupleStruct(ref path, pats, wild_idx) => {
                 let Some(adt) = cx.typeck_results().pat_ty(pat).ty_adt_def() else {
-                    return Self::Wild
+                    return Self::Wild;
                 };
                 let (var_id, variant) = if adt.is_enum() {
                     match cx.qpath_res(path, pat.hir_id).opt_def_id() {
@@ -259,7 +292,11 @@ impl<'a> NormalizedPat<'a> {
                 Self::Tuple(var_id, pats)
             },
             PatKind::Or(pats) => Self::Or(arena.alloc_from_iter(pats.iter().map(|pat| Self::from_pat(cx, arena, pat)))),
-            PatKind::Path(ref path) => Self::Path(cx.qpath_res(path, pat.hir_id).opt_def_id()),
+            PatKind::Expr(PatExpr {
+                kind: PatExprKind::Path(path),
+                hir_id,
+                ..
+            }) => Self::Path(cx.qpath_res(path, *hir_id).opt_def_id()),
             PatKind::Tuple(pats, wild_idx) => {
                 let field_count = match cx.typeck_results().pat_ty(pat).kind() {
                     ty::Tuple(subs) => subs.len(),
@@ -278,16 +315,17 @@ impl<'a> NormalizedPat<'a> {
                 );
                 Self::Tuple(None, pats)
             },
-            PatKind::Lit(e) => match &e.kind {
+            PatKind::Expr(e) => match &e.kind {
                 // TODO: Handle negative integers. They're currently treated as a wild match.
-                ExprKind::Lit(lit) => match lit.node {
+                PatExprKind::Lit { lit, negated: false } => match lit.node {
                     LitKind::Str(sym, _) => Self::LitStr(sym),
                     LitKind::ByteStr(ref bytes, _) | LitKind::CStr(ref bytes, _) => Self::LitBytes(bytes),
                     LitKind::Byte(val) => Self::LitInt(val.into()),
                     LitKind::Char(val) => Self::LitInt(val.into()),
-                    LitKind::Int(val, _) => Self::LitInt(val),
+                    LitKind::Int(val, _) => Self::LitInt(val.get()),
                     LitKind::Bool(val) => Self::LitBool(val),
-                    LitKind::Float(..) | LitKind::Err => Self::Wild,
+                    LitKind::Float(..) => Self::Wild,
+                    LitKind::Err(guar) => Self::Err(guar),
                 },
                 _ => Self::Wild,
             },
@@ -296,8 +334,8 @@ impl<'a> NormalizedPat<'a> {
                 let start = match start {
                     None => 0,
                     Some(e) => match &e.kind {
-                        ExprKind::Lit(lit) => match lit.node {
-                            LitKind::Int(val, _) => val,
+                        PatExprKind::Lit { lit, negated: false } => match lit.node {
+                            LitKind::Int(val, _) => val.get(),
                             LitKind::Char(val) => val.into(),
                             LitKind::Byte(val) => val.into(),
                             _ => return Self::Wild,
@@ -308,8 +346,8 @@ impl<'a> NormalizedPat<'a> {
                 let (end, bounds) = match end {
                     None => (u128::MAX, RangeEnd::Included),
                     Some(e) => match &e.kind {
-                        ExprKind::Lit(lit) => match lit.node {
-                            LitKind::Int(val, _) => (val, bounds),
+                        PatExprKind::Lit { lit, negated: false } => match lit.node {
+                            LitKind::Int(val, _) => (val.get(), bounds),
                             LitKind::Char(val) => (val.into(), bounds),
                             LitKind::Byte(val) => (val.into(), bounds),
                             _ => return Self::Wild,
@@ -323,6 +361,7 @@ impl<'a> NormalizedPat<'a> {
                 arena.alloc_from_iter(front.iter().map(|pat| Self::from_pat(cx, arena, pat))),
                 wild_pat.map(|_| &*arena.alloc_from_iter(back.iter().map(|pat| Self::from_pat(cx, arena, pat)))),
             ),
+            PatKind::Err(guar) => Self::Err(guar),
         }
     }
 
@@ -330,7 +369,7 @@ impl<'a> NormalizedPat<'a> {
     /// type.
     fn has_overlapping_values(&self, other: &Self) -> bool {
         match (*self, *other) {
-            (Self::Wild, _) | (_, Self::Wild) => true,
+            (Self::Wild, _) | (_, Self::Wild) | (Self::Never, Self::Never) => true,
             (Self::Or(pats), ref other) | (ref other, Self::Or(pats)) => {
                 pats.iter().any(|pat| pat.has_overlapping_values(other))
             },
@@ -406,6 +445,7 @@ fn pat_contains_local(pat: &Pat<'_>, id: HirId) -> bool {
 /// Returns true if all the bindings in the `Pat` are in `ids` and vice versa
 fn bindings_eq(pat: &Pat<'_>, mut ids: HirIdSet) -> bool {
     let mut result = true;
-    pat.each_binding_or_first(&mut |_, id, _, _| result &= ids.remove(&id));
+    // FIXME(rust/#120456) - is `swap_remove` correct?
+    pat.each_binding_or_first(&mut |_, id, _, _| result &= ids.swap_remove(&id));
     result && ids.is_empty()
 }

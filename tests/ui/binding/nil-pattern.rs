@@ -1,4 +1,3 @@
-// run-pass
-// pretty-expanded FIXME #23616
+//@ run-pass
 
 pub fn main() { let x = (); match x { () => { } } }

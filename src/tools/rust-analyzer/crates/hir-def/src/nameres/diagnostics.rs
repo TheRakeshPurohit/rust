@@ -1,16 +1,14 @@
 //! Diagnostics emitted during DefMap construction.
 
-use base_db::CrateId;
+use std::ops::Not;
+
 use cfg::{CfgExpr, CfgOptions};
-use hir_expand::{attrs::AttrId, MacroCallKind};
+use hir_expand::{attrs::AttrId, ExpandErrorKind, MacroCallKind};
 use la_arena::Idx;
-use syntax::{
-    ast::{self, AnyHasAttrs},
-    SyntaxError,
-};
+use syntax::ast;
 
 use crate::{
-    item_tree::{self, ItemTreeId},
+    item_tree::{self, AttrOwner, ItemTreeId, TreeId},
     nameres::LocalModuleId,
     path::ModPath,
     AstId,
@@ -19,28 +17,33 @@ use crate::{
 #[derive(Debug, PartialEq, Eq)]
 pub enum DefDiagnosticKind {
     UnresolvedModule { ast: AstId<ast::Module>, candidates: Box<[String]> },
-
     UnresolvedExternCrate { ast: AstId<ast::ExternCrate> },
-
-    UnresolvedImport { id: ItemTreeId<item_tree::Import>, index: Idx<ast::UseTree> },
-
-    UnconfiguredCode { ast: AstId<AnyHasAttrs>, cfg: CfgExpr, opts: CfgOptions },
-
-    UnresolvedProcMacro { ast: MacroCallKind, krate: CrateId },
-
+    UnresolvedImport { id: ItemTreeId<item_tree::Use>, index: Idx<ast::UseTree> },
+    UnconfiguredCode { tree: TreeId, item: AttrOwner, cfg: CfgExpr, opts: CfgOptions },
     UnresolvedMacroCall { ast: MacroCallKind, path: ModPath },
-
-    MacroError { ast: MacroCallKind, message: String },
-
-    MacroExpansionParseError { ast: MacroCallKind, errors: Box<[SyntaxError]> },
-
     UnimplementedBuiltinMacro { ast: AstId<ast::Macro> },
-
     InvalidDeriveTarget { ast: AstId<ast::Item>, id: usize },
-
     MalformedDerive { ast: AstId<ast::Adt>, id: usize },
-
     MacroDefError { ast: AstId<ast::Macro>, message: String },
+    MacroError { ast: AstId<ast::Item>, path: ModPath, err: ExpandErrorKind },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DefDiagnostics(Option<triomphe::Arc<Box<[DefDiagnostic]>>>);
+
+impl DefDiagnostics {
+    pub fn new(diagnostics: Vec<DefDiagnostic>) -> Self {
+        Self(
+            diagnostics
+                .is_empty()
+                .not()
+                .then(|| triomphe::Arc::new(diagnostics.into_boxed_slice())),
+        )
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &DefDiagnostic> {
+        self.0.as_ref().into_iter().flat_map(|it| &***it)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -73,49 +76,31 @@ impl DefDiagnostic {
 
     pub(super) fn unresolved_import(
         container: LocalModuleId,
-        id: ItemTreeId<item_tree::Import>,
+        id: ItemTreeId<item_tree::Use>,
         index: Idx<ast::UseTree>,
     ) -> Self {
         Self { in_module: container, kind: DefDiagnosticKind::UnresolvedImport { id, index } }
     }
 
+    pub fn macro_error(
+        container: LocalModuleId,
+        ast: AstId<ast::Item>,
+        path: ModPath,
+        err: ExpandErrorKind,
+    ) -> Self {
+        Self { in_module: container, kind: DefDiagnosticKind::MacroError { ast, path, err } }
+    }
+
     pub fn unconfigured_code(
         container: LocalModuleId,
-        ast: AstId<ast::AnyHasAttrs>,
+        tree: TreeId,
+        item: AttrOwner,
         cfg: CfgExpr,
         opts: CfgOptions,
     ) -> Self {
-        Self { in_module: container, kind: DefDiagnosticKind::UnconfiguredCode { ast, cfg, opts } }
-    }
-
-    // FIXME: Whats the difference between this and unresolved_macro_call
-    pub(crate) fn unresolved_proc_macro(
-        container: LocalModuleId,
-        ast: MacroCallKind,
-        krate: CrateId,
-    ) -> Self {
-        Self { in_module: container, kind: DefDiagnosticKind::UnresolvedProcMacro { ast, krate } }
-    }
-
-    pub(crate) fn macro_error(
-        container: LocalModuleId,
-        ast: MacroCallKind,
-        message: String,
-    ) -> Self {
-        Self { in_module: container, kind: DefDiagnosticKind::MacroError { ast, message } }
-    }
-
-    pub(crate) fn macro_expansion_parse_error(
-        container: LocalModuleId,
-        ast: MacroCallKind,
-        errors: &[SyntaxError],
-    ) -> Self {
         Self {
             in_module: container,
-            kind: DefDiagnosticKind::MacroExpansionParseError {
-                ast,
-                errors: errors.to_vec().into_boxed_slice(),
-            },
+            kind: DefDiagnosticKind::UnconfiguredCode { tree, item, cfg, opts },
         }
     }
 

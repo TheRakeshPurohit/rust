@@ -1,19 +1,14 @@
 error: this let-binding has unit value
-  --> $DIR/let_unit.rs:14:5
+  --> tests/ui/let_unit.rs:11:5
    |
 LL |     let _x = println!("x");
    |     ^^^^^^^^^^^^^^^^^^^^^^^ help: omit the `let` binding: `println!("x");`
    |
    = note: `-D clippy::let-unit-value` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::let_unit_value)]`
 
 error: this let-binding has unit value
-  --> $DIR/let_unit.rs:18:9
-   |
-LL |         let _a = ();
-   |         ^^^^^^^^^^^^ help: omit the `let` binding: `();`
-
-error: this let-binding has unit value
-  --> $DIR/let_unit.rs:53:5
+  --> tests/ui/let_unit.rs:59:5
    |
 LL | /     let _ = v
 LL | |         .into_iter()
@@ -36,45 +31,9 @@ LL +         .unwrap();
    |
 
 error: this let-binding has unit value
-  --> $DIR/let_unit.rs:80:5
+  --> tests/ui/let_unit.rs:108:5
    |
-LL |     let x: () = f(); // Lint.
-   |     ^^^^-^^^^^^^^^^^
-   |         |
-   |         help: use a wild (`_`) binding: `_`
-
-error: this let-binding has unit value
-  --> $DIR/let_unit.rs:83:5
-   |
-LL |     let x: () = f2(0i32); // Lint.
-   |     ^^^^-^^^^^^^^^^^^^^^^
-   |         |
-   |         help: use a wild (`_`) binding: `_`
-
-error: this let-binding has unit value
-  --> $DIR/let_unit.rs:85:5
-   |
-LL |     let _: () = f3(()); // Lint
-   |     ^^^^^^^^^^^^^^^^^^^ help: omit the `let` binding: `f3(());`
-
-error: this let-binding has unit value
-  --> $DIR/let_unit.rs:86:5
-   |
-LL |     let x: () = f3(()); // Lint
-   |     ^^^^^^^^^^^^^^^^^^^ help: omit the `let` binding: `f3(());`
-
-error: this let-binding has unit value
-  --> $DIR/let_unit.rs:102:5
-   |
-LL |     let x: () = if true { f() } else { f2(0) }; // Lint
-   |     ^^^^-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |         |
-   |         help: use a wild (`_`) binding: `_`
-
-error: this let-binding has unit value
-  --> $DIR/let_unit.rs:113:5
-   |
-LL | /     let _: () = match Some(0) {
+LL | /     let x = match Some(0) {
 LL | |         None => f2(1),
 LL | |         Some(0) => f(),
 LL | |         Some(1) => f2(3),
@@ -93,10 +52,17 @@ LL +     };
    |
 
 error: this let-binding has unit value
-  --> $DIR/let_unit.rs:160:13
+  --> tests/ui/let_unit.rs:189:9
    |
-LL |             let _: () = z;
-   |             ^^^^^^^^^^^^^^ help: omit the `let` binding: `z;`
+LL |         let res = returns_unit();
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: omit the `let` binding and replace variable usages with `()`
+   |
+LL ~         returns_unit();
+LL ~         returns_result(()).unwrap();
+LL ~         returns_result(()).unwrap();
+   |
 
-error: aborting due to 10 previous errors
+error: aborting due to 4 previous errors
 

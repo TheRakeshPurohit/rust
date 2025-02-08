@@ -1,7 +1,8 @@
-#![feature(generators)]
+#![feature(coroutines, stmt_expr_attributes)]
 
 fn main() {
-    let _generator = || {
+    let _coroutine = #[coroutine]
+    || {
         yield ((), ((), ()));
         yield ((), ());
         //~^ ERROR mismatched types

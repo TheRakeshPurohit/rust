@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-fn foo<I: Iterator>(mut iter: I, value: &I::Item)
+pub fn foo<I: Iterator>(mut iter: I, value: &I::Item)
 where
     I::Item: Eq + Debug,
 {

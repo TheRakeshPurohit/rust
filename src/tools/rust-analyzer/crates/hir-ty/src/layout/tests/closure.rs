@@ -1,3 +1,6 @@
+#![allow(clippy::match_single_binding)]
+#![allow(clippy::no_effect)]
+
 use crate::size_and_align_expr;
 
 #[test]
@@ -36,7 +39,7 @@ fn ref_simple() {
             let mut y: i32 = 5;
         ]
         |x: i32| {
-            y = y + x;
+            y += x;
             y
         }
     }
@@ -66,7 +69,7 @@ fn ref_simple() {
             let x: &mut X = &mut X(2, 6);
         ]
         || {
-            (*x).0 as i64 + x.1
+            x.0 as i64 + x.1
         }
     }
 }
@@ -186,11 +189,9 @@ fn capture_specific_fields() {
 fn match_pattern() {
     size_and_align_expr! {
         struct X(i64, i32, (u8, i128));
-        let y: X = X(2, 5, (7, 3));
+        let _y: X = X(2, 5, (7, 3));
         move |x: i64| {
-            match y {
-                _ => x,
-            }
+            x
         }
     }
     size_and_align_expr! {
@@ -252,6 +253,20 @@ fn ellipsis_pattern() {
         let y: (&&&(i8, u16, i32, u64, i128, u8), u16, i32, u64, i128, u8) = (&&&(1, 2, 3, 4, 5, 6), 2, 3, 4, 5, 6);
         move |_: i64| {
             let ((_a, .., _b, _c), .., _e, _f) = y;
+        }
+    }
+}
+
+#[test]
+fn regression_15623() {
+    size_and_align_expr! {
+        let a = 2;
+        let b = 3;
+        let c = 5;
+        move || {
+            let 0 = a else { return b; };
+
+            c
         }
     }
 }

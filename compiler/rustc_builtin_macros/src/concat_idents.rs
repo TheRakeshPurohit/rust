@@ -1,31 +1,30 @@
-use rustc_ast as ast;
 use rustc_ast::ptr::P;
 use rustc_ast::token::{self, Token};
 use rustc_ast::tokenstream::{TokenStream, TokenTree};
-use rustc_expand::base::{self, *};
-use rustc_span::symbol::{Ident, Symbol};
-use rustc_span::Span;
+use rustc_ast::{AttrVec, DUMMY_NODE_ID, Expr, ExprKind, Path, Ty, TyKind};
+use rustc_expand::base::{DummyResult, ExpandResult, ExtCtxt, MacResult, MacroExpanderResult};
+use rustc_span::{Ident, Span, Symbol};
 
 use crate::errors;
 
-pub fn expand_concat_idents<'cx>(
+pub(crate) fn expand_concat_idents<'cx>(
     cx: &'cx mut ExtCtxt<'_>,
     sp: Span,
     tts: TokenStream,
-) -> Box<dyn base::MacResult + 'cx> {
+) -> MacroExpanderResult<'cx> {
     if tts.is_empty() {
-        cx.emit_err(errors::ConcatIdentsMissingArgs { span: sp });
-        return DummyResult::any(sp);
+        let guar = cx.dcx().emit_err(errors::ConcatIdentsMissingArgs { span: sp });
+        return ExpandResult::Ready(DummyResult::any(sp, guar));
     }
 
     let mut res_str = String::new();
-    for (i, e) in tts.trees().enumerate() {
+    for (i, e) in tts.iter().enumerate() {
         if i & 1 == 1 {
             match e {
                 TokenTree::Token(Token { kind: token::Comma, .. }, _) => {}
                 _ => {
-                    cx.emit_err(errors::ConcatIdentsMissingComma { span: sp });
-                    return DummyResult::any(sp);
+                    let guar = cx.dcx().emit_err(errors::ConcatIdentsMissingComma { span: sp });
+                    return ExpandResult::Ready(DummyResult::any(sp, guar));
                 }
             }
         } else {
@@ -36,8 +35,8 @@ pub fn expand_concat_idents<'cx>(
                 }
             }
 
-            cx.emit_err(errors::ConcatIdentsIdentArgs { span: sp });
-            return DummyResult::any(sp);
+            let guar = cx.dcx().emit_err(errors::ConcatIdentsIdentArgs { span: sp });
+            return ExpandResult::Ready(DummyResult::any(sp, guar));
         }
     }
 
@@ -47,26 +46,26 @@ pub fn expand_concat_idents<'cx>(
         ident: Ident,
     }
 
-    impl base::MacResult for ConcatIdentsResult {
-        fn make_expr(self: Box<Self>) -> Option<P<ast::Expr>> {
-            Some(P(ast::Expr {
-                id: ast::DUMMY_NODE_ID,
-                kind: ast::ExprKind::Path(None, ast::Path::from_ident(self.ident)),
+    impl MacResult for ConcatIdentsResult {
+        fn make_expr(self: Box<Self>) -> Option<P<Expr>> {
+            Some(P(Expr {
+                id: DUMMY_NODE_ID,
+                kind: ExprKind::Path(None, Path::from_ident(self.ident)),
                 span: self.ident.span,
-                attrs: ast::AttrVec::new(),
+                attrs: AttrVec::new(),
                 tokens: None,
             }))
         }
 
-        fn make_ty(self: Box<Self>) -> Option<P<ast::Ty>> {
-            Some(P(ast::Ty {
-                id: ast::DUMMY_NODE_ID,
-                kind: ast::TyKind::Path(None, ast::Path::from_ident(self.ident)),
+        fn make_ty(self: Box<Self>) -> Option<P<Ty>> {
+            Some(P(Ty {
+                id: DUMMY_NODE_ID,
+                kind: TyKind::Path(None, Path::from_ident(self.ident)),
                 span: self.ident.span,
                 tokens: None,
             }))
         }
     }
 
-    Box::new(ConcatIdentsResult { ident })
+    ExpandResult::Ready(Box::new(ConcatIdentsResult { ident }))
 }

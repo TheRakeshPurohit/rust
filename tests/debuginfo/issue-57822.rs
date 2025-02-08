@@ -1,10 +1,8 @@
 // This test makes sure that the LLDB pretty printer does not throw an exception
-// for nested closures and generators.
+// for nested closures and coroutines.
 
-// Require a gdb that can read DW_TAG_variant_part.
-// min-gdb-version: 8.2
-
-// compile-flags:-g
+//@ min-lldb-version: 1800
+//@ compile-flags:-g
 
 // === GDB TESTS ===================================================================================
 
@@ -14,22 +12,22 @@
 // gdb-check:$1 = issue_57822::main::{closure_env#1} {f: issue_57822::main::{closure_env#0} {x: 1}}
 
 // gdb-command:print b
-// gdb-check:$2 = issue_57822::main::{generator_env#3}::Unresumed{a: issue_57822::main::{generator_env#2}::Unresumed{y: 2}}
+// gdb-check:$2 = issue_57822::main::{coroutine_env#3}::Unresumed{a: issue_57822::main::{coroutine_env#2}::Unresumed{y: 2}}
 
 // === LLDB TESTS ==================================================================================
 
 // lldb-command:run
 
-// lldb-command:print g
-// lldbg-check:(issue_57822::main::{closure_env#1}) $0 = { f = { x = 1 } }
+// lldb-command:v g
+// lldb-check:(issue_57822::main::{closure_env#1}) g = { f = { x = 1 } }
 
-// lldb-command:print b
-// lldbg-check:(issue_57822::main::{generator_env#3}) $1 =
+// lldb-command:v b
+// lldb-check:(issue_57822::main::{coroutine_env#3}) b = { value = { a = { value = { y = 2 } $discr$ = '\x02' } } $discr$ = '\x02' }
 
-#![feature(omit_gdb_pretty_printer_section, generators, generator_trait)]
+#![feature(omit_gdb_pretty_printer_section, coroutines, coroutine_trait, stmt_expr_attributes)]
 #![omit_gdb_pretty_printer_section]
 
-use std::ops::Generator;
+use std::ops::Coroutine;
 use std::pin::Pin;
 
 fn main() {
@@ -38,11 +36,13 @@ fn main() {
     let g = move || f();
 
     let mut y = 2;
-    let mut a = move || {
+    let mut a = #[coroutine]
+    move || {
         y += 1;
         yield;
     };
-    let mut b = move || {
+    let mut b = #[coroutine]
+    move || {
         Pin::new(&mut a).resume(());
         yield;
     };

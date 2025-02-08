@@ -1,4 +1,4 @@
-// aux-build:uninhabited.rs
+//@ aux-build:uninhabited.rs
 #![deny(unreachable_patterns)]
 #![feature(never_type)]
 
@@ -11,11 +11,11 @@ use uninhabited::PartiallyInhabitedVariants;
 
 pub fn foo(x: PartiallyInhabitedVariants) {
     match x {
-        PartiallyInhabitedVariants::Struct { .. } => {},
-        PartiallyInhabitedVariants::Struct { .. } => {},
+        PartiallyInhabitedVariants::Struct { .. } => {}
+        PartiallyInhabitedVariants::Struct { .. } => {}
         //~^ ERROR unreachable pattern
-        _ => {},
+        _ => {}
     }
 }
 
-fn main() { }
+fn main() {}

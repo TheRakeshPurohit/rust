@@ -1,5 +1,3 @@
-#![allow(unused)]
-#![allow(private_in_public)]
 #![deny(unnameable_types)]
 
 mod m {
@@ -11,20 +9,20 @@ mod m {
 
     pub trait PubTr { //~ ERROR trait `PubTr` is reachable but cannot be named
         const C : i32 = 0;
-        type Alias; //~ ERROR associated type `PubTr::Alias` is reachable but cannot be named
+        type Alias;
         fn f() {}
     }
 
     impl PubTr for PubStruct {
-        type Alias = i32; //~ ERROR associated type `<PubStruct as PubTr>::Alias` is reachable but cannot be named
+        type Alias = i32;
         fn f() {}
     }
 }
 
-pub trait Voldemort<T> {}
+pub trait Unnameable<T> {}
 
-impl Voldemort<m::PubStruct> for i32 {}
-impl Voldemort<m::PubE> for i32 {}
-impl<T> Voldemort<T> for u32 where T: m::PubTr {}
+impl Unnameable<m::PubStruct> for i32 {}
+impl Unnameable<m::PubE> for i32 {}
+impl<T> Unnameable<T> for u32 where T: m::PubTr {}
 
 fn main() {}

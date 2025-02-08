@@ -1,4 +1,4 @@
-// compile-flags: -Z mir-opt-level=3
+//@ compile-flags: -Z mir-opt-level=3
 
 #![feature(type_alias_impl_trait, rustc_attrs)]
 
@@ -13,10 +13,13 @@ trait MyFrom<T>: Sized {
     fn my_from(value: T) -> Result<Self, Self::Error>;
 }
 
-trait F {}
-impl F for () {}
-type DummyT<T> = impl F;
-fn _dummy_t<T>() -> DummyT<T> {}
+mod f {
+    pub trait F {}
+    impl F for () {}
+    pub type DummyT<T> = impl F;
+    fn _dummy_t<T>() -> DummyT<T> {}
+}
+use f::*;
 
 struct Phantom1<T>(PhantomData<T>);
 struct Phantom2<T>(PhantomData<T>);

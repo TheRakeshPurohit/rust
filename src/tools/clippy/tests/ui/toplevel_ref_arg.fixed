@@ -1,7 +1,6 @@
-//@run-rustfix
 //@aux-build:proc_macros.rs
 #![warn(clippy::toplevel_ref_arg)]
-#![allow(clippy::uninlined_format_args, unused)]
+#![allow(clippy::uninlined_format_args, unused, clippy::useless_vec)]
 
 extern crate proc_macros;
 use proc_macros::{external, inline_macros};
@@ -37,4 +36,6 @@ fn main() {
 
     // do not lint in external macro
     external!(let ref _y = 42;);
+
+    fn f(#[allow(clippy::toplevel_ref_arg)] ref x: i32) {}
 }

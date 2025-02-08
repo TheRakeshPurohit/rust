@@ -1,7 +1,6 @@
-// run-pass
-// pretty-expanded FIXME #23616
+//@ run-pass
 
-struct A(#[allow(unused_tuple_struct_fields)] bool);
+struct A(#[allow(dead_code)] bool);
 
 pub fn main() {
     let f = A;

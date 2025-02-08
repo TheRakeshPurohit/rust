@@ -1,31 +1,30 @@
 // Checks that we correctly codegen extern "C" functions returning structs.
 // See issues #52638 and #86163.
 
-// compile-flags: -O --target=sparc64-unknown-linux-gnu --crate-type=rlib
-// needs-llvm-components: sparc
+//@ compile-flags: -O --target=sparc64-unknown-linux-gnu --crate-type=rlib
+//@ needs-llvm-components: sparc
 #![feature(no_core, lang_items)]
 #![no_core]
 
-#[lang="sized"]
-trait Sized { }
-#[lang="freeze"]
-trait Freeze { }
-#[lang="copy"]
-trait Copy { }
+#[lang = "sized"]
+trait Sized {}
+#[lang = "freeze"]
+trait Freeze {}
+#[lang = "copy"]
+trait Copy {}
 
 #[repr(C)]
 pub struct Bool {
     b: bool,
 }
 
-// CHECK: define i64 @structbool()
+// CHECK: define{{.*}} i64 @structbool()
 // CHECK-NEXT: start:
 // CHECK-NEXT: ret i64 72057594037927936
 #[no_mangle]
 pub extern "C" fn structbool() -> Bool {
     Bool { b: true }
 }
-
 
 #[repr(C)]
 pub struct BoolFloat {
@@ -44,8 +43,7 @@ pub extern "C" fn structboolfloat() -> BoolFloat {
 // CHECK: define void @structboolfloat_input({ i32, float } inreg %0)
 // CHECK-NEXT: start:
 #[no_mangle]
-pub extern "C" fn structboolfloat_input(a: BoolFloat) { }
-
+pub extern "C" fn structboolfloat_input(a: BoolFloat) {}
 
 #[repr(C)]
 pub struct ShortDouble {
@@ -64,8 +62,7 @@ pub extern "C" fn structshortdouble() -> ShortDouble {
 // CHECK: define void @structshortdouble_input({ i64, double } %0)
 // CHECK-NEXT: start:
 #[no_mangle]
-pub extern "C" fn structshortdouble_input(a: ShortDouble) { }
-
+pub extern "C" fn structshortdouble_input(a: ShortDouble) {}
 
 #[repr(C)]
 pub struct FloatLongFloat {

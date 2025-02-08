@@ -1,6 +1,4 @@
-// check-pass
-
-#![feature(exclusive_range_pattern)]
+//@ check-pass
 
 #![allow(ellipsis_inclusive_range_patterns)]
 

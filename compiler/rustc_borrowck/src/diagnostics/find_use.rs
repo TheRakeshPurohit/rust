@@ -1,21 +1,16 @@
-#![deny(rustc::untranslatable_diagnostic)]
-#![deny(rustc::diagnostic_outside_of_impl)]
-
 use std::collections::VecDeque;
-use std::rc::Rc;
 
-use crate::{
-    def_use::{self, DefUse},
-    region_infer::{Cause, RegionInferenceContext},
-};
 use rustc_data_structures::fx::FxIndexSet;
 use rustc_middle::mir::visit::{MirVisitable, PlaceContext, Visitor};
 use rustc_middle::mir::{self, Body, Local, Location};
 use rustc_middle::ty::{RegionVid, TyCtxt};
 
+use crate::def_use::{self, DefUse};
+use crate::region_infer::{Cause, RegionInferenceContext};
+
 pub(crate) fn find<'tcx>(
     body: &Body<'tcx>,
-    regioncx: &Rc<RegionInferenceContext<'tcx>>,
+    regioncx: &RegionInferenceContext<'tcx>,
     tcx: TyCtxt<'tcx>,
     region_vid: RegionVid,
     start_point: Location,
@@ -25,15 +20,15 @@ pub(crate) fn find<'tcx>(
     uf.find()
 }
 
-struct UseFinder<'cx, 'tcx> {
-    body: &'cx Body<'tcx>,
-    regioncx: &'cx Rc<RegionInferenceContext<'tcx>>,
+struct UseFinder<'a, 'tcx> {
+    body: &'a Body<'tcx>,
+    regioncx: &'a RegionInferenceContext<'tcx>,
     tcx: TyCtxt<'tcx>,
     region_vid: RegionVid,
     start_point: Location,
 }
 
-impl<'cx, 'tcx> UseFinder<'cx, 'tcx> {
+impl<'a, 'tcx> UseFinder<'a, 'tcx> {
     fn find(&mut self) -> Option<Cause> {
         let mut queue = VecDeque::new();
         let mut visited = FxIndexSet::default();
@@ -97,8 +92,8 @@ impl<'cx, 'tcx> UseFinder<'cx, 'tcx> {
     }
 }
 
-struct DefUseVisitor<'cx, 'tcx> {
-    body: &'cx Body<'tcx>,
+struct DefUseVisitor<'a, 'tcx> {
+    body: &'a Body<'tcx>,
     tcx: TyCtxt<'tcx>,
     region_vid: RegionVid,
     def_use_result: Option<DefUseResult>,
@@ -110,7 +105,7 @@ enum DefUseResult {
     UseDrop { local: Local },
 }
 
-impl<'cx, 'tcx> Visitor<'tcx> for DefUseVisitor<'cx, 'tcx> {
+impl<'a, 'tcx> Visitor<'tcx> for DefUseVisitor<'a, 'tcx> {
     fn visit_local(&mut self, local: Local, context: PlaceContext, _: Location) {
         let local_ty = self.body.local_decls[local].ty;
 

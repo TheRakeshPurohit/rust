@@ -1,9 +1,15 @@
+//@ test-mir-pass: GVN
+//@ compile-flags: -Zmir-enable-passes=+InstSimplify-after-simplifycfg -Zdump-mir-exclude-alloc-bytes
 // EMIT_MIR_FOR_EACH_PANIC_STRATEGY
-// unit-test: ConstProp
-// compile-flags: -Zmir-enable-passes=+InstSimplify
 // EMIT_MIR_FOR_EACH_BIT_WIDTH
 
-// EMIT_MIR slice_len.main.ConstProp.diff
+// EMIT_MIR slice_len.main.GVN.diff
 fn main() {
-    (&[1u32, 2, 3] as &[u32])[1];
+    // CHECK-LABEL: fn main(
+    // CHECK: debug a => [[a:_.*]];
+    // CHECK: [[slice:_.*]] = copy {{.*}} as &[u32] (PointerCoercion(Unsize, AsCast));
+    // Disabled due to <https://github.com/rust-lang/rust/issues/130853>
+    // COM: CHECK: assert(const true,
+    // COM: CHECK: [[a]] = const 2_u32;
+    let a = (&[1u32, 2, 3] as &[u32])[1];
 }

@@ -271,13 +271,13 @@ fn fold_range_for_where_clause(where_clause: ast::WhereClause) -> Option<TextRan
 }
 
 fn fold_range_for_multiline_match_arm(match_arm: ast::MatchArm) -> Option<TextRange> {
-    if let Some(_) = fold_kind(match_arm.expr()?.syntax().kind()) {
-        return None;
+    if fold_kind(match_arm.expr()?.syntax().kind()).is_some() {
+        None
+    } else if match_arm.expr()?.syntax().text().contains_char('\n') {
+        Some(match_arm.expr()?.syntax().text_range())
+    } else {
+        None
     }
-    if match_arm.expr()?.syntax().text().contains_char('\n') {
-        return Some(match_arm.expr()?.syntax().text_range());
-    }
-    None
 }
 
 #[cfg(test)]
@@ -286,10 +286,10 @@ mod tests {
 
     use super::*;
 
-    fn check(ra_fixture: &str) {
+    fn check(#[rust_analyzer::rust_fixture] ra_fixture: &str) {
         let (ranges, text) = extract_tags(ra_fixture, "fold");
 
-        let parse = SourceFile::parse(&text);
+        let parse = SourceFile::parse(&text, span::Edition::CURRENT);
         let mut folds = folding_ranges(&parse.tree());
         folds.sort_by_key(|fold| (fold.range.start(), fold.range.end()));
 
@@ -494,7 +494,7 @@ fn main() <fold block>{
                         2,
                         3,
                     ]</fold>,
-                    strustS => <fold matcharm>StructS <fold block>{
+                    structS => <fold matcharm>StructS <fold block>{
                         a: 31,
                     }</fold></fold>,
                 }</fold>

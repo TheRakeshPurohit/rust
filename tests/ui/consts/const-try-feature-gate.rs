@@ -2,7 +2,8 @@
 
 const fn t() -> Option<()> {
     Some(())?;
-    //~^ error: `?` is not allowed in a `const fn`
+    //~^ ERROR `?` is not allowed
+    //~| ERROR `?` is not allowed
     None
 }
 

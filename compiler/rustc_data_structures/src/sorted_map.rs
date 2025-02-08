@@ -1,8 +1,11 @@
-use crate::stable_hasher::{HashStable, StableHasher, StableOrd};
 use std::borrow::Borrow;
 use std::fmt::Debug;
 use std::mem;
 use std::ops::{Bound, Index, IndexMut, RangeBounds};
+
+use rustc_macros::{Decodable_Generic, Encodable_Generic};
+
+use crate::stable_hasher::{HashStable, StableHasher, StableOrd};
 
 mod index_map;
 
@@ -16,7 +19,7 @@ pub use index_map::SortedIndexMultiMap;
 /// stores data in a more compact way. It also supports accessing contiguous
 /// ranges of elements as a slice, and slices of already sorted elements can be
 /// inserted efficiently.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Encodable, Decodable)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Encodable_Generic, Decodable_Generic)]
 pub struct SortedMap<K, V> {
     data: Vec<(K, V)>,
 }
@@ -49,12 +52,11 @@ impl<K: Ord, V> SortedMap<K, V> {
     }
 
     #[inline]
-    pub fn insert(&mut self, key: K, mut value: V) -> Option<V> {
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         match self.lookup_index_for(&key) {
             Ok(index) => {
                 let slot = unsafe { self.data.get_unchecked_mut(index) };
-                mem::swap(&mut slot.1, &mut value);
-                Some(value)
+                Some(mem::replace(&mut slot.1, value))
             }
             Err(index) => {
                 self.data.insert(index, (key, value));
@@ -125,13 +127,13 @@ impl<K: Ord, V> SortedMap<K, V> {
 
     /// Iterate over the keys, sorted
     #[inline]
-    pub fn keys(&self) -> impl Iterator<Item = &K> + ExactSizeIterator + DoubleEndedIterator {
+    pub fn keys(&self) -> impl ExactSizeIterator<Item = &K> + DoubleEndedIterator {
         self.data.iter().map(|(k, _)| k)
     }
 
     /// Iterate over values, sorted by key
     #[inline]
-    pub fn values(&self) -> impl Iterator<Item = &V> + ExactSizeIterator + DoubleEndedIterator {
+    pub fn values(&self) -> impl ExactSizeIterator<Item = &V> + DoubleEndedIterator {
         self.data.iter().map(|(_, v)| v)
     }
 
@@ -199,7 +201,7 @@ impl<K: Ord, V> SortedMap<K, V> {
                 if index == self.data.len() || elements.last().unwrap().0 < self.data[index].0 {
                     // We can copy the whole range without having to mix with
                     // existing elements.
-                    self.data.splice(index..index, elements.into_iter());
+                    self.data.splice(index..index, elements);
                     return;
                 }
 

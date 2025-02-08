@@ -1,6 +1,6 @@
-// edition:2018
-// aux-build:test-macros.rs
-// aux-build:derive-helper-shadowing.rs
+//@ edition:2018
+//@ proc-macro: test-macros.rs
+//@ proc-macro: derive-helper-shadowing.rs
 
 #[macro_use]
 extern crate test_macros;
@@ -23,7 +23,7 @@ macro_rules! gen_helper_use {
 struct S {
     #[empty_helper] // OK, no ambiguity, derive helpers have highest priority
     field: [u8; {
-        use empty_helper; //~ ERROR `empty_helper` is ambiguous
+        use empty_helper; // OK, no ambiguity, derive helpers have highest priority
 
         #[empty_helper] // OK, no ambiguity, derive helpers have highest priority
         struct U;

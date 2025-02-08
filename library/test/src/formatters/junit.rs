@@ -1,21 +1,20 @@
-use std::io::{self, prelude::Write};
+use std::io::prelude::Write;
+use std::io::{self};
 use std::time::Duration;
 
 use super::OutputFormatter;
-use crate::{
-    console::{ConsoleTestDiscoveryState, ConsoleTestState, OutputLocation},
-    test_result::TestResult,
-    time,
-    types::{TestDesc, TestType},
-};
+use crate::console::{ConsoleTestDiscoveryState, ConsoleTestState, OutputLocation};
+use crate::test_result::TestResult;
+use crate::time;
+use crate::types::{TestDesc, TestType};
 
-pub struct JunitFormatter<T> {
+pub(crate) struct JunitFormatter<T> {
     out: OutputLocation<T>,
     results: Vec<(TestDesc, TestResult, Duration, Vec<u8>)>,
 }
 
 impl<T: Write> JunitFormatter<T> {
-    pub fn new(out: OutputLocation<T>) -> Self {
+    pub(crate) fn new(out: OutputLocation<T>) -> Self {
         Self { out, results: Vec::new() }
     }
 
@@ -32,7 +31,7 @@ fn str_to_cdata(s: &str) -> String {
     let escaped_output = s.replace("]]>", "]]]]><![CDATA[>");
     let escaped_output = escaped_output.replace("<?", "<]]><![CDATA[?");
     // We also smuggle newlines as &#xa so as to keep all the output on one line
-    let escaped_output = escaped_output.replace("\n", "]]>&#xA;<![CDATA[");
+    let escaped_output = escaped_output.replace('\n', "]]>&#xA;<![CDATA[");
     // Prune empty CDATA blocks resulting from any escaping
     let escaped_output = escaped_output.replace("<![CDATA[]]>", "");
     format!("<![CDATA[{}]]>", escaped_output)

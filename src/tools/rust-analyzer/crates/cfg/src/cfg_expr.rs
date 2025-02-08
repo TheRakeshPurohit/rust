@@ -2,42 +2,20 @@
 //!
 //! See: <https://doc.rust-lang.org/reference/conditional-compilation.html#conditional-compilation>
 
-use std::{fmt, slice::Iter as SliceIter};
+use std::fmt;
 
-use tt::SmolStr;
+use intern::Symbol;
 
 /// A simple configuration value passed in from the outside.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CfgAtom {
     /// eg. `#[cfg(test)]`
-    Flag(SmolStr),
+    Flag(Symbol),
     /// eg. `#[cfg(target_os = "linux")]`
     ///
     /// Note that a key can have multiple values that are all considered "active" at the same time.
     /// For example, `#[cfg(target_feature = "sse")]` and `#[cfg(target_feature = "sse2")]`.
-    KeyValue { key: SmolStr, value: SmolStr },
-}
-
-impl CfgAtom {
-    /// Returns `true` when the atom comes from the target specification.
-    ///
-    /// If this returns `true`, then changing this atom requires changing the compilation target. If
-    /// it returns `false`, the atom might come from a build script or the build system.
-    pub fn is_target_defined(&self) -> bool {
-        match self {
-            CfgAtom::Flag(flag) => matches!(&**flag, "unix" | "windows"),
-            CfgAtom::KeyValue { key, value: _ } => matches!(
-                &**key,
-                "target_arch"
-                    | "target_os"
-                    | "target_env"
-                    | "target_family"
-                    | "target_endian"
-                    | "target_pointer_width"
-                    | "target_vendor" // NOTE: `target_feature` is left out since it can be configured via `-Ctarget-feature`
-            ),
-        }
-    }
+    KeyValue { key: Symbol, value: Symbol },
 }
 
 impl fmt::Display for CfgAtom {
@@ -54,8 +32,8 @@ impl fmt::Display for CfgAtom {
 pub enum CfgExpr {
     Invalid,
     Atom(CfgAtom),
-    All(Vec<CfgExpr>),
-    Any(Vec<CfgExpr>),
+    All(Box<[CfgExpr]>),
+    Any(Box<[CfgExpr]>),
     Not(Box<CfgExpr>),
 }
 
@@ -66,9 +44,11 @@ impl From<CfgAtom> for CfgExpr {
 }
 
 impl CfgExpr {
-    pub fn parse<S>(tt: &tt::Subtree<S>) -> CfgExpr {
-        next_cfg_expr(&mut tt.token_trees.iter()).unwrap_or(CfgExpr::Invalid)
+    #[cfg(feature = "tt")]
+    pub fn parse<S: Copy>(tt: &tt::TopSubtree<S>) -> CfgExpr {
+        next_cfg_expr(&mut tt.iter()).unwrap_or(CfgExpr::Invalid)
     }
+
     /// Fold the cfg by querying all basic `Atom` and `KeyValue` predicates.
     pub fn fold(&self, query: &dyn Fn(&CfgAtom) -> bool) -> Option<bool> {
         match self {
@@ -85,36 +65,37 @@ impl CfgExpr {
     }
 }
 
-fn next_cfg_expr<S>(it: &mut SliceIter<'_, tt::TokenTree<S>>) -> Option<CfgExpr> {
+#[cfg(feature = "tt")]
+fn next_cfg_expr<S: Copy>(it: &mut tt::iter::TtIter<'_, S>) -> Option<CfgExpr> {
+    use intern::sym;
+    use tt::iter::TtElement;
+
     let name = match it.next() {
         None => return None,
-        Some(tt::TokenTree::Leaf(tt::Leaf::Ident(ident))) => ident.text.clone(),
+        Some(TtElement::Leaf(tt::Leaf::Ident(ident))) => ident.sym.clone(),
         Some(_) => return Some(CfgExpr::Invalid),
     };
 
-    // Peek
-    let ret = match it.as_slice().first() {
-        Some(tt::TokenTree::Leaf(tt::Leaf::Punct(punct))) if punct.char == '=' => {
-            match it.as_slice().get(1) {
+    let ret = match it.peek() {
+        Some(TtElement::Leaf(tt::Leaf::Punct(punct))) if punct.char == '=' => {
+            match it.remaining().flat_tokens().get(1) {
                 Some(tt::TokenTree::Leaf(tt::Leaf::Literal(literal))) => {
                     it.next();
                     it.next();
-                    // FIXME: escape? raw string?
-                    let value =
-                        SmolStr::new(literal.text.trim_start_matches('"').trim_end_matches('"'));
-                    CfgAtom::KeyValue { key: name, value }.into()
+                    CfgAtom::KeyValue { key: name, value: literal.symbol.clone() }.into()
                 }
                 _ => return Some(CfgExpr::Invalid),
             }
         }
-        Some(tt::TokenTree::Subtree(subtree)) => {
+        Some(TtElement::Subtree(_, mut sub_it)) => {
             it.next();
-            let mut sub_it = subtree.token_trees.iter();
-            let mut subs = std::iter::from_fn(|| next_cfg_expr(&mut sub_it)).collect();
-            match name.as_str() {
-                "all" => CfgExpr::All(subs),
-                "any" => CfgExpr::Any(subs),
-                "not" => CfgExpr::Not(Box::new(subs.pop().unwrap_or(CfgExpr::Invalid))),
+            let mut subs = std::iter::from_fn(|| next_cfg_expr(&mut sub_it));
+            match name {
+                s if s == sym::all => CfgExpr::All(subs.collect()),
+                s if s == sym::any => CfgExpr::Any(subs.collect()),
+                s if s == sym::not => {
+                    CfgExpr::Not(Box::new(subs.next().unwrap_or(CfgExpr::Invalid)))
+                }
                 _ => CfgExpr::Invalid,
             }
         }
@@ -122,7 +103,7 @@ fn next_cfg_expr<S>(it: &mut SliceIter<'_, tt::TokenTree<S>>) -> Option<CfgExpr>
     };
 
     // Eat comma separator
-    if let Some(tt::TokenTree::Leaf(tt::Leaf::Punct(punct))) = it.as_slice().first() {
+    if let Some(TtElement::Leaf(tt::Leaf::Punct(punct))) = it.peek() {
         if punct.char == ',' {
             it.next();
         }
@@ -134,11 +115,11 @@ fn next_cfg_expr<S>(it: &mut SliceIter<'_, tt::TokenTree<S>>) -> Option<CfgExpr>
 impl arbitrary::Arbitrary<'_> for CfgAtom {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         if u.arbitrary()? {
-            Ok(CfgAtom::Flag(String::arbitrary(u)?.into()))
+            Ok(CfgAtom::Flag(Symbol::intern(<_>::arbitrary(u)?)))
         } else {
             Ok(CfgAtom::KeyValue {
-                key: String::arbitrary(u)?.into(),
-                value: String::arbitrary(u)?.into(),
+                key: Symbol::intern(<_>::arbitrary(u)?),
+                value: Symbol::intern(<_>::arbitrary(u)?),
             })
         }
     }

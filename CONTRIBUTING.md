@@ -12,10 +12,19 @@ Documentation for contributing to the compiler or tooling is located in the [Gui
 Development][rustc-dev-guide], commonly known as the [rustc-dev-guide]. Documentation for the
 standard library in the [Standard library developers Guide][std-dev-guide], commonly known as the [std-dev-guide].
 
+## Making changes to subtrees and submodules
+
+For submodules, changes need to be made against the repository corresponding the
+submodule, and not the main `rust-lang/rust` repository.
+
+For subtrees, prefer sending a PR against the subtree's repository if it does
+not need to be made against the main `rust-lang/rust` repostory (e.g. a
+rustc-dev-guide change that does not accompany a compiler change).
+
 ## About the [rustc-dev-guide]
 
 The [rustc-dev-guide] is meant to help document how rustc –the Rust compiler– works,
-as well as to help new contributors get involved in rustc development. It is recommend
+as well as to help new contributors get involved in rustc development. It is recommended
 to read and understand the [rustc-dev-guide] before making a contribution. This guide
 talks about the different bots in the Rust ecosystem, the Rust development tools,
 bootstrapping, the compiler architecture, source code representation, and more.

@@ -33,28 +33,28 @@
 //! fn baz() { foo(); }
 //! ```
 
-use crate::errors;
-use rustc_ast as ast;
+use std::env;
+use std::fs::{self, File};
+use std::io::Write;
+
 use rustc_data_structures::fx::FxIndexSet;
-use rustc_data_structures::graph::implementation::{Direction, NodeIndex, INCOMING, OUTGOING};
-use rustc_graphviz as dot;
-use rustc_hir as hir;
-use rustc_hir::def_id::{DefId, LocalDefId, CRATE_DEF_ID};
+use rustc_data_structures::graph::implementation::{Direction, INCOMING, NodeIndex, OUTGOING};
+use rustc_hir::def_id::{CRATE_DEF_ID, DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_middle::dep_graph::{
-    DepGraphQuery, DepKind, DepNode, DepNodeExt, DepNodeFilter, EdgeFilter,
+    DepGraphQuery, DepKind, DepNode, DepNodeExt, DepNodeFilter, EdgeFilter, dep_kinds,
 };
 use rustc_middle::hir::nested_filter;
 use rustc_middle::ty::TyCtxt;
-use rustc_span::symbol::{sym, Symbol};
-use rustc_span::Span;
+use rustc_middle::{bug, span_bug};
+use rustc_span::{Span, Symbol, sym};
+use tracing::debug;
+use {rustc_graphviz as dot, rustc_hir as hir};
 
-use std::env;
-use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use crate::errors;
 
 #[allow(missing_docs)]
-pub fn assert_dep_graph(tcx: TyCtxt<'_>) {
+pub(crate) fn assert_dep_graph(tcx: TyCtxt<'_>) {
     tcx.dep_graph.with_ignore(|| {
         if tcx.sess.opts.unstable_opts.dump_dep_graph {
             tcx.dep_graph.with_query(dump_graph);
@@ -67,7 +67,7 @@ pub fn assert_dep_graph(tcx: TyCtxt<'_>) {
         // if the `rustc_attrs` feature is not enabled, then the
         // attributes we are interested in cannot be present anyway, so
         // skip the walk.
-        if !tcx.features().rustc_attrs {
+        if !tcx.features().rustc_attrs() {
             return;
         }
 
@@ -105,7 +105,7 @@ struct IfThisChanged<'tcx> {
 }
 
 impl<'tcx> IfThisChanged<'tcx> {
-    fn argument(&self, attr: &ast::Attribute) -> Option<Symbol> {
+    fn argument(&self, attr: &hir::Attribute) -> Option<Symbol> {
         let mut value = None;
         for list_item in attr.meta_item_list().unwrap_or_default() {
             match list_item.ident() {
@@ -122,19 +122,21 @@ impl<'tcx> IfThisChanged<'tcx> {
 
     fn process_attrs(&mut self, def_id: LocalDefId) {
         let def_path_hash = self.tcx.def_path_hash(def_id.to_def_id());
-        let hir_id = self.tcx.hir().local_def_id_to_hir_id(def_id);
+        let hir_id = self.tcx.local_def_id_to_hir_id(def_id);
         let attrs = self.tcx.hir().attrs(hir_id);
         for attr in attrs {
             if attr.has_name(sym::rustc_if_this_changed) {
                 let dep_node_interned = self.argument(attr);
                 let dep_node = match dep_node_interned {
-                    None => {
-                        DepNode::from_def_path_hash(self.tcx, def_path_hash, DepKind::hir_owner)
-                    }
+                    None => DepNode::from_def_path_hash(
+                        self.tcx,
+                        def_path_hash,
+                        dep_kinds::opt_hir_owner_nodes,
+                    ),
                     Some(n) => {
                         match DepNode::from_label_string(self.tcx, n.as_str(), def_path_hash) {
                             Ok(n) => n,
-                            Err(()) => self.tcx.sess.emit_fatal(errors::UnrecognizedDepNode {
+                            Err(()) => self.tcx.dcx().emit_fatal(errors::UnrecognizedDepNode {
                                 span: attr.span,
                                 name: n,
                             }),
@@ -148,14 +150,14 @@ impl<'tcx> IfThisChanged<'tcx> {
                     Some(n) => {
                         match DepNode::from_label_string(self.tcx, n.as_str(), def_path_hash) {
                             Ok(n) => n,
-                            Err(()) => self.tcx.sess.emit_fatal(errors::UnrecognizedDepNode {
+                            Err(()) => self.tcx.dcx().emit_fatal(errors::UnrecognizedDepNode {
                                 span: attr.span,
                                 name: n,
                             }),
                         }
                     }
                     None => {
-                        self.tcx.sess.emit_fatal(errors::MissingDepNode { span: attr.span });
+                        self.tcx.dcx().emit_fatal(errors::MissingDepNode { span: attr.span });
                     }
                 };
                 self.then_this_would_need.push((
@@ -201,7 +203,7 @@ fn check_paths<'tcx>(tcx: TyCtxt<'tcx>, if_this_changed: &Sources, then_this_wou
     // Return early here so as not to construct the query, which is not cheap.
     if if_this_changed.is_empty() {
         for &(target_span, _, _, _) in then_this_would_need {
-            tcx.sess.emit_err(errors::MissingIfThisChanged { span: target_span });
+            tcx.dcx().emit_err(errors::MissingIfThisChanged { span: target_span });
         }
         return;
     }
@@ -210,13 +212,13 @@ fn check_paths<'tcx>(tcx: TyCtxt<'tcx>, if_this_changed: &Sources, then_this_wou
             let dependents = query.transitive_predecessors(source_dep_node);
             for &(target_span, ref target_pass, _, ref target_dep_node) in then_this_would_need {
                 if !dependents.contains(&target_dep_node) {
-                    tcx.sess.emit_err(errors::NoPath {
+                    tcx.dcx().emit_err(errors::NoPath {
                         span: target_span,
                         source: tcx.def_path_str(source_def_id),
                         target: *target_pass,
                     });
                 } else {
-                    tcx.sess.emit_err(errors::Ok { span: target_span });
+                    tcx.dcx().emit_err(errors::Ok { span: target_span });
                 }
             }
         }
@@ -231,26 +233,26 @@ fn dump_graph(query: &DepGraphQuery) {
             // Expect one of: "-> target", "source -> target", or "source ->".
             let edge_filter =
                 EdgeFilter::new(&string).unwrap_or_else(|e| bug!("invalid filter: {}", e));
-            let sources = node_set(&query, &edge_filter.source);
-            let targets = node_set(&query, &edge_filter.target);
-            filter_nodes(&query, &sources, &targets)
+            let sources = node_set(query, &edge_filter.source);
+            let targets = node_set(query, &edge_filter.target);
+            filter_nodes(query, &sources, &targets)
         }
         Err(_) => query.nodes().into_iter().map(|n| n.kind).collect(),
     };
-    let edges = filter_edges(&query, &nodes);
+    let edges = filter_edges(query, &nodes);
 
     {
         // dump a .txt file with just the edges:
-        let txt_path = format!("{}.txt", path);
-        let mut file = BufWriter::new(File::create(&txt_path).unwrap());
+        let txt_path = format!("{path}.txt");
+        let mut file = File::create_buffered(&txt_path).unwrap();
         for (source, target) in &edges {
-            write!(file, "{:?} -> {:?}\n", source, target).unwrap();
+            write!(file, "{source:?} -> {target:?}\n").unwrap();
         }
     }
 
     {
         // dump a .dot file in graphviz format:
-        let dot_path = format!("{}.dot", path);
+        let dot_path = format!("{path}.dot");
         let mut v = Vec::new();
         dot::render(&GraphvizDepGraph(nodes, edges), &mut v).unwrap();
         fs::write(dot_path, v).unwrap();
@@ -258,7 +260,7 @@ fn dump_graph(query: &DepGraphQuery) {
 }
 
 #[allow(missing_docs)]
-pub struct GraphvizDepGraph(FxIndexSet<DepKind>, Vec<(DepKind, DepKind)>);
+struct GraphvizDepGraph(FxIndexSet<DepKind>, Vec<(DepKind, DepKind)>);
 
 impl<'a> dot::GraphWalk<'a> for GraphvizDepGraph {
     type Node = DepKind;
@@ -285,7 +287,7 @@ impl<'a> dot::Labeller<'a> for GraphvizDepGraph {
         dot::Id::new("DependencyGraph").unwrap()
     }
     fn node_id(&self, n: &DepKind) -> dot::Id<'_> {
-        let s: String = format!("{:?}", n)
+        let s: String = format!("{n:?}")
             .chars()
             .map(|c| if c == '_' || c.is_alphanumeric() { c } else { '_' })
             .collect();
@@ -293,7 +295,7 @@ impl<'a> dot::Labeller<'a> for GraphvizDepGraph {
         dot::Id::new(s).unwrap()
     }
     fn node_label(&self, n: &DepKind) -> dot::LabelText<'_> {
-        dot::LabelText::label(format!("{:?}", n))
+        dot::LabelText::label(format!("{n:?}"))
     }
 }
 

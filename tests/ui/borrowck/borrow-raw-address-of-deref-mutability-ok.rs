@@ -1,6 +1,4 @@
-// check-pass
-
-#![feature(raw_ref_op)]
+//@ check-pass
 
 fn raw_reborrow() {
     let x = &0;

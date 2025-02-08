@@ -1,14 +1,13 @@
-use rustc_middle::mir;
-use rustc_middle::mir::NonDivergingIntrinsic;
+use rustc_middle::mir::{self, NonDivergingIntrinsic};
+use rustc_middle::span_bug;
+use tracing::instrument;
 
-use super::FunctionCx;
-use super::LocalRef;
-use crate::traits::BuilderMethods;
+use super::{FunctionCx, LocalRef};
 use crate::traits::*;
 
 impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     #[instrument(level = "debug", skip(self, bx))]
-    pub fn codegen_statement(&mut self, bx: &mut Bx, statement: &mir::Statement<'tcx>) {
+    pub(crate) fn codegen_statement(&mut self, bx: &mut Bx, statement: &mir::Statement<'tcx>) {
         self.set_debug_loc(bx, statement.source_info);
         match statement.kind {
             mir::StatementKind::Assign(box (ref place, ref rvalue)) => {
@@ -20,7 +19,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         }
                         LocalRef::PendingOperand => {
                             let operand = self.codegen_rvalue_operand(bx, rvalue);
-                            self.locals[index] = LocalRef::Operand(operand);
+                            self.overwrite_local(index, LocalRef::Operand(operand));
                             self.debug_introduce_local(bx, index);
                         }
                         LocalRef::Operand(op) => {
@@ -64,8 +63,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     cg_indirect_place.storage_dead(bx);
                 }
             }
-            mir::StatementKind::Coverage(box ref coverage) => {
-                self.codegen_coverage(bx, coverage.clone(), statement.source_info.scope);
+            mir::StatementKind::Coverage(ref kind) => {
+                self.codegen_coverage(bx, kind, statement.source_info.scope);
             }
             mir::StatementKind::Intrinsic(box NonDivergingIntrinsic::Assume(ref op)) => {
                 let op_val = self.codegen_operand(bx, op);
@@ -79,7 +78,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 let count = self.codegen_operand(bx, count).immediate();
                 let pointee_layout = dst_val
                     .layout
-                    .pointee_info_at(bx, rustc_target::abi::Size::ZERO)
+                    .pointee_info_at(bx, rustc_abi::Size::ZERO)
                     .expect("Expected pointer");
                 let bytes = bx.mul(count, bx.const_usize(pointee_layout.size.bytes()));
 
@@ -93,6 +92,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             | mir::StatementKind::AscribeUserType(..)
             | mir::StatementKind::ConstEvalCounter
             | mir::StatementKind::PlaceMention(..)
+            | mir::StatementKind::BackwardIncompatibleDropHint { .. }
             | mir::StatementKind::Nop => {}
         }
     }
